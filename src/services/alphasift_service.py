@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from contextvars import ContextVar
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
@@ -36,7 +37,7 @@ ALLOWED_ALPHASIFT_INSTALL_SPECS = frozenset({DEFAULT_ALPHASIFT_INSTALL_SPEC})
 _ALPHASIFT_INSTALL_LOCK = threading.RLock()
 ALPHASIFT_MANAGED_LITELLM_PROVIDERS = frozenset({"gemini", "vertex_ai", "anthropic", "openai", "deepseek"})
 _ALPHASIFT_RUNTIME_ENV_LOCK = threading.RLock()
-DSA_ENRICHMENT_MAX_CANDIDATES = 3
+DSA_ENRICHMENT_MAX_CANDIDATES = 15
 DSA_PRE_RANK_CONTEXT_MAX_CANDIDATES = 3
 DSA_ALPHASIFT_LLM_CANDIDATE_MULTIPLIER = 2
 DSA_ALPHASIFT_LLM_MAX_CANDIDATES = 12
@@ -68,6 +69,10 @@ DSA_ALPHASIFT_HOTSPOT_CONNECTIVITY_ERROR_MARKERS = (
     "protocolerror",
     "incompleteread",
 )
+
+# sentinel for unset variable used in hotspots() branching
+_NOT_SET: Any = object()
+
 _DSA_FETCHER_MANAGER_LOCK = threading.RLock()
 _DSA_FETCHER_MANAGER: Any = None
 _FUNDAMENTAL_BLOCKS = ("valuation", "growth", "earnings", "institution", "capital_flow", "boards")
@@ -592,6 +597,46 @@ def _hotspot_rows_are_thin(rows: List[Any], *, top: int) -> bool:
     return rich_count == 0 or metric_count == 0
 
 
+def _probe_constituent_api(provider: Any) -> bool:
+    """快速检测成分股接口（ak.stock_board_concept_cons_em）是否可用。
+
+    使用一个常见板块名做快速检测（3s 超时），失败则返回 False，
+    调用方应跳过 discover_hotspots 的慢路径。
+    """
+    import akshare as ak
+    import threading
+    import concurrent.futures
+
+    probe_topic = "汽车零部件"
+    probe_timeout = 3.0
+
+    def _do_probe() -> bool:
+        try:
+            df = ak.stock_board_concept_cons_em(symbol=probe_topic)
+            return df is not None and (not hasattr(df, "empty") or not df.empty)
+        except Exception:
+            return False
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(_do_probe)
+        try:
+            return fut.result(timeout=probe_timeout)
+        except concurrent.futures.TimeoutError:
+            return False
+        except Exception:
+            return False
+
+
+def _build_dsa_fast_hotspots(provider_arg: Any, top_count: int) -> List[Dict[str, Any]]:
+    """使用 DSA provider 快速热点路径（跳过 alphasift 内部成分股拉取）。"""
+    try:
+        direct = provider_arg.hotspot_rows(top=top_count)
+    except Exception:
+        return []
+    enriched = _enrich_hotspot_rows_from_provider(direct, provider_arg, top=top_count)
+    return enriched
+
+
 def _snake_to_camel(value: str) -> str:
     parts = value.split("_")
     return parts[0] + "".join(part[:1].upper() + part[1:] for part in parts[1:])
@@ -884,89 +929,107 @@ class AlphaSiftService:
             "discover_hotspots() is not callable.",
         )
 
-        try:
-            with _alphasift_runtime_env(self.config):
-                raw = discover_hotspots(
-                    provider=provider_arg,
-                    top=top_count,
-                    history_path=_alphasift_hotspot_history_path(),
-                    fallback_cache_path=_alphasift_hotspot_cache_path(),
-                )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            cached = _load_alphasift_hotspot_cache(provider=provider_name, top=top_count)
-            if cached is not None:
-                errors = list(cached.get("source_errors") or [])
-                errors.append(f"live refresh failed: {exc}")
-                cached["source_errors"] = errors
-                cached["fallback_used"] = True
-                cached["cache_used"] = True
-                return _attach_cached_hotspot_details(cached, provider=provider_name, top=top_count) if include_details else cached
-            if not _should_return_eastmoney_hotspot_unavailable(provider_arg, exc):
-                diagnostics = _log_unexpected_alphasift_exception("hotspot_refresh", exc)
-                raise HTTPException(
-                    status_code=424,
-                    detail={
-                        "error": "alphasift_hotspot_refresh_failed",
-                        "message": f"AlphaSift hotspot refresh failed: {exc}",
-                        "diagnostics": diagnostics,
-                    },
-                ) from exc
-            logger.warning("AlphaSift hotspot live refresh failed without cache: %s", exc)
-            return _empty_alphasift_hotspot_payload(
-                provider=provider_name,
-                provider_used=type(provider_arg).__name__,
-                source_errors=[DSA_ALPHASIFT_HOTSPOT_UNAVAILABLE_CODE],
-                message=DSA_ALPHASIFT_HOTSPOT_UNAVAILABLE_MESSAGE,
-            )
+        # 如果使用 DSA EastMoney provider，优先走快速热点路径（~0.5s），
+        # 跳过 discover_hotspots 内部 30s+ 的串行成分股拉取。
+        # discover_hotspots 仅作为 fallback 在 DSA 快速路径失败时使用。
+        use_dsa_fast_path = isinstance(provider_arg, DsaEastMoneyHotspotProvider)
 
-        items = _remove_non_finite_json_values(_to_plain(raw))
-        if not isinstance(items, list):
-            items = []
-        selected = items[:top_count]
-        source_errors = _list_text_values(getattr(raw, "source_errors", []))
-        direct_hotspot_fallback_used = False
-        if isinstance(provider_arg, DsaEastMoneyHotspotProvider) and _hotspot_rows_are_thin(selected, top=top_count):
+        raw: Any = _NOT_SET
+        if not use_dsa_fast_path:
             try:
-                direct_hotspots = provider_arg.hotspot_rows(top=top_count)
+                with _alphasift_runtime_env(self.config):
+                    raw = discover_hotspots(
+                        provider=provider_arg,
+                        top=top_count,
+                        history_path=_alphasift_hotspot_history_path(),
+                        fallback_cache_path=_alphasift_hotspot_cache_path(),
+                    )
+            except HTTPException:
+                raise
             except Exception as exc:
-                logger.warning("AlphaSift DSA direct hotspot fallback failed: %s", exc)
-                direct_hotspots = []
-                source_errors.append(f"dsa_direct_hotspots_failed: {exc}")
-            if len(direct_hotspots) > len(selected):
-                selected = direct_hotspots
-                direct_hotspot_fallback_used = True
-                source_errors.append("AlphaSift hotspot rows were thin; used DSA EastMoney board-change rows.")
-        if isinstance(provider_arg, DsaEastMoneyHotspotProvider) and selected:
-            selected = _enrich_hotspot_rows_from_provider(selected, provider_arg, top=top_count)
-        if not selected and source_errors:
-            cached = _load_alphasift_hotspot_cache(provider=provider_name, top=top_count)
-            if cached is not None:
-                errors = list(cached.get("source_errors") or [])
-                errors.extend(source_errors)
-                cached["source_errors"] = errors
-                cached["fallback_used"] = True
-                cached["cache_used"] = True
-                return _attach_cached_hotspot_details(cached, provider=provider_name, top=top_count) if include_details else cached
-            if _has_degraded_eastmoney_hotspot_failure(provider_arg, source_errors):
+                cached = _load_alphasift_hotspot_cache(provider=provider_name, top=top_count)
+                if cached is not None:
+                    errors = list(cached.get("source_errors") or [])
+                    errors.append(f"live refresh failed: {exc}")
+                    cached["source_errors"] = errors
+                    cached["fallback_used"] = True
+                    cached["cache_used"] = True
+                    return _attach_cached_hotspot_details(cached, provider=provider_name, top=top_count) if include_details else cached
+                if not _should_return_eastmoney_hotspot_unavailable(provider_arg, exc):
+                    diagnostics = _log_unexpected_alphasift_exception("hotspot_refresh", exc)
+                    raise HTTPException(
+                        status_code=424,
+                        detail={
+                            "error": "alphasift_hotspot_refresh_failed",
+                            "message": f"AlphaSift hotspot refresh failed: {exc}",
+                            "diagnostics": diagnostics,
+                        },
+                    ) from exc
+                logger.warning("AlphaSift hotspot live refresh failed without cache: %s", exc)
                 return _empty_alphasift_hotspot_payload(
                     provider=provider_name,
-                    provider_used=str(getattr(raw, "provider_used", "") or type(provider_arg).__name__),
+                    provider_used=type(provider_arg).__name__,
                     source_errors=[DSA_ALPHASIFT_HOTSPOT_UNAVAILABLE_CODE],
                     message=DSA_ALPHASIFT_HOTSPOT_UNAVAILABLE_MESSAGE,
                 )
 
+            items = _remove_non_finite_json_values(_to_plain(raw))
+            if not isinstance(items, list):
+                items = []
+            selected = items[:top_count]
+            source_errors = _list_text_values(getattr(raw, "source_errors", []))
+            direct_hotspot_fallback_used = False
+            if isinstance(provider_arg, DsaEastMoneyHotspotProvider) and _hotspot_rows_are_thin(selected, top=top_count):
+                try:
+                    direct_hotspots = provider_arg.hotspot_rows(top=top_count)
+                except Exception as exc:
+                    logger.warning("AlphaSift DSA direct hotspot fallback failed: %s", exc)
+                    direct_hotspots = []
+                    source_errors.append(f"dsa_direct_hotspots_failed: {exc}")
+                if len(direct_hotspots) > len(selected):
+                    selected = direct_hotspots
+                    direct_hotspot_fallback_used = True
+                    source_errors.append("AlphaSift hotspot rows were thin; used DSA EastMoney board-change rows.")
+            if isinstance(provider_arg, DsaEastMoneyHotspotProvider) and selected:
+                selected = _enrich_hotspot_rows_from_provider(selected, provider_arg, top=top_count)
+            if not selected and source_errors:
+                cached = _load_alphasift_hotspot_cache(provider=provider_name, top=top_count)
+                if cached is not None:
+                    errors = list(cached.get("source_errors") or [])
+                    errors.extend(source_errors)
+                    cached["source_errors"] = errors
+                    cached["fallback_used"] = True
+                    cached["cache_used"] = True
+                    return _attach_cached_hotspot_details(cached, provider=provider_name, top=top_count) if include_details else cached
+                if _has_degraded_eastmoney_hotspot_failure(provider_arg, source_errors):
+                    return _empty_alphasift_hotspot_payload(
+                        provider=provider_name,
+                        provider_used=str(getattr(raw, "provider_used", "") or type(provider_arg).__name__),
+                        source_errors=[DSA_ALPHASIFT_HOTSPOT_UNAVAILABLE_CODE],
+                        message=DSA_ALPHASIFT_HOTSPOT_UNAVAILABLE_MESSAGE,
+                    )
+        else:
+            # DSA 快速热点路径（~0.5s）：使用 EastMoney board-change 接口
+            # 跳过 discover_hotspots 内部 30s+ 串行成分股拉取
+            selected = _build_dsa_fast_hotspots(provider_arg, top_count)
+            source_errors = []
+            direct_hotspot_fallback_used = True
+
+        raw_provider_used = str(getattr(raw, "provider_used", "")) if raw is not _NOT_SET else ""
+        raw_fallback_used = bool(getattr(raw, "fallback_used", False)) if raw is not _NOT_SET else False
+        raw_stale = bool(getattr(raw, "stale", False)) if raw is not _NOT_SET else False
+        raw_stale_age = getattr(raw, "stale_age_hours", None) if raw is not _NOT_SET else None
+
         payload = {
             "enabled": True,
             "provider": provider_name,
-            "provider_used": "dsa_eastmoney_board_change" if direct_hotspot_fallback_used else str(getattr(raw, "provider_used", "")),
-            "fallback_used": direct_hotspot_fallback_used or bool(getattr(raw, "fallback_used", False)),
+            "provider_used": "dsa_eastmoney_board_change" if direct_hotspot_fallback_used else raw_provider_used,
+            "fallback_used": direct_hotspot_fallback_used or raw_fallback_used,
             "cache_used": False,
             "cached_at": None,
             "source_errors": source_errors,
-            "stale": bool(getattr(raw, "stale", False)),
-            "stale_age_hours": getattr(raw, "stale_age_hours", None),
+            "stale": raw_stale,
+            "stale_age_hours": raw_stale_age,
             "hotspots": selected,
             "hotspot_count": len(selected),
         }
@@ -1087,7 +1150,15 @@ class AlphaSiftService:
         _write_alphasift_hotspot_detail_cache(provider=provider_name, topic=topic_text, payload=cleaned)
         return cleaned
 
-    def screen(self, *, strategy: str, market: str, max_results: int) -> Dict[str, Any]:
+    def screen(
+        self,
+        *,
+        strategy: str,
+        market: str,
+        max_results: int,
+        daily_enrich_max_candidates: int | None = None,
+        explain_filters: bool = False,
+    ) -> Dict[str, Any]:
         _ensure_alphasift_enabled(self.config)
         _ensure_alphasift_available_for_use()
         _ensure_supported_market(market)
@@ -1096,7 +1167,15 @@ class AlphaSiftService:
         adapter = _get_dsa_adapter()
         screen = _get_adapter_callable(adapter, "screen", "screen() 不可调用。")
         try:
-            raw = _call_alphasift_screen(screen, strategy, market, max_results, self.config)
+            raw = _call_alphasift_screen(
+                screen,
+                strategy,
+                market,
+                max_results,
+                self.config,
+                daily_enrich_max_candidates=daily_enrich_max_candidates,
+                explain_filters=explain_filters,
+            )
         except ValueError as exc:
             raise HTTPException(
                 status_code=400,
@@ -1765,7 +1844,16 @@ def _ensure_supported_strategy(strategy: str) -> None:
     # 策略由适配层进行最终校验，因此在列表外仍保持透传。
 
 
-def _call_alphasift_screen(screen: Any, strategy: str, market: str, max_results: int, config: Config) -> Any:
+def _call_alphasift_screen(
+    screen: Any,
+    strategy: str,
+    market: str,
+    max_results: int,
+    config: Config,
+    *,
+    daily_enrich_max_candidates: int | None = None,
+    explain_filters: bool = False,
+) -> Any:
     signature = inspect.signature(screen)
     params = signature.parameters
     supports_var_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in params.values())
@@ -1780,6 +1868,7 @@ def _call_alphasift_screen(screen: Any, strategy: str, market: str, max_results:
     supports_max_output = "max_output" in params or supports_var_kwargs
     supports_use_llm = "use_llm" in params or supports_var_kwargs
     supports_context = "context" in params or supports_var_kwargs
+    supports_explain_filters = "explain_filters" in params or supports_var_kwargs
 
     kwargs: Dict[str, Any] = {"market": market}
     if supports_max_results:
@@ -1793,9 +1882,15 @@ def _call_alphasift_screen(screen: Any, strategy: str, market: str, max_results:
         kwargs["use_llm"] = True
     if supports_context:
         kwargs["context"] = _build_alphasift_context(config, max_results=max_results)
+    if supports_explain_filters:
+        kwargs["explain_filters"] = explain_filters
 
     with (
-        _alphasift_runtime_env(config, max_results=max_results),
+        _alphasift_runtime_env(
+            config,
+            max_results=max_results,
+            daily_enrich_max_candidates=daily_enrich_max_candidates,
+        ),
         _alphasift_dsa_daily_history_provider(),
         _alphasift_litellm_headers(config),
     ):
@@ -1821,8 +1916,17 @@ def _call_alphasift_screen(screen: Any, strategy: str, market: str, max_results:
 
 
 @contextmanager
-def _alphasift_runtime_env(config: Config, *, max_results: Optional[int] = None) -> Iterator[None]:
-    updates = _build_alphasift_runtime_env(config, max_results=max_results)
+def _alphasift_runtime_env(
+    config: Config,
+    *,
+    max_results: Optional[int] = None,
+    daily_enrich_max_candidates: int | None = None,
+) -> Iterator[None]:
+    updates = _build_alphasift_runtime_env(
+        config,
+        max_results=max_results,
+        daily_enrich_max_candidates=daily_enrich_max_candidates,
+    )
     if not updates:
         yield
         return
@@ -1860,7 +1964,11 @@ def _alphasift_dsa_daily_history_provider() -> Iterator[None]:
         lookback_days: int = 120,
         source: str = "akshare",
         retries: int = 2,
+        cache_dir: Any = None,
+        cache_ttl_seconds: Any = None,
+        **__unused: Any,
     ) -> Any:
+        fallback_reason: Optional[str] = None
         try:
             dsa_df, dsa_source = get_dsa_daily_history(code, lookback_days=lookback_days)
             normalized = _normalize_dsa_daily_history(dsa_df)
@@ -1868,13 +1976,48 @@ def _alphasift_dsa_daily_history_provider() -> Iterator[None]:
                 normalized.attrs["source"] = f"dsa:{dsa_source}"
                 return normalized
         except Exception as exc:
+            fallback_reason = str(exc)
             logger.warning(
                 "AlphaSift DSA daily history fetch failed for %s; falling back to AlphaSift source %s: %s",
                 code,
                 source,
                 exc,
             )
-        return original_fetch(code, lookback_days=lookback_days, source=source, retries=retries)
+        try:
+            result = original_fetch(
+                code,
+                lookback_days=lookback_days,
+                source=source,
+                retries=retries,
+                cache_dir=cache_dir,
+                cache_ttl_seconds=cache_ttl_seconds,
+            )
+        except Exception as _fetch_exc:
+            logger.debug(
+                "AlphaSift DSA fallback original_fetch also failed for %s: %s",
+                code, _fetch_exc,
+            )
+            raise
+        # Apply indicator recalculation on the fallback result so that
+        # missing columns like volume_ratio / ma5 / ma10 / ma20 are filled
+        # automatically — the AlphaSift native fetchers do not always compute
+        # them (e.g. sina source may lack volume_ratio).
+        try:
+            if result is not None and not getattr(result, "empty", True):
+                _recalc_dsa_daily_indicators(result)
+        except Exception as _rec_err:
+            logger.debug(
+                "AlphaSift DSA fallback indicator recalculation failed for %s: %s",
+                code, _rec_err,
+            )
+        if fallback_reason is not None and hasattr(result, "attrs"):
+            try:
+                existing = getattr(result.attrs, "get", lambda *a: "")("dsa_fallback_reason", "")
+                if not existing:
+                    result.attrs["dsa_fallback_reason"] = fallback_reason
+            except Exception:
+                pass
+        return result
 
     with _ALPHASIFT_RUNTIME_ENV_LOCK:
         setattr(daily_module, "fetch_daily_history", fetch_daily_history_with_dsa)
@@ -1891,7 +2034,12 @@ def _resolve_alphasift_snapshot_source_priority(config: Config) -> str:
     return DSA_ALPHASIFT_SNAPSHOT_SOURCE_PRIORITY
 
 
-def _build_alphasift_runtime_env(config: Config, *, max_results: Optional[int] = None) -> Dict[str, str]:
+def _build_alphasift_runtime_env(
+    config: Config,
+    *,
+    max_results: Optional[int] = None,
+    daily_enrich_max_candidates: int | None = None,
+) -> Dict[str, str]:
     # Bridge runtime only: only inject resolved DSA values for this request/process scope.
     # User .env/config is never rewritten here; unset channels/models are not silently migrated.
     # 与 LiteLLM provider/model、openai-compatible `api_base` 与 headers 注入语义保持一致，
@@ -1959,6 +2107,8 @@ def _build_alphasift_runtime_env(config: Config, *, max_results: Optional[int] =
     put_default("DAILY_SOURCE", "auto")
     put_default("DAILY_FETCH_RETRIES", str(DSA_ALPHASIFT_DAILY_FETCH_RETRIES))
     put_default("DAILY_FETCH_MAX_WORKERS", "1")
+    if daily_enrich_max_candidates is not None:
+        put("DAILY_ENRICH_MAX_CANDIDATES", str(daily_enrich_max_candidates))
     put("LLM_CANDIDATE_CONTEXT_ENABLED", "false")
     put_default("LLM_CANDIDATE_CONTEXT_PROVIDERS", DSA_ALPHASIFT_CANDIDATE_CONTEXT_PROVIDERS)
     put_default("LLM_CANDIDATE_MULTIPLIER", str(DSA_ALPHASIFT_LLM_CANDIDATE_MULTIPLIER))
@@ -2097,6 +2247,54 @@ class DsaEastMoneyHotspotProvider:
         self._request_lock = threading.RLock()
         self._last_request_ts = 0.0
         self._min_request_interval = 0.25
+        self._prefetch_session: Any = None
+
+    def _get_prefetch_session(self) -> Any:
+        import requests
+
+        if self._prefetch_session is None:
+            self._prefetch_session = requests.Session()
+        return self._prefetch_session
+
+    def prefetch_constituents(self, topics: List[str], *, max_workers: int = 8) -> None:
+        """并发预热热点成分股缓存，避免 discover_hotspots 内逐个串行拉取。
+
+        使用 DSA provider 自身的 _fetch_eastmoney_constituents（push2 API），
+        存入 _constituent_cache，后续 stock_board_concept_cons_em 调用时直接命中缓存。
+        """
+        if not topics:
+            return
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        cache_hits = 0
+        uncached: List[str] = []
+        for topic in topics:
+            if self._get_constituent_cache("concept", topic) is not None:
+                cache_hits += 1
+            else:
+                uncached.append(topic)
+
+        if not uncached:
+            return
+
+        logger.info(
+            "AlphaSift prefetching constituents for %d/%d topics (cache_hits=%d)",
+            len(uncached), len(topics), cache_hits,
+        )
+
+        def _fetch_one(topic: str) -> Tuple[str, Any]:
+            try:
+                df = self._fetch_eastmoney_constituents(topic, source="concept")
+            except Exception:
+                df = None
+            return topic, df
+
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_fetch_one, t): t for t in uncached}
+            for f in as_completed(futures):
+                topic, df = f.result()
+                if df is not None and (not hasattr(df, "empty") or not df.empty):
+                    self._set_constituent_cache("concept", topic, df)
 
     def _eastmoney_get_once(self, url: str, **kwargs: Any) -> Any:
         with self._request_lock:
@@ -3182,6 +3380,42 @@ def get_dsa_daily_history(stock_code: str, *, lookback_days: int = 120) -> Tuple
     return load_history_df(normalized_code, days=days)
 
 
+def _recalc_dsa_daily_indicators(df: "pd.DataFrame") -> None:
+    """Recalculate technical indicators that may be missing after normalization.
+
+    Fills in ``volume_ratio``, ``ma5``, ``ma10``, ``ma20``, and ``pct_chg``
+    from ``close`` and ``volume`` when the upstream data source didn't provide
+    them.  No-op when those columns already exist.
+    """
+    import pandas as _pd
+
+    if df is None or df.empty:
+        return
+    close = df.get("close")
+    volume = df.get("volume")
+    if close is None or volume is None:
+        return
+
+    # Moving averages
+    if "ma5" not in df.columns:
+        df["ma5"] = close.rolling(window=5, min_periods=1).mean().round(2)
+    if "ma10" not in df.columns:
+        df["ma10"] = close.rolling(window=10, min_periods=1).mean().round(2)
+    if "ma20" not in df.columns:
+        df["ma20"] = close.rolling(window=20, min_periods=1).mean().round(2)
+
+    # Volume ratio: today's volume / 5-day average volume (shift 1)
+    if "volume_ratio" not in df.columns:
+        avg_vol_5 = volume.rolling(window=5, min_periods=1).mean()
+        df["volume_ratio"] = (volume / avg_vol_5.shift(1)).fillna(1.0).round(2)
+
+    # pct_chg: day-over-day percentage change
+    if "pct_chg" not in df.columns:
+        prev_close = close.shift(1)
+        df["pct_chg"] = ((close - prev_close) / prev_close.replace(0, _pd.NA) * 100).round(2)
+        df["pct_chg"] = df["pct_chg"].fillna(0.0)
+
+
 def _normalize_dsa_daily_history(raw_df: Any) -> Any:
     if raw_df is None:
         return None
@@ -3200,6 +3434,11 @@ def _normalize_dsa_daily_history(raw_df: Any) -> Any:
         "close": ("close", "收盘", "price"),
         "volume": ("volume", "vol", "成交量"),
         "amount": ("amount", "成交额"),
+        "pct_chg": ("pct_chg", "pct_change", "change_pct", "涨跌幅"),
+        "volume_ratio": ("volume_ratio", "量比"),
+        "ma5": ("ma5", "ma_5"),
+        "ma10": ("ma10", "ma_10"),
+        "ma20": ("ma20", "ma_20"),
     }
     normalized = pd.DataFrame(index=df.index)
     for target, candidates in aliases.items():
@@ -3222,6 +3461,10 @@ def _normalize_dsa_daily_history(raw_df: Any) -> Any:
         if column in normalized.columns:
             normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
     normalized = normalized.dropna(subset=["close"])
+
+    # --- Recalculate any indicators that are still missing after aliasing ---
+    _recalc_dsa_daily_indicators(normalized)
+
     return normalized.reset_index(drop=True)
 
 
@@ -3299,14 +3542,142 @@ def get_dsa_candidate_context(
     return context.get("dsa_context", {})
 
 
+def _batch_fetch_industry(candidates: List[Dict[str, Any]]) -> Dict[str, str]:
+    """批量拉取候选股票的所属行业（东方财富 f127: 所处行业）。
+
+    只查询 industry 字段为空的候选，避免重复拉取。
+    使用 efinance 的 get_base_info 批量接口，单次 12 并发请求远低于
+    push2.eastmoney.com 的频控阈值。
+    """
+    codes_to_fetch = [
+        _env_text(c.get("code", ""))
+        for c in candidates
+        if _env_text(c.get("code", "")) and not (_env_text(c.get("industry", "")))
+    ]
+    if not codes_to_fetch:
+        return {}
+
+    # efinance get_base_info 内部无超时，使用线程池兜底防止无限挂起
+    _ef_base_timeout = int(os.environ.get("EFINANCE_CALL_TIMEOUT", "30") or "30")
+
+    try:
+        import efinance as ef
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = executor.submit(ef.stock.get_base_info, codes_to_fetch)
+            df = future.result(timeout=_ef_base_timeout)
+        except FuturesTimeoutError:
+            logger.warning(
+                "batch_fetch_industry 超时（%ds），codes=%s",
+                _ef_base_timeout, codes_to_fetch[:5],
+            )
+            return {}
+        finally:
+            executor.shutdown(wait=False)
+
+        if df is None or (hasattr(df, "empty") and df.empty):
+            logger.debug("batch_fetch_industry 返回空 DataFrame，codes=%s", codes_to_fetch[:5])
+            return {}
+
+        result: Dict[str, str] = {}
+        for _, row in df.iterrows():
+            code = str(row.get("股票代码", "")).strip()
+            industry = str(row.get("所处行业", "")).strip()
+            # 标准化股票代码：去掉 .SZ/.SH 等后缀以便匹配
+            code_normalized = code.split(".")[0] if "." in code else code
+            if code_normalized and industry:
+                result[code_normalized] = industry
+        logger.debug("batch_fetch_industry 成功获取 %d 个行业数据", len(result))
+        return result
+    except Exception as exc:
+        logger.warning(
+            "batch_fetch_industry 失败: %s，codes=%s",
+            exc, codes_to_fetch[:5],
+        )
+        return {}
+
+
+def _batch_fetch_board_sector(candidates: List[Dict[str, Any]]) -> Dict[str, str]:
+    """LLM 降级时，用 efinance get_belong_board 并发补全板块名称。
+
+    只查询 llm_sector 字段为空的候选，取首个（最细粒度）板块名。
+    """
+    codes_to_fetch = [
+        _env_text(c.get("code", ""))
+        for c in candidates
+        if _env_text(c.get("code", "")) and not (_env_text(c.get("llm_sector", "")))
+    ]
+    if not codes_to_fetch:
+        return {}
+
+    _ef_board_timeout = int(os.environ.get("EFINANCE_CALL_TIMEOUT", "30") or "30")
+
+    def _fetch_one(code: str):
+        import efinance as ef
+
+        try:
+            executor = ThreadPoolExecutor(max_workers=1)
+            try:
+                future = executor.submit(ef.stock.get_belong_board, code)
+                df = future.result(timeout=_ef_board_timeout)
+            except FuturesTimeoutError:
+                return code, ""
+            finally:
+                executor.shutdown(wait=False)
+
+            if df is not None and not df.empty:
+                board_name = str(df.iloc[0].get("板块名称", "")).strip()
+                return code, board_name
+        except Exception:
+            pass
+        return code, ""
+
+    result: Dict[str, str] = {}
+    max_workers = min(len(codes_to_fetch), 8)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_map = {pool.submit(_fetch_one, code): code for code in codes_to_fetch}
+        for future in as_completed(future_map):
+            try:
+                code, board = future.result(timeout=10)
+            except (FuturesTimeoutError, Exception) as exc:
+                code = future_map[future]
+                logger.debug(
+                    "batch_fetch_board_sector 获取 %s 板块异常: %s",
+                    code, exc,
+                )
+                continue
+            if code and board:
+                code_normalized = code.split(".")[0] if "." in code else code
+                result[code_normalized] = board
+
+    if result:
+        logger.debug("batch_fetch_board_sector 成功获取 %d 个板块数据", len(result))
+    return result
+
+
 def _enrich_candidates_with_dsa(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     enriched_count = 0
     warnings: List[str] = []
     limit = min(len(candidates), DSA_ENRICHMENT_MAX_CANDIDATES)
 
+    # --- batch-fetch industry info for candidates with empty industry ---
+    industry_map = _batch_fetch_industry(candidates[:limit])
+
+    # --- LLM 降级：efinance 补全板块名称（llm_sector 为空时） ---
+    board_map = _batch_fetch_board_sector(candidates[:limit])
+
     for index, candidate in enumerate(candidates):
         if index >= limit:
             continue
+        # Apply batch-fetched industry to candidate
+        code = _env_text(candidate.get("code", ""))
+        code_normalized = code.split(".")[0] if "." in code else code
+        if code_normalized and code_normalized in industry_map and not (_env_text(candidate.get("industry", ""))):
+            candidate["industry"] = industry_map[code_normalized]
+        # Apply batch-fetched board/sector to llm_sector when LLM data is missing
+        if code_normalized and code_normalized in board_map and not (_env_text(candidate.get("llm_sector", ""))):
+            candidate["llm_sector"] = board_map[code_normalized]
         existing_context = candidate.get("dsa_context")
         if (
             isinstance(existing_context, dict)

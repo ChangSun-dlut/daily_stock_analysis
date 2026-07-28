@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta, timezone
 from threading import RLock
 from time import monotonic
@@ -56,6 +57,20 @@ _MAX_SYMBOLS_PER_QUOTE_REQUEST = 5
 _CAPABILITY_NEGATIVE_CACHE_TTL_SECONDS = 900
 _SECTOR_RANKINGS_CACHE_TTL_SECONDS = 300
 _MAX_DAILY_PREFETCH_LOOKBACK_DAYS = 730
+_TICKFLOW_REALTIME_CALL_TIMEOUT = 15.0  # 实时行情调用应快速返回，15s 足够
+
+
+def _tickflow_call_with_timeout(func, *args, timeout=None, call_name="tickflow", **kwargs):
+    """Run a TickFlow API call with a bounded wait time using threads."""
+    wait_seconds = _TICKFLOW_REALTIME_CALL_TIMEOUT if timeout is None else float(timeout)
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(func, *args, **kwargs)
+        return future.result(timeout=wait_seconds)
+    except FuturesTimeoutError:
+        raise TimeoutError(f"{call_name} 调用超过 {wait_seconds:g}s，已放弃等待")
+    finally:
+        executor.shutdown(wait=False)
 _MIN_DAILY_KLINE_COUNT = 30
 _MAX_DAILY_KLINE_COUNT = 10000
 _DAILY_KLINE_COUNT_MULTIPLIER = 1.8
@@ -996,7 +1011,9 @@ class TickFlowFetcher(BaseFetcher):
         quotes: List[Dict[str, Any]] = []
         for offset in range(0, len(symbols), _MAX_SYMBOLS_PER_QUOTE_REQUEST):
             batch_symbols = symbols[offset : offset + _MAX_SYMBOLS_PER_QUOTE_REQUEST]
-            batch_quotes = client.quotes.get(symbols=batch_symbols)
+            batch_quotes = _tickflow_call_with_timeout(
+                client.quotes.get, symbols=batch_symbols, call_name="tickflow.quotes.get(main_indices)",
+            )
             if batch_quotes:
                 quotes.extend(batch_quotes)
         if not quotes:
@@ -1062,7 +1079,9 @@ class TickFlowFetcher(BaseFetcher):
             return None
 
         try:
-            quotes = client.quotes.get(universes=[_CN_UNIVERSE_ID])
+            quotes = _tickflow_call_with_timeout(
+                client.quotes.get, universes=[_CN_UNIVERSE_ID], call_name="tickflow.quotes.get(market_stats)",
+            )
             self._mark_capability("universe_quotes", True)
         except Exception as exc:
             if self._is_universe_permission_error(exc):
@@ -1152,7 +1171,9 @@ class TickFlowFetcher(BaseFetcher):
             return None
 
         try:
-            universes = client.universes.list()
+            universes = _tickflow_call_with_timeout(
+                client.universes.list, call_name="tickflow.universes.list",
+            )
             sw1_ids = [
                 str(item.get("id"))
                 for item in universes or []
@@ -1161,8 +1182,12 @@ class TickFlowFetcher(BaseFetcher):
             ]
             if not sw1_ids:
                 return None
-            details = client.universes.batch(sw1_ids)
-            quotes = client.quotes.get(universes=[_CN_UNIVERSE_ID])
+            details = _tickflow_call_with_timeout(
+                client.universes.batch, sw1_ids, call_name="tickflow.universes.batch",
+            )
+            quotes = _tickflow_call_with_timeout(
+                client.quotes.get, universes=[_CN_UNIVERSE_ID], call_name="tickflow.quotes.get(sector_rankings)",
+            )
             self._mark_capability("universe_quotes", True)
         except Exception as exc:
             if self._is_universe_permission_error(exc):

@@ -621,6 +621,7 @@ class DataFetcherManager:
         "AkshareFetcher": {"cn", "hk"},
         "TushareFetcher": {"cn", "hk"},
         "TickFlowFetcher": {"cn"},
+        "HithinkFetcher": {"cn"},
         "PytdxFetcher": {"cn"},
         "BaostockFetcher": {"cn"},
         "YfinanceFetcher": {"cn", "hk", "us", "jp", "kr", "tw"},
@@ -1165,6 +1166,7 @@ class DataFetcherManager:
         from .baostock_fetcher import BaostockFetcher
         from .yfinance_fetcher import YfinanceFetcher
         from .longbridge_fetcher import LongbridgeFetcher
+        from .hithink_fetcher import HithinkFetcher
         config = get_config()
         # 创建所有数据源实例（优先级在各 Fetcher 的 __init__ 中确定）
         efinance = EfinanceFetcher()
@@ -1199,6 +1201,12 @@ class DataFetcherManager:
             optional_fetchers.append(LongbridgeFetcher())  # 长桥（美股/港股兜底，懒加载）
         else:
             logger.debug("[数据源初始化] 跳过未配置的 LongbridgeFetcher")
+
+        hithink_api_key = (getattr(config, "hithink_api_key", None) or "").strip()
+        if hithink_api_key:
+            optional_fetchers.append(HithinkFetcher(api_key=hithink_api_key))
+        else:
+            logger.debug("[data source init] skip HithinkFetcher because HITHINK_FINANCE_API_KEY is not configured")
 
         finnhub_api_key = (getattr(config, "finnhub_api_key", None) or "").strip()
         if finnhub_api_key:
@@ -1895,6 +1903,16 @@ class DataFetcherManager:
 
                 elif source == "tickflow":
                     fetcher = self._get_fetcher_by_name("TickFlowFetcher", capability="realtime_quote")
+                    if fetcher is not None and hasattr(fetcher, 'get_realtime_quote'):
+                        record_provider_run_started(
+                            data_type="realtime_quote",
+                            provider=fetcher.name,
+                            operation="get_realtime_quote",
+                        )
+                        quote = self._call_fetcher_method(fetcher, 'get_realtime_quote', raw_stock_code or stock_code)
+
+                elif source == "hithink":
+                    fetcher = self._get_fetcher_by_name("HithinkFetcher", capability="realtime_quote")
                     if fetcher is not None and hasattr(fetcher, 'get_realtime_quote'):
                         record_provider_run_started(
                             data_type="realtime_quote",

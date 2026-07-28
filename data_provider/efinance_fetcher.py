@@ -24,6 +24,7 @@ import logging
 import os
 import random
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
@@ -211,6 +212,24 @@ def _ef_call_with_timeout(func, *args, timeout=None, **kwargs):
     finally:
         # wait=False: calling thread returns immediately; worker cleans up later
         executor.shutdown(wait=False)
+
+
+# 全局锁：efinance 的 get_realtime_quotes_by_fs 内部用 ThreadPoolExecutor.map 同时
+# 并发发起所有分页请求（~50 页），导致 push2.eastmoney.com 触发频率管控，随机断开
+# 部分连接（RemoteDisconnected）。通过全局锁强制串行化调用，每次只让一个
+# get_realtime_quotes 在线上跑，彻底消除并发风暴。
+_ef_realtime_lock = threading.Lock()
+
+
+def _ef_realtime_quotes(*args) -> Optional[Any]:
+    """线程安全的 ef.stock.get_realtime_quotes 包装器。
+
+    用全局锁确保同一时刻只有一个 get_realtime_quotes 调用在执行，
+    避免 efinance 内部的分页并发风暴触发 EastMoney 频率限制。
+    """
+    import efinance as ef
+    with _ef_realtime_lock:
+        return _ef_call_with_timeout(ef.stock.get_realtime_quotes, *args)
 
 
 def _classify_eastmoney_error(exc: Exception) -> Tuple[str, str]:
@@ -665,8 +684,8 @@ class EfinanceFetcher(BaseFetcher):
                 import time as _time
                 api_start = _time.time()
                 
-                # efinance 的实时行情 API (with timeout to avoid indefinite hangs)
-                df = _ef_call_with_timeout(ef.stock.get_realtime_quotes)
+                # efinance 的实时行情 API (with timeout + global lock to avoid concurrent pagination storm)
+                df = _ef_realtime_quotes()
                 
                 api_elapsed = _time.time() - api_start
                 logger.info(f"[API返回] ef.stock.get_realtime_quotes 成功: 返回 {len(df)} 只股票, 耗时 {api_elapsed:.2f}s")
@@ -769,7 +788,7 @@ class EfinanceFetcher(BaseFetcher):
                 logger.info("[API调用] ef.stock.get_realtime_quotes(['ETF']) 获取ETF实时行情...")
                 import time as _time
                 api_start = _time.time()
-                df = _ef_call_with_timeout(ef.stock.get_realtime_quotes, ['ETF'])
+                df = _ef_realtime_quotes('ETF')
                 api_elapsed = _time.time() - api_start
 
                 if df is not None and not df.empty:
@@ -857,7 +876,7 @@ class EfinanceFetcher(BaseFetcher):
             logger.info("[API调用] ef.stock.get_realtime_quotes(['沪深系列指数']) 获取指数行情...")
             import time as _time
             api_start = _time.time()
-            df = _ef_call_with_timeout(ef.stock.get_realtime_quotes, ['沪深系列指数'])
+            df = _ef_realtime_quotes('沪深系列指数')
             api_elapsed = _time.time() - api_start
 
             if df is None or df.empty:
@@ -945,7 +964,7 @@ class EfinanceFetcher(BaseFetcher):
                     "[MarketStats] component=market_stats provider=EfinanceFetcher "
                     "api=ef.stock.get_realtime_quotes action=request_start"
                 )
-                df = _ef_call_with_timeout(ef.stock.get_realtime_quotes)
+                df = _ef_realtime_quotes()
                 elapsed = time.monotonic() - started_at
                 logger.info(
                     "[MarketStats] component=market_stats provider=EfinanceFetcher "
@@ -1071,7 +1090,7 @@ class EfinanceFetcher(BaseFetcher):
             self._enforce_rate_limit()
 
             logger.info("[API调用] ef.stock.get_realtime_quotes(['行业板块']) 获取板块行情...")
-            df = _ef_call_with_timeout(ef.stock.get_realtime_quotes, ['行业板块'])
+            df = _ef_realtime_quotes('行业板块')
             if df is None or df.empty:
                 logger.warning("[efinance] 板块行情数据为空")
                 return None

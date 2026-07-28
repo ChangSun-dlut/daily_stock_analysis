@@ -1802,8 +1802,12 @@ class AkshareFetcher(BaseFetcher):
             self._set_random_user_agent()
             self._enforce_rate_limit()
 
-            # 使用 akshare 获取指数行情（新浪财经接口）
-            df = ak.stock_zh_index_spot_sina()
+            # 使用 akshare 获取指数行情（新浪财经接口），加超时保护防止网络卡死
+            df = _akshare_call_with_timeout(
+                ak.stock_zh_index_spot_sina,
+                timeout=_AKSHARE_HISTORY_CALL_TIMEOUT,
+                call_name="ak.stock_zh_index_spot_sina",
+            )
 
             results = []
             if df is not None and not df.empty:

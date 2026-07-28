@@ -23,6 +23,8 @@ class AlphaSiftScreenRequest(BaseModel):
     market: str = Field("cn", min_length=1, max_length=16)
     strategy: str = Field("dual_low", min_length=1, max_length=64)
     max_results: int = Field(20, ge=1, le=100)
+    daily_enrich_max_candidates: Optional[int] = Field(None, ge=1, le=1000)
+    explain_filters: bool = Field(False)
 
 
 class AlphaSiftStrategyResponse(BaseModel):
@@ -142,6 +144,8 @@ def alphasift_start_screen_task(
             strategy=request.strategy,
             market=request.market,
             max_results=request.max_results,
+            daily_enrich_max_candidates=request.daily_enrich_max_candidates,
+            explain_filters=request.explain_filters,
         )
         task_queue.update_task_progress(
             task_id,
@@ -198,4 +202,6 @@ def alphasift_screen(
         strategy=request.strategy,
         market=request.market,
         max_results=request.max_results,
+        daily_enrich_max_candidates=request.daily_enrich_max_candidates,
+        explain_filters=request.explain_filters,
     )

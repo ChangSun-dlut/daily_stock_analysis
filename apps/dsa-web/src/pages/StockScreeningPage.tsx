@@ -6,11 +6,13 @@ import {
   Building2,
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
   CircleAlert,
   Clock3,
   Droplet,
   Factory,
   Flame,
+  FolderTree,
   Gem,
   Landmark,
   Pickaxe,
@@ -38,6 +40,7 @@ import {
   type AlphaSiftStrategy,
 } from '../api/alphasift';
 import { formatParsedApiError, getParsedApiError, toApiErrorMessage, type ParsedApiError } from '../api/error';
+import { cn } from '../utils/cn';
 import { AppPage, Button, InlineAlert } from '../components/common';
 
 const MARKETS = [{ id: 'cn', label: 'A 股' }];
@@ -467,6 +470,7 @@ const StockScreeningPage: React.FC = () => {
   const [hotspotError, setHotspotError] = useState('');
   const [screenMeta, setScreenMeta] = useState<AlphaSiftScreenResponse | null>(null);
   const [expandedCode, setExpandedCode] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'list' | 'industry' | 'llmSector'>('list');
   const [loading, setLoading] = useState(Boolean(restoredTask?.taskId));
   const [enabling, setEnabling] = useState(false);
   const [loadingStrategies, setLoadingStrategies] = useState(false);
@@ -489,6 +493,23 @@ const StockScreeningPage: React.FC = () => {
     : screenMessages;
   const isScreeningEnabled = enabled && available;
   const statusText = isScreeningEnabled ? '选股已开启' : '选股未开启';
+
+  const groupedCandidates = useMemo(() => {
+    if (viewMode === 'list') return null;
+    const groupKey: keyof AlphaSiftCandidate = viewMode === 'industry' ? 'industry' : 'llmSector';
+    const groups = new Map<string, AlphaSiftCandidate[]>();
+    for (const item of candidates) {
+      const key = (item[groupKey] as string)?.trim() || '未分类';
+      const list = groups.get(key) || [];
+      list.push(item);
+      groups.set(key, list);
+    }
+    return Array.from(groups.entries()).sort(([a], [b]) => {
+      if (a === '未分类') return 1;
+      if (b === '未分类') return -1;
+      return a.localeCompare(b, 'zh');
+    });
+  }, [candidates, viewMode]);
 
   const applyScreenResult = useCallback((result: AlphaSiftScreenResponse) => {
     const nextCandidates = result.candidates || [];
@@ -1289,9 +1310,34 @@ const StockScreeningPage: React.FC = () => {
               AlphaSift 返回候选后，DSA 会对前几名补充行情、基本面、新闻和辅助摘要。
             </p>
           </div>
-          <div className="flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-2 text-xs text-secondary-text">
-            <Search className="h-4 w-4 text-cyan" />
-            {candidates.length} 条候选
+          <div className="flex items-center gap-3">
+            {candidates.length > 0 && (
+              <div className="flex items-center gap-1 rounded-lg bg-surface p-1" role="radiogroup" aria-label="视图切换">
+                {([
+                  ['list', '列表'],
+                  ['industry', '按行业'],
+                  ['llmSector', '按板块'],
+                ] as const).map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    onClick={() => setViewMode(mode as typeof viewMode)}
+                    className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                      viewMode === mode
+                        ? 'bg-cyan text-white shadow-sm'
+                        : 'text-secondary-text hover:text-foreground'
+                    }`}
+                    role="radio"
+                    aria-checked={viewMode === mode}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-2 text-xs text-secondary-text">
+              <Search className="h-4 w-4 text-cyan" />
+              {candidates.length} 条候选
+            </div>
           </div>
         </div>
 
@@ -1301,8 +1347,58 @@ const StockScreeningPage: React.FC = () => {
             <p className="mt-2 text-sm text-secondary-text">开启 AlphaSift 后点击“运行选股”生成候选列表。</p>
           </div>
         ) : (
-          <div className="overflow-hidden rounded-xl border border-border">
-            <table className="w-full min-w-[860px] border-collapse text-sm">
+          <>
+            {viewMode !== 'list' && groupedCandidates && (
+              <div className="space-y-3">
+                {groupedCandidates.map(([groupName, items]) => (
+                  <div key={groupName} className="overflow-hidden rounded-xl border border-border">
+                    <div className="flex items-center gap-2 bg-surface px-4 py-3">
+                      <FolderTree className="h-4 w-4 text-cyan" />
+                      <span className="text-sm font-semibold text-foreground">{groupName}</span>
+                      <span className="ml-auto rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary">
+                        {items.length} 只
+                      </span>
+                    </div>
+                    <div className="p-3">
+                      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                        {items.map((item) => {
+                          const rank = candidates.indexOf(item) + 1;
+                          return (
+                            <button
+                              key={item.code}
+                              onClick={() => setExpandedCode(expandedCode === item.code ? null : item.code ?? null)}
+                              className="flex items-center gap-2 rounded-lg border border-border p-2.5 text-left transition-colors hover:bg-surface/60"
+                            >
+                              <span className="text-[11px] text-secondary-text">#{rank}</span>
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-sm font-medium text-foreground">
+                                  {item.name || item.code}
+                                </p>
+                                <p className="truncate text-[11px] text-secondary-text">
+                                  {item.code}
+                                </p>
+                              </div>
+                              {item.score != null && (
+                                <span className="text-xs font-semibold text-cyan">{formatScore(item.score)}</span>
+                              )}
+                              <ChevronRight
+                                className={cn(
+                                  'h-3.5 w-3.5 flex-shrink-0 text-secondary-text transition-transform',
+                                  expandedCode === item.code && 'rotate-90',
+                                )}
+                              />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {viewMode === 'list' && (
+              <div className="overflow-hidden rounded-xl border border-border">
+                <table className="w-full min-w-[860px] border-collapse text-sm">
               <thead className="bg-surface text-left text-xs text-secondary-text">
                 <tr>
                   <th className="w-14 px-4 py-3 font-semibold">#</th>
@@ -1459,6 +1555,8 @@ const StockScreeningPage: React.FC = () => {
             </table>
           </div>
         )}
+      </>
+      )}
       </section>
     </AppPage>
   );

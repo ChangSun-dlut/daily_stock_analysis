@@ -1,0 +1,58 @@
+# Consolidation Breakout Strategy / 横盘突破
+# Stock has been consolidating for months, recent volume expanding, approaching key resistance breakout.
+
+name: consolidation_breakout
+display_name: 横盘突破
+description: 横盘已久、近期量能活跃即将突破的个股。适用于股价在平台整理后出现放量突破信号时。
+category: trend
+core_rules: [1, 2, 3, 4]
+required_tools:
+  - get_daily_history
+  - analyze_trend
+  - get_realtime_quote
+aliases: [横盘突破, 平台突破, 蓄力突破]
+default_priority: 28
+market_regimes: [sideways, sideways_turning_up]
+
+instructions: |
+  **横盘突破（Consolidation Breakout Strategy）**
+
+  筛选标准：
+  1. **横盘确认**：
+     使用 `get_daily_history` 检查过去 2 个月(约 40 个交易日)股价在**窄幅区间内震荡**。
+     - 60 日涨跌幅应在 -15% ~ +20% 之间。
+     - 20 日内最大振幅不超过 15%，越低越好。
+
+  2. **量能激活**（关联理念3：效率优先）：
+     - 近期量能明显放大，当日量比 > 1.5。
+     - 最近 5-10 个交易日平均量能持续活跃，换手率 > 2%。
+     - 使用 `get_realtime_quote` → volume_ratio 确认今日量能状态。
+
+  3. **突破/逼近压力位**：
+     - 使用 `analyze_trend` → resistance_levels 获取关键平台压力位。
+     - 当前价格**逼近或刚突破**此平台位，突破乖离不超过 5%。
+     - 收盘价应站在 MA20 之上。
+     - breakthrough 强度 > 最低阈值，确认不是假突破。
+
+  4. **K 线形态确认**：
+     - 出现大阳线（实体涨幅 > 3%）或连续放量中阳线。
+     - 收盘应在当日振幅上方 60% 以上（强势收盘）。
+     - 无长上影线（上影 < 实体 50%）。
+
+  5. **风险过滤**（关联理念5：风险排查）：
+     - 排除 ST 股。
+     - 通过 `search_stock_news` 确认无重大利空。
+     - 股价不低于 3 元（排除仙股）。
+     - 主力资金无明显流出信号。
+
+  评分调整：
+  - 横盘 + 突破确认：sentiment_score +15
+  - 横盘周期加权：横盘越久突破信号越可靠，按横盘时长额外加分：
+    - 横盘 2-3 个月（约 40-60 交易日）：+3
+    - 横盘 3-6 个月（约 60-120 交易日）：+5
+    - 横盘 6 个月以上（约 120+ 交易日）：+8
+    判断方式：检查 120 日价格区间是否仍然窄幅震荡，若高位低位均未突破则视为长周期横盘。
+  - 板块联动共振：额外 +5
+  - 均线粘合后发散（MA5/10/20 开始上翘）：额外 +5
+  - 止损设在平台突破位下方 3-5%。
+  - 在 `buy_reason` 和 `volume_analysis` 中注明"横盘突破"及横盘时长。
