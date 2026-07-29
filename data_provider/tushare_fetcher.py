@@ -166,7 +166,7 @@ class TushareFetcher(BaseFetcher):
         self._api: Optional[object] = None  # Tushare API 实例
         self.date_list: Optional[List[str]] = None  # 交易日列表缓存（倒序，最新日期在前）
         self._date_list_end: Optional[str] = None  # 缓存对应的截止日期，用于跨日刷新
-        self._pro_dead: bool = False      # Pro quotation 接口不可用时置 True，跳过后续尝试
+        self._pro_dead: bool = False      # Pro rt_k 接口不可用时置 True，跳过后续尝试
         self._legacy_dead: bool = False   # 旧版接口失败后置 True，跳过后续尝试
 
         # 尝试初始化 API
@@ -733,46 +733,59 @@ class TushareFetcher(BaseFetcher):
         # 速率限制检查
         self._check_rate_limit()
 
-        # ---- 尝试 Pro 接口 (需要2000积分) ----
+        # ---- 尝试 Pro 接口 rt_k (需要2000积分) ----
         if not self._pro_dead:
             try:
                 ts_code = self._convert_stock_code(stock_code)
-                df = self._api.quotation(ts_code=ts_code)
+                df = self._call_api_with_rate_limit("rt_k", ts_code=ts_code)
 
                 if df is not None and not df.empty:
                     row = df.iloc[0]
-                    logger.debug(f"Tushare Pro 实时行情获取成功: {stock_code}")
+                    logger.debug(f"Tushare Pro rt_k 实时行情获取成功: {stock_code}")
+
+                    # rt_k 字段说明 (doc_id=372):
+                    #   close = 最新价, vol = 成交量(股), amount = 成交额(元)
+                    #   涨跌幅/涨跌额需手动计算
+                    close = safe_float(row.get('close'))
+                    pre_close = safe_float(row.get('pre_close'))
+                    if close is not None and pre_close is not None and pre_close != 0:
+                        change_pct = round((close - pre_close) / pre_close * 100, 2)
+                        change_amount = round(close - pre_close, 2)
+                    else:
+                        change_pct = None
+                        change_amount = None
 
                     return UnifiedRealtimeQuote(
                         code=normalized_code,
                         name=str(row.get('name', '')),
                         source=RealtimeSource.TUSHARE,
-                        price=safe_float(row.get('price')),
-                        change_pct=safe_float(row.get('pct_chg')),
-                        change_amount=safe_float(row.get('change')),
+                        price=close,
+                        change_pct=change_pct,
+                        change_amount=change_amount,
                         volume=safe_int(row.get('vol')),
                         amount=safe_float(row.get('amount')),
                         high=safe_float(row.get('high')),
                         low=safe_float(row.get('low')),
                         open_price=safe_float(row.get('open')),
-                        pre_close=safe_float(row.get('pre_close')),
-                        turnover_rate=safe_float(row.get('turnover_ratio')),
-                        pe_ratio=safe_float(row.get('pe')),
-                        pb_ratio=safe_float(row.get('pb')),
-                        total_mv=safe_float(row.get('total_mv')),
+                        pre_close=pre_close,
+                        # rt_k 不返回 PE/PB/换手率/总市值，
+                        # 这些字段由其他数据源在 get_realtime_quote_multisource 层补齐
+                        turnover_rate=None,
+                        pe_ratio=None,
+                        pb_ratio=None,
+                        total_mv=None,
                     )
-                # 空返回：积分不足 / 休市 / 代码无效
+                # 空返回：休市 / 代码无效
                 logger.debug(
-                    f"Tushare Pro 实时行情返回空 {stock_code}，"
-                    f"可能原因：积分不足（quotation 需 ≥2000 积分）、休市或代码无效"
+                    f"Tushare Pro rt_k 实时行情返回空 {stock_code}，可能原因：休市或代码无效"
                 )
             except Exception as e:
                 _err = str(e)
                 if "接口名" in _err:
                     self._pro_dead = True
-                    logger.info(f"Tushare Pro quotation 接口不可用: {_err.strip()}，已跳过后续尝试")
+                    logger.info(f"Tushare Pro rt_k 接口不可用: {_err.strip()}，已跳过后续尝试")
                 else:
-                    logger.debug(f"Tushare Pro 实时行情异常 {stock_code}: {_err.strip()}")
+                    logger.debug(f"Tushare Pro rt_k 实时行情异常 {stock_code}: {_err.strip()}")
 
         # ---- 降级：旧版接口 (ts.get_realtime_quotes) ----
         if not self._legacy_dead:

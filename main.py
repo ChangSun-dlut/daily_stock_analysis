@@ -1117,6 +1117,7 @@ def start_api_server(host: str, port: int, config: Config) -> None:
     import uvicorn
 
     probe = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM)
+    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         probe.bind((host, port))
     except OSError as exc:

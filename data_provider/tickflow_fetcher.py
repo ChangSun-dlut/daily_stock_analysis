@@ -754,8 +754,12 @@ class TickFlowFetcher(BaseFetcher):
         for offset in range(0, len(symbols), effective_batch_size):
             batch_symbols = symbols[offset : offset + effective_batch_size]
             try:
-                quotes = client.quotes.get(symbols=batch_symbols)
-            except Exception as exc:
+                quotes = _tickflow_call_with_timeout(
+                    client.quotes.get, symbols=batch_symbols,
+                    timeout=_TICKFLOW_REALTIME_CALL_TIMEOUT,
+                    call_name=f"TickFlow batch quote ({len(batch_symbols)} symbols)",
+                )
+            except (TimeoutError, Exception) as exc:
                 logger.warning("[TickFlowFetcher] batch realtime quote failed: %s", exc)
                 continue
             cached_count += self._store_quotes(quotes)
@@ -806,8 +810,12 @@ class TickFlowFetcher(BaseFetcher):
             if client is None:
                 return None
             try:
-                quotes = client.quotes.get(symbols=[symbol])
-            except Exception as exc:
+                quotes = _tickflow_call_with_timeout(
+                    client.quotes.get, symbols=[symbol],
+                    timeout=_TICKFLOW_REALTIME_CALL_TIMEOUT,
+                    call_name=f"TickFlow realtime quote {symbol}",
+                )
+            except (TimeoutError, Exception) as exc:
                 logger.warning("[TickFlowFetcher] realtime quote failed for %s: %s", symbol, exc)
                 return None
             self._store_quotes(quotes)

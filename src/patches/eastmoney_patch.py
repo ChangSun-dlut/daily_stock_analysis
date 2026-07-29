@@ -163,6 +163,11 @@ def eastmoney_patch():
         )
         if not is_target:
             return original_request(self, method, url, **kwargs)
+
+        # efinance 库部分接口仍使用 HTTP，但东方财富已不再接受 HTTP 连接
+        # 将 http:// 自动升级为 https://，避免 RemoteDisconnected
+        if url and url.startswith("http://"):
+            url = url.replace("http://", "https://", 1)
         # 获取一个随机的 User-Agent
         user_agent = ua.random
         # 处理 Headers：确保不破坏业务代码传入的 headers
