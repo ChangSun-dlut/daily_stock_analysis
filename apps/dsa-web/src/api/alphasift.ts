@@ -236,6 +236,137 @@ export type AlphaSiftScreenTaskStatus = {
   result?: AlphaSiftScreenResponse | null;
 };
 
+// ——— 一键回测 ———
+export type BacktestPattern = {
+  range20dPct: number;
+  volatility20dPct: number;
+  change20dPct: number;
+  consolidationDays: number;
+  volumeRatio: number;
+  signalDayReturnPct: number;
+  allPass: boolean;
+  violations: string[];
+};
+
+export type BacktestHoldingReturn = {
+  days: number;
+  returnPct: number;
+};
+
+export type BacktestMaSnapshot = {
+  ma: number;
+  value: number;
+  priceAbove: boolean;
+};
+
+export type BacktestWindowSimulation = {
+  signalDate: string;
+  buyPrice: number;
+  holdDays: number;
+  holdReturnPct: number;
+  patternAllPass: boolean;
+  range20d: number;
+  volatility20d: number;
+  change20d: number;
+  consolidationDays: number;
+};
+
+export type BacktestCandidate = {
+  code: string;
+  name: string;
+  signalDate: string;
+  signalPrice: number;
+  pattern: BacktestPattern | null;
+  holdingReturns: BacktestHoldingReturn[];
+  maxReturn5dPct: number | null;
+  minReturn5dPct: number | null;
+  maSnapshots: BacktestMaSnapshot[];
+  windowSimulations: BacktestWindowSimulation[];
+  error: string | null;
+};
+
+export type BacktestResponse = {
+  strategy: string;
+  signalDate: string;
+  candidates: BacktestCandidate[];
+  summary: {
+    totalCandidates: number;
+    validCount: number;
+    errorCount: number;
+    profitableCount: number;
+    patternPassCount: number;
+    allProfitable: boolean;
+    allPatternOk: boolean;
+  };
+};
+
+// ---------- 昨日复盘 ----------
+export type YesterdayBacktestPattern = {
+  range20dPct: number;
+  volatility20dPct: number;
+  change20dPct: number;
+  consolidationDays: number;
+  volumeRatio: number;
+  signalDayReturnPct: number;
+  allPass: boolean;
+  violations: string[];
+};
+
+export type TrendSnapshot = {
+  trendStatus: string;
+  trendStrength: number;
+  maAlignment: string;
+  ma5: number;
+  ma10: number;
+  ma20: number;
+  ma60: number;
+  biasMa5: number;
+  volumeStatus: string;
+  volumeRatio5d: number;
+  macdDif: number;
+  macdDea: number;
+  macdBar: number;
+  macdStatus: string;
+  macdSignal: string;
+  rsi6: number;
+  rsi12: number;
+  rsi24: number;
+  rsiStatus: string;
+  buySignal: string;
+  signalScore: number;
+};
+
+export type YesterdayBacktestCandidate = {
+  code: string;
+  name: string;
+  signalDate: string;
+  todayDate: string;
+  signalPrice: number;
+  todayOpen: number;
+  todayClose: number;
+  todayHigh: number;
+  todayLow: number;
+  todayReturnPct: number;
+  todayHighReturnPct: number;
+  todayLowReturnPct: number;
+  pattern: YesterdayBacktestPattern | null;
+  volumeRatio: number;
+  hasAnomaly: boolean;
+  anomalyReasons: string[];
+  error: string | null;
+  trend: TrendSnapshot | null;
+};
+
+export type YesterdayBacktestResponse = {
+  candidates: YesterdayBacktestCandidate[];
+  total: number;
+  anomalyCount: number;
+  avgReturnPct: number;
+  signalDate: string;
+  todayDate: string;
+  errors: string[];
+};
+
 export function notifyAlphaSiftConfigChanged(): void {
   window.dispatchEvent(new Event(ALPHASIFT_CONFIG_CHANGED_EVENT));
   notifySystemConfigChanged();
@@ -283,6 +414,12 @@ export const alphasiftApi = {
   async getScreenTask(taskId: string): Promise<AlphaSiftScreenTaskStatus> {
     const response = await apiClient.get<Record<string, unknown>>(`/api/v1/alphasift/screen/tasks/${encodeURIComponent(taskId)}`);
     return toCamelCase<AlphaSiftScreenTaskStatus>(response.data);
+  },
+
+  async getScreenCache(strategy: string): Promise<Record<string, unknown> | null> {
+    const response = await apiClient.get<Record<string, unknown> | null>(`/api/v1/alphasift/screen/cache/${encodeURIComponent(strategy)}`);
+    if (!response.data) return null;
+    return toCamelCase<Record<string, unknown>>(response.data);
   },
 
   async getStrategies(): Promise<AlphaSiftStrategiesResponse> {
@@ -345,5 +482,29 @@ export const alphasiftApi = {
       }
       throw error;
     }
+  },
+
+  async backtest(payload: {
+    strategy: string;
+    candidates: Array<{ code: string; name: string; price?: number | null }>;
+  }): Promise<BacktestResponse> {
+    const response = await apiClient.post<Record<string, unknown>>(
+      '/api/v1/alphasift/screen/backtest',
+      payload,
+      { timeout: 120000 },
+    );
+    return toCamelCase<BacktestResponse>(response.data);
+  },
+
+  async backtestYesterday(payload: {
+    strategy: string;
+    candidates: Array<{ code: string; name: string; price?: number | null }>;
+  }): Promise<YesterdayBacktestResponse> {
+    const response = await apiClient.post<Record<string, unknown>>(
+      '/api/v1/alphasift/screen/backtest/yesterday',
+      payload,
+      { timeout: 120000 },
+    );
+    return toCamelCase<YesterdayBacktestResponse>(response.data);
   },
 };

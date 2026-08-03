@@ -52,6 +52,7 @@ DSA_ALPHASIFT_MIN_HOTSPOT_CACHE_COUNT = 3
 DSA_ALPHASIFT_HOTSPOT_DETAIL_CACHE_TTL_SECONDS = 30 * 60
 DSA_ALPHASIFT_HOTSPOT_EVENT_SUMMARY_MAX_CHARS = 90
 DSA_ALPHASIFT_HOTSPOT_PREFETCH_DETAIL_COUNT = 8
+DSA_ALPHASIFT_SCREEN_CACHE_DIR = DSA_ALPHASIFT_DATA_DIR / "screencache"
 DSA_ALPHASIFT_HOTSPOT_UNAVAILABLE_CODE = "eastmoney_hotspot_unavailable"
 DSA_ALPHASIFT_HOTSPOT_UNAVAILABLE_MESSAGE = "热点源连接中断，暂无可用缓存。"
 DSA_ALPHASIFT_HOTSPOT_CONNECTIVITY_ERROR_MARKERS = (
@@ -205,6 +206,68 @@ def _write_alphasift_hotspot_detail_cache(*, provider: str, topic: str, payload:
         )
     except Exception as exc:
         logger.warning("Failed to write AlphaSift hotspot detail cache for %s: %s", topic, exc)
+
+
+# ---------------------------------------------------------------------------
+#  Screen-result cache (per strategy, latest-per-day overwrite)
+# ---------------------------------------------------------------------------
+
+def _alphasift_screen_cache_path(strategy: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", _env_text(strategy) or strategy)
+    return DSA_ALPHASIFT_SCREEN_CACHE_DIR / f"{safe}.json"
+
+
+def read_alphasift_screen_cache(strategy: str) -> dict | None:
+    """返回某策略的最新缓存结果；无缓存或缓存过期（非今日）返回 None。"""
+    cache_path = _alphasift_screen_cache_path(strategy)
+    try:
+        raw = json.loads(cache_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        logger.warning("Failed to read AlphaSift screen cache %s: %s", cache_path, exc)
+        return None
+
+    if not isinstance(raw, dict):
+        return None
+
+    cache_date = raw.get("date")
+    if not cache_date:
+        return None
+    today_str = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+    if cache_date != today_str:
+        return None  # 仅当天有效
+
+    return raw
+
+
+def write_alphasift_screen_cache(
+    *,
+    strategy: str,
+    market: str,
+    result: dict,
+) -> None:
+    """将一次选股结果写入文件，同一天覆盖，只保留最后一次。"""
+    cache_path = _alphasift_screen_cache_path(strategy)
+    now_dt = datetime.now(timezone.utc).astimezone()
+    payload: dict = {
+        "cached_at": now_dt.isoformat(),
+        "date": now_dt.strftime("%Y-%m-%d"),
+        "strategy": strategy,
+        "market": market,
+        "run_id": result.get("run_id"),
+        "candidates": result.get("candidates") or [],
+        "candidate_count": result.get("candidate_count"),
+        "snapshot_count": result.get("snapshot_count"),
+        "after_filter_count": result.get("after_filter_count"),
+        "llm_ranked": result.get("llm_ranked"),
+    }
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info("AlphaSift screen cache written: %s", cache_path)
+    except Exception as exc:
+        logger.warning("Failed to write AlphaSift screen cache for %s: %s", strategy, exc)
 
 
 def _ensure_hotspot_detail_compat_fields(payload: Dict[str, Any]) -> Dict[str, Any]:

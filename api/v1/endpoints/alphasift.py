@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field
 from api.deps import get_config_dep
 from api.v1.errors import api_error
 from src.config import Config
-from src.services.alphasift_service import AlphaSiftService
+from src.services.alphasift_backtest_service import run_backtest, run_yesterday_backtest
+from src.services.alphasift_service import AlphaSiftService, read_alphasift_screen_cache, write_alphasift_screen_cache
 from src.services.task_queue import TaskStatus as QueueTaskStatus
 from src.services.task_queue import get_task_queue
 
@@ -147,6 +148,11 @@ def alphasift_start_screen_task(
             daily_enrich_max_candidates=request.daily_enrich_max_candidates,
             explain_filters=request.explain_filters,
         )
+        write_alphasift_screen_cache(
+            strategy=request.strategy,
+            market=request.market,
+            result=result,
+        )
         task_queue.update_task_progress(
             task_id,
             90,
@@ -190,6 +196,167 @@ def alphasift_screen_task_status(task_id: str) -> AlphaSiftScreenTaskStatus:
         error=task.error,
         result=result,
     )
+
+
+@router.get("/screen/cache/{strategy}")
+def alphasift_screen_cache(strategy: str) -> dict | None:
+    """返回某策略当天的最后一次选股缓存结果，无缓存返回空。"""
+    cached = read_alphasift_screen_cache(strategy)
+    if cached is None:
+        return None
+    return cached
+
+
+class BacktestCandidate(BaseModel):
+    code: str = Field(..., min_length=1, max_length=16)
+    name: str = Field("", max_length=128)
+    price: Optional[float] = Field(None)
+
+
+class BacktestRequest(BaseModel):
+    strategy: str = Field("consolidation_breakout", min_length=1, max_length=64)
+    candidates: List[BacktestCandidate] = Field(..., min_length=1, max_length=50)
+
+
+@router.post("/screen/backtest")
+def alphasift_screen_backtest(
+    request: BacktestRequest,
+    _config: Config = Depends(get_config_dep),
+) -> Dict[str, Any]:
+    """对当前选股结果执行一键回测，返回形态验证与盈亏分析。"""
+    resp = run_backtest(
+        candidates=[c.model_dump() for c in request.candidates],
+        strategy=request.strategy,
+    )
+    # 把 dataclass 转为可 JSON 序列化的 dict
+    return {
+        "strategy": resp.strategy,
+        "signal_date": resp.signal_date,
+        "candidates": [
+            {
+                "code": c.code,
+                "name": c.name,
+                "signal_date": c.signal_date,
+                "signal_price": c.signal_price,
+                "pattern": {
+                    "range_20d_pct": c.pattern.range_20d_pct if c.pattern else 0,
+                    "volatility_20d_pct": c.pattern.volatility_20d_pct if c.pattern else 0,
+                    "change_20d_pct": c.pattern.change_20d_pct if c.pattern else 0,
+                    "consolidation_days": c.pattern.consolidation_days if c.pattern else 0,
+                    "volume_ratio": c.pattern.volume_ratio if c.pattern else 0,
+                    "signal_day_return_pct": c.pattern.signal_day_return_pct if c.pattern else 0,
+                    "all_pass": c.pattern.all_pass if c.pattern else False,
+                    "violations": c.pattern.violations if c.pattern else [],
+                } if c.pattern else None,
+                "holding_returns": [
+                    {"days": h.days, "return_pct": h.return_pct} for h in c.holding_returns
+                ],
+                "max_return_5d_pct": c.max_return_5d_pct,
+                "min_return_5d_pct": c.min_return_5d_pct,
+                "ma_snapshots": [
+                    {"ma": m.ma, "value": m.value, "price_above": m.price_above}
+                    for m in c.ma_snapshots
+                ],
+                "window_simulations": [
+                    {
+                        "signal_date": w.signal_date,
+                        "buy_price": w.buy_price,
+                        "hold_days": w.hold_days,
+                        "hold_return_pct": w.hold_return_pct,
+                        "pattern_all_pass": w.pattern_all_pass,
+                        "range_20d": w.range_20d,
+                        "volatility_20d": w.volatility_20d,
+                        "change_20d": w.change_20d,
+                        "consolidation_days": w.consolidation_days,
+                    }
+                    for w in c.window_simulations
+                ],
+                "error": c.error,
+            }
+            for c in resp.candidates
+        ],
+        "summary": resp.summary,
+    }
+
+
+@router.post("/screen/backtest/yesterday")
+def alphasift_screen_backtest_yesterday(
+    request: BacktestRequest,
+    _config: Config = Depends(get_config_dep),
+) -> Dict[str, Any]:
+    """昨日复盘——以昨日为信号日买入，评估今日实际回报并标注异常。
+
+    异常判定规则：
+      - 昨日形态不达标（横盘突破条件破坏）
+      - 今日跌幅超过 -2%（-5% 以上为大幅下跌）
+      - 昨日放量超过 3 倍
+    """
+    resp = run_yesterday_backtest(
+        candidates=[c.model_dump() for c in request.candidates],
+        strategy=request.strategy,
+    )
+    return {
+        "candidates": [
+            {
+                "code": c.code,
+                "name": c.name,
+                "signal_date": c.signal_date,
+                "today_date": c.today_date,
+                "signal_price": c.signal_price,
+                "today_open": c.today_open,
+                "today_close": c.today_close,
+                "today_high": c.today_high,
+                "today_low": c.today_low,
+                "today_return_pct": c.today_return_pct,
+                "today_high_return_pct": c.today_high_return_pct,
+                "today_low_return_pct": c.today_low_return_pct,
+                "pattern": {
+                    "range_20d_pct": c.pattern.range_20d_pct if c.pattern else 0,
+                    "volatility_20d_pct": c.pattern.volatility_20d_pct if c.pattern else 0,
+                    "change_20d_pct": c.pattern.change_20d_pct if c.pattern else 0,
+                    "consolidation_days": c.pattern.consolidation_days if c.pattern else 0,
+                    "volume_ratio": c.pattern.volume_ratio if c.pattern else 0,
+                    "signal_day_return_pct": c.pattern.signal_day_return_pct if c.pattern else 0,
+                    "all_pass": c.pattern.all_pass if c.pattern else False,
+                    "violations": c.pattern.violations if c.pattern else [],
+                } if c.pattern else None,
+                "volume_ratio": c.volume_ratio,
+                "has_anomaly": c.has_anomaly,
+                "anomaly_reasons": c.anomaly_reasons,
+                "error": c.error,
+                "trend": {
+                    "trend_status": c.trend.trend_status,
+                    "trend_strength": c.trend.trend_strength,
+                    "ma_alignment": c.trend.ma_alignment,
+                    "ma5": c.trend.ma5,
+                    "ma10": c.trend.ma10,
+                    "ma20": c.trend.ma20,
+                    "ma60": c.trend.ma60,
+                    "bias_ma5": c.trend.bias_ma5,
+                    "volume_status": c.trend.volume_status,
+                    "volume_ratio_5d": c.trend.volume_ratio_5d,
+                    "macd_dif": c.trend.macd_dif,
+                    "macd_dea": c.trend.macd_dea,
+                    "macd_bar": c.trend.macd_bar,
+                    "macd_status": c.trend.macd_status,
+                    "macd_signal": c.trend.macd_signal,
+                    "rsi_6": c.trend.rsi_6,
+                    "rsi_12": c.trend.rsi_12,
+                    "rsi_24": c.trend.rsi_24,
+                    "rsi_status": c.trend.rsi_status,
+                    "buy_signal": c.trend.buy_signal,
+                    "signal_score": c.trend.signal_score,
+                } if c.trend else None,
+            }
+            for c in resp.candidates
+        ],
+        "total": resp.total,
+        "anomaly_count": resp.anomaly_count,
+        "avg_return_pct": resp.avg_return_pct,
+        "signal_date": resp.signal_date,
+        "today_date": resp.today_date,
+        "errors": resp.errors,
+    }
 
 
 @router.post("/screen")

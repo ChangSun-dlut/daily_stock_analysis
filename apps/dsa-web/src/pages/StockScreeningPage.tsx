@@ -27,6 +27,11 @@ import {
   Trees,
   Utensils,
   Wrench,
+  BarChart3,
+  TrendingUp,
+  DollarSign,
+  Target,
+  X,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -38,6 +43,8 @@ import {
   type AlphaSiftScreenResponse,
   type AlphaSiftScreenTaskStatus,
   type AlphaSiftStrategy,
+  type BacktestResponse,
+  type YesterdayBacktestResponse,
 } from '../api/alphasift';
 import { formatParsedApiError, getParsedApiError, toApiErrorMessage, type ParsedApiError } from '../api/error';
 import { cn } from '../utils/cn';
@@ -45,7 +52,15 @@ import { AppPage, Button, InlineAlert } from '../components/common';
 
 const MARKETS = [{ id: 'cn', label: 'A 股' }];
 const SCREEN_TASK_STORAGE_KEY = 'dsa.alphasift.activeScreenTask.v1';
+const SCREEN_CACHE_KEY = 'dsa.alphasift.screenCache.v1';
 const SCREEN_TASK_POLL_INTERVAL_MS = 2000;
+
+type CachedScreenResult = {
+  strategy: string;
+  market: string;
+  cachedAt: string; // ISO 8601
+  candidates: AlphaSiftCandidate[];
+};
 
 type PersistedScreenTask = {
   taskId: string;
@@ -92,6 +107,34 @@ const clearPersistedScreenTask = () => {
     window.sessionStorage.removeItem(SCREEN_TASK_STORAGE_KEY);
   } catch {
     // Ignore storage cleanup failures.
+  }
+};
+
+const readScreenCache = (): CachedScreenResult | null => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem(SCREEN_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<CachedScreenResult>;
+    if (!parsed.strategy || !Array.isArray(parsed.candidates)) return null;
+    // Invalidate cache older than 24 hours
+    if (parsed.cachedAt) {
+      const ageMs = Date.now() - new Date(parsed.cachedAt).getTime();
+      if (ageMs > 24 * 60 * 60 * 1000) return null;
+    }
+    return parsed as CachedScreenResult;
+  } catch {
+    return null;
+  }
+};
+
+const writeScreenCache = (cache: CachedScreenResult) => {
+  try {
+    window.localStorage.setItem(SCREEN_CACHE_KEY, JSON.stringify(cache));
+  } catch {
+    // localStorage is best-effort; results live in React state.
   }
 };
 
@@ -448,14 +491,16 @@ const MiniSparkline: React.FC<{ score?: number | null; selected?: boolean }> = (
 
 const StockScreeningPage: React.FC = () => {
   const navigate = useNavigate();
+  const [restoredCache] = useState<CachedScreenResult | null>(() => readScreenCache());
   const [restoredTask] = useState<PersistedScreenTask | null>(() => readPersistedScreenTask());
   const [enabled, setEnabled] = useState(false);
   const [available, setAvailable] = useState(false);
-  const [market, setMarket] = useState(restoredTask?.market || 'cn');
-  const [strategy, setStrategy] = useState(restoredTask?.strategy || 'dual_low');
+  const [market, setMarket] = useState(restoredCache?.market || restoredTask?.market || 'cn');
+  const [strategy, setStrategy] = useState(restoredCache?.strategy || restoredTask?.strategy || 'dual_low');
   const [strategies, setStrategies] = useState<AlphaSiftStrategy[]>([]);
   const [maxResults, setMaxResults] = useState(restoredTask?.maxResults || 3);
-  const [candidates, setCandidates] = useState<AlphaSiftCandidate[]>([]);
+  const [candidates, setCandidates] = useState<AlphaSiftCandidate[]>(restoredCache?.candidates || []);
+  const [screenCacheTime, setScreenCacheTime] = useState<string | null>(restoredCache?.cachedAt || null);
   const [hotspots, setHotspots] = useState<AlphaSiftHotspot[]>([]);
   const [hotspotsUpdatedAt, setHotspotsUpdatedAt] = useState<string | null>(null);
   const [hotspotsExpanded, setHotspotsExpanded] = useState(false);
@@ -469,7 +514,7 @@ const StockScreeningPage: React.FC = () => {
   const [loadingHotspots, setLoadingHotspots] = useState(false);
   const [hotspotError, setHotspotError] = useState('');
   const [screenMeta, setScreenMeta] = useState<AlphaSiftScreenResponse | null>(null);
-  const [expandedCode, setExpandedCode] = useState<string | null>(null);
+  const [expandedCode, setExpandedCode] = useState<string | null>(restoredCache?.candidates?.[0]?.code ?? null);
   const [viewMode, setViewMode] = useState<'list' | 'industry' | 'llmSector'>('list');
   const [loading, setLoading] = useState(Boolean(restoredTask?.taskId));
   const [enabling, setEnabling] = useState(false);
@@ -479,6 +524,15 @@ const StockScreeningPage: React.FC = () => {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(restoredTask?.taskId ?? null);
   const [taskProgress, setTaskProgress] = useState(restoredTask?.taskId ? 10 : 0);
   const [taskMessage, setTaskMessage] = useState(restoredTask?.taskId ? '正在恢复选股任务状态...' : '');
+  // 一键回测状态
+  const [backtestLoading, setBacktestLoading] = useState(false);
+  const [backtestResult, setBacktestResult] = useState<BacktestResponse | null>(null);
+  const [backtestError, setBacktestError] = useState('');
+  const [showBacktestModal, setShowBacktestModal] = useState(false);
+  // 昨日复盘状态
+  const [yesterdayLoading, setYesterdayLoading] = useState(false);
+  const [yesterdayResult, setYesterdayResult] = useState<YesterdayBacktestResponse | null>(null);
+  const [yesterdayError, setYesterdayError] = useState('');
 
   const selectedStrategy = useMemo(() => strategies.find((item) => item.id === strategy), [strategies, strategy]);
   const selectedStrategyTitle = selectedStrategy?.name || selectedStrategy?.title || '自定义策略';
@@ -513,15 +567,29 @@ const StockScreeningPage: React.FC = () => {
 
   const applyScreenResult = useCallback((result: AlphaSiftScreenResponse) => {
     const nextCandidates = result.candidates || [];
+    const now = new Date().toISOString();
     setScreenMeta(result);
     setCandidates(nextCandidates);
     setExpandedCode(nextCandidates[0]?.code ?? null);
-  }, []);
+    setScreenCacheTime(now);
+    writeScreenCache({
+      strategy: result.strategy || strategy,
+      market: result.market || market,
+      cachedAt: now,
+      candidates: nextCandidates,
+    });
+  }, [strategy, market]);
 
   const clearScreeningResults = () => {
     setCandidates([]);
     setScreenMeta(null);
     setExpandedCode(null);
+    setScreenCacheTime(null);
+    try {
+      window.localStorage.removeItem(SCREEN_CACHE_KEY);
+    } catch {
+      // Ignore storage cleanup failures.
+    }
   };
 
   const loadHotspotDetail = useCallback(async (topic: string, options: { refresh?: boolean } = {}) => {
@@ -701,6 +769,37 @@ const StockScreeningPage: React.FC = () => {
     };
   }, [loadHotspots, loadStrategies]);
 
+  // 服务端缓存兜底：当策略切换且无 localStorage 缓存时，从服务端加载当天最后一次选股结果
+  const serverCacheLoadedStrategyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!available) return;
+    if (serverCacheLoadedStrategyRef.current === strategy) return;
+    serverCacheLoadedStrategyRef.current = strategy;
+
+    // 如果 localStorage 中已有该策略的缓存数据，优先使用（更快、离线可用）
+    const localCache = readScreenCache();
+    if (localCache && localCache.strategy === strategy) return;
+
+    alphasiftApi
+      .getScreenCache(strategy)
+      .then((cached) => {
+        if (!cached || !Array.isArray(cached.candidates) || cached.candidates.length === 0) {
+          return;
+        }
+        const candidates = cached.candidates as unknown as AlphaSiftCandidate[];
+        setCandidates(candidates);
+        setExpandedCode(candidates[0]?.code ?? null);
+        setScreenCacheTime((cached.cachedAt as string) ?? null);
+        if (cached.market) {
+          setMarket(String(cached.market));
+        }
+      })
+      .catch(() => {
+        // 服务端缓存不可用时静默降级
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [available, strategy]);
+
   useEffect(() => {
     if (!activeTaskId) {
       return undefined;
@@ -816,6 +915,50 @@ const StockScreeningPage: React.FC = () => {
       clearScreeningResults();
     }
     setStrategy(nextStrategy);
+  };
+
+  const handleBacktest = async () => {
+    if (candidates.length === 0) return;
+    setBacktestLoading(true);
+    setBacktestError('');
+    setBacktestResult(null);
+    setYesterdayResult(null);
+    setYesterdayError('');
+    try {
+      const resp = await alphasiftApi.backtest({
+        strategy,
+        candidates: candidates.map((c) => ({
+          code: c.code ?? '',
+          name: c.name ?? '',
+          price: c.price ?? null,
+        })),
+      });
+      setBacktestResult(resp);
+      setShowBacktestModal(true);
+    } catch (err: any) {
+      const msg = err?.message || '回测请求失败，请确认后端服务正常';
+      setBacktestError(msg);
+    } finally {
+      setBacktestLoading(false);
+    }
+
+    // 并行触发昨日复盘
+    setYesterdayLoading(true);
+    try {
+      const yesterdayResp = await alphasiftApi.backtestYesterday({
+        strategy,
+        candidates: candidates.map((c) => ({
+          code: c.code ?? '',
+          name: c.name ?? '',
+          price: c.price ?? null,
+        })),
+      });
+      setYesterdayResult(yesterdayResp);
+    } catch (err: any) {
+      setYesterdayError(err?.message || '昨日复盘请求失败');
+    } finally {
+      setYesterdayLoading(false);
+    }
   };
 
   const handleMarketChange = (nextMarket: string) => {
@@ -1273,7 +1416,10 @@ const StockScreeningPage: React.FC = () => {
               <p className="mt-1 text-xs text-secondary-text">
                 {loading
                   ? `${taskMessage || '正在执行 AlphaSift 选股'} · ${taskProgress}%`
-                  : `当前策略：${displayedStrategy} · ${MARKETS.find((item) => item.id === market)?.label}`}
+                  : `当前策略：${displayedStrategy} · ${MARKETS.find((item) => item.id === market)?.label}`
+                  + (screenCacheTime && !loading && candidates.length > 0
+                    ? ` · 缓存于 ${new Date(screenCacheTime).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`
+                    : '')}
               </p>
             </div>
           </div>
@@ -1333,6 +1479,20 @@ const StockScreeningPage: React.FC = () => {
                   </button>
                 ))}
               </div>
+            )}
+            {candidates.length > 0 && (
+              <button
+                onClick={() => void handleBacktest()}
+                disabled={backtestLoading}
+                className="flex items-center gap-1.5 rounded-lg border border-amber/30 bg-amber/10 px-3 py-1.5 text-sm font-medium text-amber transition-colors hover:bg-amber/20 disabled:opacity-50"
+              >
+                {backtestLoading ? (
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-amber border-t-transparent" />
+                ) : (
+                  <BarChart3 className="h-4 w-4" />
+                )}
+                {backtestLoading ? '回测中...' : '一键回测'}
+              </button>
             )}
             <div className="flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-2 text-xs text-secondary-text">
               <Search className="h-4 w-4 text-cyan" />
@@ -1558,6 +1718,520 @@ const StockScreeningPage: React.FC = () => {
       </>
       )}
       </section>
+
+      {/* ——— 回测错误提示 ——— */}
+      {backtestError && (
+        <InlineAlert variant="danger" title="回测失败" message={backtestError} />
+      )}
+
+      {/* ——— 一键回测结果弹窗 ——— */}
+      {showBacktestModal && backtestResult && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 pt-12">
+          <div className="relative w-full max-w-5xl rounded-2xl border border-border bg-card shadow-2xl">
+            {/* 标题栏 */}
+            <div className="flex items-center justify-between border-b border-border px-6 py-4">
+              <div className="flex items-center gap-3">
+                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-amber/10 text-amber">
+                  <BarChart3 className="h-5 w-5" />
+                </span>
+                <div>
+                  <h2 className="text-lg font-bold text-foreground">一键回测报告</h2>
+                  <p className="text-xs text-secondary-text">
+                    策略：{backtestResult.strategy} · {backtestResult.candidates.length} 只标的 · {backtestResult.signalDate}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowBacktestModal(false)}
+                className="rounded-lg p-2 text-secondary-text transition-colors hover:bg-surface hover:text-foreground"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="max-h-[75vh] overflow-y-auto px-6 py-4">
+              {/* 汇总卡片 */}
+              <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <div className="rounded-xl border border-border bg-surface p-3 text-center">
+                  <p className="text-xs text-secondary-text">标的数</p>
+                  <p className="mt-1 text-xl font-bold text-foreground">{backtestResult.summary.validCount ?? 0}</p>
+                </div>
+                <div className="rounded-xl border border-border bg-surface p-3 text-center">
+                  <p className="text-xs text-secondary-text">盈利数</p>
+                  <p className={`mt-1 text-xl font-bold ${(backtestResult.summary.allProfitable ?? false) ? 'text-emerald' : 'text-amber'}`}>
+                    {backtestResult.summary.profitableCount ?? 0}/{backtestResult.summary.validCount ?? 0}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-border bg-surface p-3 text-center">
+                  <p className="text-xs text-secondary-text">形态达标</p>
+                  <p className={`mt-1 text-xl font-bold ${(backtestResult.summary.allPatternOk ?? false) ? 'text-emerald' : 'text-amber'}`}>
+                    {backtestResult.summary.patternPassCount ?? 0}/{backtestResult.summary.validCount ?? 0}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-border bg-surface p-3 text-center">
+                  <p className="text-xs text-secondary-text">综合评定</p>
+                  <p className={`mt-1 text-sm font-bold ${(backtestResult.summary.allProfitable ?? false) && (backtestResult.summary.allPatternOk ?? false) ? 'text-emerald' : 'text-amber'}`}>
+                    {(backtestResult.summary.allProfitable ?? false) && (backtestResult.summary.allPatternOk ?? false) ? '全部合格 ✅' : `${(backtestResult.summary.errorCount ?? 0) > 0 ? `${backtestResult.summary.errorCount ?? 0} 只异常` : '部分达标'}`}
+                  </p>
+                </div>
+              </div>
+
+              {/* ——— 昨日复盘 ——— */}
+              <div className="mb-6">
+                {yesterdayLoading && (
+                  <div className="flex items-center gap-2 rounded-lg bg-surface px-4 py-3 text-sm text-secondary-text">
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                    昨日复盘计算中...
+                  </div>
+                )}
+
+                {yesterdayError && (
+                  <InlineAlert variant="warning" message={`昨日复盘请求失败：${yesterdayError}`} />
+                )}
+
+                {yesterdayResult && (
+                  <>
+                    <div className="mb-3 flex items-center gap-2">
+                      <Target className="h-5 w-5 text-cyan" />
+                      <h3 className="text-base font-semibold text-foreground">昨日复盘</h3>
+                      <span className="text-xs text-secondary-text">
+                        {yesterdayResult.signalDate} → {yesterdayResult.todayDate}
+                      </span>
+                    </div>
+
+                    {/* 异常报警 */}
+                    {yesterdayResult.anomalyCount > 0 && (
+                      <InlineAlert variant="warning" message={`昨日回测发现 ${yesterdayResult.anomalyCount}/${yesterdayResult.total} 只标的触发异常预警，请关注以下标的`} />
+                    )}
+
+                    {/* 昨日汇总卡片 */}
+                    <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
+                      <div className="rounded-xl border border-border bg-surface p-3 text-center">
+                        <p className="text-xs text-secondary-text">昨日信号标的</p>
+                        <p className="mt-1 text-xl font-bold text-foreground">{yesterdayResult.total}</p>
+                      </div>
+                      <div className="rounded-xl border border-border bg-surface p-3 text-center">
+                        <p className="text-xs text-secondary-text">今日平均回报</p>
+                        <p className={`mt-1 text-xl font-bold ${yesterdayResult.avgReturnPct >= 0 ? 'text-emerald' : 'text-danger'}`}>
+                          {yesterdayResult.avgReturnPct > 0 ? '+' : ''}{yesterdayResult.avgReturnPct.toFixed(2)}%
+                        </p>
+                      </div>
+                      <div className="rounded-xl border border-border bg-surface p-3 text-center">
+                        <p className="text-xs text-secondary-text">异常预警</p>
+                        <p className={`mt-1 text-xl font-bold ${yesterdayResult.anomalyCount > 0 ? 'text-amber' : 'text-emerald'}`}>
+                          {yesterdayResult.anomalyCount}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* 逐只详情 */}
+                    {yesterdayResult.candidates.map((c, idx) => (
+                      <details key={`${c.code}-${idx}`} className={`mb-3 rounded-lg border ${c.hasAnomaly ? 'border-amber/40 bg-amber/5' : 'border-border bg-surface/40'}`} open={c.hasAnomaly}>
+                        <summary className="flex cursor-pointer items-center justify-between px-4 py-3 select-none">
+                          <div className="flex items-center gap-3 min-w-0">
+                            {c.hasAnomaly ? (
+                              <CircleAlert className="h-4 w-4 shrink-0 text-amber" />
+                            ) : (
+                              <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald" />
+                            )}
+                            <span className="font-mono text-sm font-medium truncate">{c.code}</span>
+                            <span className="text-sm text-secondary-text truncate">{c.name}</span>
+                          </div>
+                          <div className="flex items-center gap-3 shrink-0">
+                            {c.error ? (
+                              <span className="text-xs text-danger">数据异常</span>
+                            ) : (
+                              <span className={`font-mono text-sm font-semibold ${c.todayReturnPct >= 0 ? 'text-emerald' : 'text-danger'}`}>
+                                {c.todayReturnPct > 0 ? '+' : ''}{c.todayReturnPct.toFixed(2)}%
+                              </span>
+                            )}
+                            <ChevronDown className="h-4 w-4 text-secondary-text" />
+                          </div>
+                        </summary>
+                        <div className="border-t border-border px-4 pb-4 pt-3">
+                          {/* 异常报警详情 */}
+                          {c.anomalyReasons.length > 0 && (
+                            <div className="mb-3 space-y-1 rounded-lg bg-amber/10 p-2.5">
+                              {c.anomalyReasons.map((reason, rIdx) => (
+                                <p key={rIdx} className="flex items-start gap-1.5 text-xs text-amber">
+                                  <CircleAlert className="mt-0.5 h-3 w-3 shrink-0" />
+                                  {reason}
+                                </p>
+                              ))}
+                            </div>
+                          )}
+
+                          {c.error ? (
+                            <p className="text-xs text-danger">错误：{c.error}</p>
+                          ) : (
+                            <div className="space-y-3 text-sm">
+                              {/* 价格快照 */}
+                              <div>
+                                <p className="mb-1 font-medium text-foreground">价格快照</p>
+                                <div className="grid grid-cols-3 gap-2 text-xs">
+                                  <div>
+                                    <span className="text-secondary-text">昨日收盘</span>
+                                    <span className="ml-1 font-mono">{(c.signalPrice ?? 0).toFixed(2)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-secondary-text">今日开盘</span>
+                                    <span className="ml-1 font-mono">{(c.todayOpen ?? 0).toFixed(2)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-secondary-text">今日收盘</span>
+                                    <span className="ml-1 font-mono">{(c.todayClose ?? 0).toFixed(2)}</span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* 今日回报 */}
+                              <div>
+                                <p className="mb-1 font-medium text-foreground">今日回报</p>
+                                <div className="grid grid-cols-3 gap-2 text-xs">
+                                  <div>
+                                    <span className="text-secondary-text">收盘回报</span>
+                                    <span className={`ml-1 font-mono font-semibold ${(c.todayReturnPct ?? 0) >= 0 ? 'text-emerald' : 'text-danger'}`}>
+                                      {(c.todayReturnPct ?? 0) > 0 ? '+' : ''}{(c.todayReturnPct ?? 0).toFixed(2)}%
+                                    </span>
+                                  </div>
+                                  <div>
+                                    <span className="text-secondary-text">最高可达</span>
+                                    <span className="ml-1 font-mono text-emerald">
+                                      {(c.todayHighReturnPct ?? 0) > 0 ? '+' : ''}{(c.todayHighReturnPct ?? 0).toFixed(2)}%
+                                    </span>
+                                  </div>
+                                  <div>
+                                    <span className="text-secondary-text">最低可能</span>
+                                    <span className="ml-1 font-mono text-danger">
+                                      {(c.todayLowReturnPct ?? 0) > 0 ? '+' : ''}{(c.todayLowReturnPct ?? 0).toFixed(2)}%
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* 昨日形态 */}
+                              {c.pattern && (
+                                <div>
+                                  <p className="mb-1 font-medium text-foreground">
+                                    昨日形态
+                                    <span className={`ml-2 inline-block rounded-full px-1.5 py-0.5 text-[10px] font-bold ${c.pattern.allPass ? 'bg-emerald/10 text-emerald' : 'bg-amber/10 text-amber'}`}>
+                                      {c.pattern.allPass ? '达标' : '不达标'}
+                                    </span>
+                                  </p>
+                                  <div className="grid grid-cols-3 gap-1.5 text-xs">
+                                    <span className="text-secondary-text">20日振幅: <span className="font-mono">{(c.pattern.range20dPct ?? 0).toFixed(2)}%</span></span>
+                                    <span className="text-secondary-text">20日波动率: <span className="font-mono">{(c.pattern.volatility20dPct ?? 0).toFixed(2)}%</span></span>
+                                    <span className="text-secondary-text">20日涨跌幅: <span className="font-mono">{(c.pattern.change20dPct ?? 0) > 0 ? '+' : ''}{(c.pattern.change20dPct ?? 0).toFixed(2)}%</span></span>
+                                    <span className="text-secondary-text">横盘天数: <span className="font-mono">{c.pattern.consolidationDays ?? '—'}</span></span>
+                                    <span className="text-secondary-text">量比: <span className="font-mono">{(c.pattern.volumeRatio ?? 0).toFixed(2)}x</span></span>
+                                    <span className="text-secondary-text">信号日回报: <span className={`font-mono ${(c.pattern.signalDayReturnPct ?? 0) >= 0 ? 'text-emerald' : 'text-danger'}`}>{(c.pattern.signalDayReturnPct ?? 0) > 0 ? '+' : ''}{(c.pattern.signalDayReturnPct ?? 0).toFixed(2)}%</span></span>
+                                  </div>
+                                  {c.pattern.violations.length > 0 && (
+                                    <div className="mt-1.5 text-xs text-amber">
+                                      违规项：{c.pattern.violations.join('、')}
+                                    </div>
+                                  )}
+                                  {c.volumeRatio !== 0 && c.volumeRatio != null && (
+                                    <div className="mt-1 text-xs">
+                                      <span className="text-secondary-text">昨日量比: </span>
+                                      <span className={`font-mono ${(c.volumeRatio ?? 0) > 3 ? 'text-amber' : ''}`}>{(c.volumeRatio ?? 0).toFixed(2)}x</span>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+
+                              {/* 技术面分析 */}
+                              {c.trend && (
+                                <div className="mt-3 border-t border-border pt-3">
+                                  <p className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-foreground">
+                                    <TrendingUp className="h-4 w-4 text-yellow" />
+                                    技术面分析
+                                    <span className={`ml-auto rounded-full px-2 py-0.5 text-[10px] font-bold ${(c.trend.signalScore ?? 0) >= 60 ? 'bg-emerald/10 text-emerald' : (c.trend.signalScore ?? 0) >= 40 ? 'bg-amber/10 text-amber' : 'bg-danger/10 text-danger'}`}>
+                                      评分 {c.trend.signalScore ?? '—'}
+                                    </span>
+                                  </p>
+                                  {/* 趋势状态 */}
+                                  <div className="space-y-2 text-xs">
+                                    <div className="flex flex-wrap gap-x-4 gap-y-1">
+                                      <span className="text-secondary-text">趋势: <span className="font-medium text-foreground">{c.trend.trendStatus ?? '—'}</span></span>
+                                      <span className="text-secondary-text">强度: <span className="font-mono">{(c.trend.trendStrength ?? 0).toFixed(1)}</span></span>
+                                      <span className="text-secondary-text">均线排列: <span className="font-medium text-foreground">{c.trend.maAlignment ?? '—'}</span></span>
+                                    </div>
+                                    {/* 均线 + 乖离率 */}
+                                    <div className="grid grid-cols-5 gap-1.5 rounded-lg bg-surface/60 p-2">
+                                      <div className="text-center">
+                                        <span className="text-[10px] text-secondary-text">MA5</span>
+                                        <span className="block font-mono text-xs">{(c.trend.ma5 ?? 0).toFixed(2)}</span>
+                                      </div>
+                                      <div className="text-center">
+                                        <span className="text-[10px] text-secondary-text">MA10</span>
+                                        <span className="block font-mono text-xs">{(c.trend.ma10 ?? 0).toFixed(2)}</span>
+                                      </div>
+                                      <div className="text-center">
+                                        <span className="text-[10px] text-secondary-text">MA20</span>
+                                        <span className="block font-mono text-xs">{(c.trend.ma20 ?? 0).toFixed(2)}</span>
+                                      </div>
+                                      <div className="text-center">
+                                        <span className="text-[10px] text-secondary-text">MA60</span>
+                                        <span className="block font-mono text-xs">{(c.trend.ma60 ?? 0).toFixed(2)}</span>
+                                      </div>
+                                      <div className="text-center">
+                                        <span className="text-[10px] text-secondary-text">偏离MA5</span>
+                                        <span className={`block font-mono text-xs ${(c.trend.biasMa5 ?? 0) > 0 ? 'text-emerald' : 'text-danger'}`}>
+                                          {(c.trend.biasMa5 ?? 0) > 0 ? '+' : ''}{(c.trend.biasMa5 ?? 0).toFixed(2)}%
+                                        </span>
+                                      </div>
+                                    </div>
+                                    {/* 量能 */}
+                                    <div className="flex flex-wrap gap-x-4 gap-y-1">
+                                      <span className="text-secondary-text">量能: <span className="font-medium text-foreground">{c.trend.volumeStatus ?? '—'}</span></span>
+                                      <span className="text-secondary-text">5日均量比: <span className="font-mono">{(c.trend.volumeRatio5d ?? 0).toFixed(2)}x</span></span>
+                                    </div>
+                                    {/* MACD */}
+                                    <div>
+                                      <span className="text-secondary-text">MACD: </span>
+                                      <span className="font-medium text-foreground">{c.trend.macdStatus ?? '—'}</span>
+                                      <span className="ml-2 text-secondary-text">{c.trend.macdSignal ?? '—'}</span>
+                                      <div className="mt-0.5 flex gap-3 font-mono text-[11px]">
+                                        <span>DIF: <span className={(c.trend.macdDif ?? 0) >= 0 ? 'text-emerald' : 'text-danger'}>{(c.trend.macdDif ?? 0).toFixed(3)}</span></span>
+                                        <span>DEA: <span className={(c.trend.macdDea ?? 0) >= 0 ? 'text-emerald' : 'text-danger'}>{(c.trend.macdDea ?? 0).toFixed(3)}</span></span>
+                                        <span>柱: <span className={(c.trend.macdBar ?? 0) >= 0 ? 'text-emerald' : 'text-danger'}>{(c.trend.macdBar ?? 0).toFixed(3)}</span></span>
+                                      </div>
+                                    </div>
+                                    {/* RSI */}
+                                    <div>
+                                      <span className="text-secondary-text">RSI: </span>
+                                      <span className="font-medium text-foreground">{c.trend.rsiStatus ?? '—'}</span>
+                                      <div className="mt-0.5 flex gap-3 font-mono text-[11px]">
+                                        <span>6日: <span className={(c.trend.rsi6 ?? 0) >= 70 ? 'text-danger' : (c.trend.rsi6 ?? 0) <= 30 ? 'text-emerald' : ''}>{(c.trend.rsi6 ?? 0).toFixed(1)}</span></span>
+                                        <span>12日: <span className={(c.trend.rsi12 ?? 0) >= 70 ? 'text-danger' : (c.trend.rsi12 ?? 0) <= 30 ? 'text-emerald' : ''}>{(c.trend.rsi12 ?? 0).toFixed(1)}</span></span>
+                                        <span>24日: <span className={(c.trend.rsi24 ?? 0) >= 70 ? 'text-danger' : (c.trend.rsi24 ?? 0) <= 30 ? 'text-emerald' : ''}>{(c.trend.rsi24 ?? 0).toFixed(1)}</span></span>
+                                      </div>
+                                    </div>
+                                    {/* 买入信号 */}
+                                    {c.trend.buySignal && (
+                                      <div className="rounded-md bg-surface/60 px-2 py-1.5">
+                                        <span className="text-secondary-text">信号: </span>
+                                        <span className={`font-semibold ${(c.trend.buySignal ?? '').includes('看多') || (c.trend.buySignal ?? '').includes('金叉') || (c.trend.buySignal ?? '').includes('超卖') ? 'text-emerald' : 'text-amber'}`}>
+                                          {c.trend.buySignal}
+                                        </span>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </details>
+                    ))}
+                  </>
+                )}
+              </div>
+
+              {/* 逐只展开 */}
+              {backtestResult.candidates.map((c, i) => (
+                <details key={c.code} className="mb-4 rounded-xl border border-border bg-surface/50" open={i === 0}>
+                  <summary className="flex cursor-pointer items-center gap-3 px-5 py-3.5 select-none">
+                    <span className="text-xs font-bold text-secondary-text">#{i + 1}</span>
+                    <span className="font-semibold text-foreground">{c.name}</span>
+                    <span className="text-xs text-secondary-text">{c.code}</span>
+                    {c.error ? (
+                      <span className="ml-auto rounded-full bg-danger/10 px-2 py-0.5 text-xs text-danger">数据异常</span>
+                    ) : c.pattern?.allPass ? (
+                      <span className="ml-auto rounded-full bg-emerald/10 px-2 py-0.5 text-xs text-emerald">形态达标</span>
+                    ) : (
+                      <span className="ml-auto rounded-full bg-amber/10 px-2 py-0.5 text-xs text-amber">形态不达标</span>
+                    )}
+                    {c.holdingReturns.length > 0 && (
+                      <span className={`rounded-full px-2 py-0.5 text-xs ${c.holdingReturns[0].returnPct > 0 ? 'bg-emerald/10 text-emerald' : 'bg-danger/10 text-danger'}`}>
+                        {c.holdingReturns[0].returnPct > 0 ? '+' : ''}{c.holdingReturns[0].returnPct?.toFixed(2)}%
+                      </span>
+                    )}
+                  </summary>
+                  <div className="border-t border-border px-5 py-4">
+                    {c.error ? (
+                      <p className="text-sm text-danger">{c.error}</p>
+                    ) : (
+                      <div className="space-y-5">
+                        {/* 形态验证 */}
+                        {c.pattern && (
+                          <div>
+                            <h4 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-foreground">
+                              <Target className="h-4 w-4 text-cyan" />
+                              横盘突破形态验证
+                            </h4>
+                            <div className="overflow-hidden rounded-lg border border-border">
+                              <table className="w-full text-xs">
+                                <thead className="bg-surface">
+                                  <tr>
+                                    <th className="px-3 py-2 text-left text-secondary-text">指标</th>
+                                    <th className="px-3 py-2 text-right text-secondary-text">实际值</th>
+                                    <th className="px-3 py-2 text-center text-secondary-text">阈值</th>
+                                    <th className="px-3 py-2 text-center text-secondary-text">状态</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-border">
+                                  <tr className="hover:bg-surface/40">
+                                    <td className="px-3 py-2 text-secondary-text">20日振幅</td>
+                                    <td className="px-3 py-2 text-right font-mono">{c.pattern.range20dPct?.toFixed(1)}%</td>
+                                    <td className="px-3 py-2 text-center text-secondary-text">≤20%</td>
+                                    <td className="px-3 py-2 text-center">{c.pattern.range20dPct <= 20 ? '✅' : '❌'}</td>
+                                  </tr>
+                                  <tr className="hover:bg-surface/40">
+                                    <td className="px-3 py-2 text-secondary-text">年化波动率</td>
+                                    <td className="px-3 py-2 text-right font-mono">{c.pattern.volatility20dPct?.toFixed(1)}%</td>
+                                    <td className="px-3 py-2 text-center text-secondary-text">≤35%</td>
+                                    <td className="px-3 py-2 text-center">{c.pattern.volatility20dPct <= 35 ? '✅' : '❌'}</td>
+                                  </tr>
+                                  <tr className="hover:bg-surface/40">
+                                    <td className="px-3 py-2 text-secondary-text">20日涨跌幅</td>
+                                    <td className={`px-3 py-2 text-right font-mono ${c.pattern.change20dPct >= 0 ? 'text-emerald' : 'text-danger'}`}>{c.pattern.change20dPct > 0 ? '+' : ''}{c.pattern.change20dPct?.toFixed(1)}%</td>
+                                    <td className="px-3 py-2 text-center text-secondary-text">±10%</td>
+                                    <td className="px-3 py-2 text-center">{Math.abs(c.pattern.change20dPct) <= 10 ? '✅' : '❌'}</td>
+                                  </tr>
+                                  <tr className="hover:bg-surface/40">
+                                    <td className="px-3 py-2 text-secondary-text">横盘天数</td>
+                                    <td className="px-3 py-2 text-right font-mono">{c.pattern.consolidationDays}天</td>
+                                    <td className="px-3 py-2 text-center text-secondary-text">≥6天</td>
+                                    <td className="px-3 py-2 text-center">{c.pattern.consolidationDays >= 6 ? '✅' : '❌'}</td>
+                                  </tr>
+                                  <tr className="hover:bg-surface/40">
+                                    <td className="px-3 py-2 text-secondary-text">量比</td>
+                                    <td className="px-3 py-2 text-right font-mono">{c.pattern.volumeRatio?.toFixed(2)}x</td>
+                                    <td className="px-3 py-2 text-center text-secondary-text">—</td>
+                                    <td className="px-3 py-2 text-center">{c.pattern.volumeRatio >= 1 ? '🔺放量' : '🔻缩量'}</td>
+                                  </tr>
+                                </tbody>
+                              </table>
+                            </div>
+                            {c.pattern.violations.length > 0 && (
+                              <p className="mt-2 text-xs text-amber">
+                                ⚠️ {c.pattern.violations.join('；')}
+                              </p>
+                            )}
+                          </div>
+                        )}
+
+                        {/* 多窗口持有收益 */}
+                        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                          {c.holdingReturns.length > 0 && (
+                            <div>
+                              <h4 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-foreground">
+                                <DollarSign className="h-4 w-4 text-emerald" />
+                                买入持有收益（{c.signalDate} 开盘买入）
+                              </h4>
+                              <div className="overflow-hidden rounded-lg border border-border">
+                                <table className="w-full text-xs">
+                                  <thead className="bg-surface">
+                                    <tr>
+                                      <th className="px-3 py-2 text-left text-secondary-text">持有天数</th>
+                                      <th className="px-3 py-2 text-right text-secondary-text">收益率</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-border">
+                                    {c.holdingReturns.map((h) => (
+                                      <tr key={h.days} className="hover:bg-surface/40">
+                                        <td className="px-3 py-2">{h.days} 日</td>
+                                        <td className={`px-3 py-2 text-right font-mono ${h.returnPct >= 0 ? 'text-emerald' : 'text-danger'}`}>
+                                          {h.returnPct > 0 ? '+' : ''}{h.returnPct?.toFixed(2)}%
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                              {(c.maxReturn5dPct != null || c.minReturn5dPct != null) && (
+                                <p className="mt-2 text-xs text-secondary-text">
+                                  {c.maxReturn5dPct != null && (
+                                    <>5 日内最高可卖: <span className="font-mono text-emerald">{c.maxReturn5dPct > 0 ? '+' : ''}{c.maxReturn5dPct.toFixed(2)}%</span></>
+                                  )}
+                                  {c.maxReturn5dPct != null && c.minReturn5dPct != null && (
+                                    <>&nbsp;·&nbsp;</>
+                                  )}
+                                  {c.minReturn5dPct != null && (
+                                    <>最低可能: <span className="font-mono text-danger">{c.minReturn5dPct > 0 ? '+' : ''}{c.minReturn5dPct.toFixed(2)}%</span></>
+                                  )}
+                                </p>
+                              )}
+                            </div>
+                          )}
+
+                          {/* 多时间窗口模拟 */}
+                          {c.windowSimulations.length > 0 && (
+                            <div>
+                              <h4 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-foreground">
+                                <TrendingUp className="h-4 w-4 text-cyan" />
+                                历史窗口模拟
+                              </h4>
+                              <div className="overflow-hidden rounded-lg border border-border">
+                                <table className="w-full text-xs">
+                                  <thead className="bg-surface">
+                                    <tr>
+                                      <th className="px-2 py-2 text-left text-secondary-text">信号日</th>
+                                      <th className="px-2 py-2 text-right text-secondary-text">至今日</th>
+                                      <th className="px-2 py-2 text-center text-secondary-text">形态</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-border">
+                                    {c.windowSimulations.map((w, wi) => (
+                                      <tr key={wi} className="hover:bg-surface/40">
+                                        <td className="px-2 py-1.5">{w.signalDate}</td>
+                                        <td className={`px-2 py-1.5 text-right font-mono ${w.holdReturnPct >= 0 ? 'text-emerald' : 'text-danger'}`}>
+                                          {w.holdReturnPct > 0 ? '+' : ''}{w.holdReturnPct?.toFixed(1)}%
+                                        </td>
+                                        <td className="px-2 py-1.5 text-center">{w.patternAllPass ? '✅' : '⚠️'}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* 均线 */}
+                        {c.maSnapshots.length > 0 && (
+                          <div>
+                            <h4 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-foreground">
+                              <TrendingUp className="h-4 w-4 text-purple" />
+                              均线参考（{c.signalDate} 收盘={c.signalPrice?.toFixed(2)}）
+                            </h4>
+                            <div className="flex flex-wrap gap-3">
+                              {c.maSnapshots.map((m) => (
+                                <span
+                                  key={m.ma}
+                                  className={`rounded-full border px-3 py-1 text-xs font-mono ${
+                                    m.priceAbove
+                                      ? 'border-emerald/30 bg-emerald/5 text-emerald'
+                                      : 'border-danger/30 bg-danger/5 text-danger'
+                                  }`}
+                                >
+                                  MA{m.ma}: {m.value?.toFixed(2)} {m.priceAbove ? '▲' : '▼'}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </details>
+              ))}
+            </div>
+
+            {/* 底部按钮 */}
+            <div className="flex justify-end gap-3 border-t border-border px-6 py-4">
+              <button
+                onClick={() => setShowBacktestModal(false)}
+                className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-secondary-text transition-colors hover:bg-surface"
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </AppPage>
   );
 };
