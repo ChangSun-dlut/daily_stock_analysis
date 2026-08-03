@@ -1,59 +1,165 @@
-# Consolidation Breakout Strategy / 横盘突破
-# Stock has been consolidating for months, recent volume expanding, approaching key resistance breakout.
-
-name: consolidation_breakout
-display_name: 横盘突破
-description: 横盘已久、近期量能活跃即将突破的个股。适用于股价在平台整理后出现放量突破信号时。
 category: trend
-core_rules: [1, 2, 3, 4]
-required_tools:
-  - get_daily_history
-  - analyze_trend
-  - get_realtime_quote
-aliases: [横盘突破, 平台突破, 蓄力突破]
-default_priority: 28
-market_regimes: [sideways, sideways_turning_up]
+description: 横盘整理后量能温和回升，捕捉蓄势末期信号。consolidation_quality 专项因子主导评分，行业分层采样避免单一行业垄断。
+display_name: 横盘突破
+name: consolidation_breakout
+screening:
+  enabled: true
+  factor_weights:
+    activity: 0.12
+    consolidation_quality: 0.62
+    liquidity: 0.0
+    momentum: 0.10
+    stability: 0.08
+    theme_heat: 0.08
+    value: 0.0
+  hard_filters:
+    amount_min: -999
+    body_pct_min: -999
+    breakout_20d_pct_max: 9999
+    breakout_20d_pct_min: -999
+    change_60d_max: 9999
+    change_60d_min: -999
+    change_20d_max: 10.0
+    change_20d_min: -999
+    change_pct_max: 9999
+    change_pct_min: -999
+    consolidation_days_20d_min: 6
+    exclude_st: true
+    macd_status_whitelist:
+    - bullish
+    - neutral
+    - bearish
+    price_max: 9999
+    price_min: -999
+    range_20d_pct_max: 25.0
+    require_price_above_ma20: false
+    signal_score_min: -999
+    turnover_rate_min: -999
+    volatility_20d_pct_max: 45.0
+    volume_ratio_20d_min: -999
+  market_scope:
+  - cn
+  max_output: 10
+  portfolio_profile:
+    buckets:
+      AI算力:
+      - AI算力
+      - 算力
+      - 数据中心
+      - 服务器
+      - 光模块
+      周期:
+      - 钢铁
+      - 煤炭
+      - 有色
+      - 化工
+      新能源:
+      - 新能源
+      - 光伏
+      - 锂电
+      - 电池
+      - 储能
+      机器人:
+      - 机器人
+      - 减速器
+      - 执行器
+      - 伺服
+      金融:
+      - 券商
+      - 银行
+      - 保险
+      消费:
+      - 白酒
+      - 食品
+      - 免税
+      - 零售
+      - 家电
+    concentration_penalty: 5.0
+    max_same_bucket: 1
+  ranking_hints: '优先关注：
 
-instructions: |
-  **横盘突破（Consolidation Breakout Strategy）**
+    1. 横盘整理时间足够长（至少 8 个交易日窄幅震荡），横盘越久突破越可靠。60 天以上额外加分，120 天以上高权重加分
 
-  筛选标准：
-  1. **横盘确认**：
-     使用 `get_daily_history` 检查过去 2 个月(约 40 个交易日)股价在**窄幅区间内震荡**。
-     - 60 日涨跌幅应在 -15% ~ +20% 之间。
-     - 20 日内最大振幅不超过 15%（基准），≤ 12% 更优（加分见评分调整）。
-     - 收盘价变异系数（close CV = std/mean）≤ 5%，越低表示筹码越集中、横盘越扎实。
-     **【关键】必须额外调用 `get_daily_history(stock_code, days=120)` 检查更长周期的横盘状态**，用于横盘周期加权评分（见评分调整第 2 条）。忽视此步骤将漏掉长周期横盘加分，导致评分偏低。
+    2. 量能较前一周温和回升，量比 0.8-2.5 为佳，不过度放量
 
-  2. **量能激活**（关联理念3：效率优先）：
-     - 近期量能明显放大，当日量比 > 1.5。
-     - 最近 5-10 个交易日平均量能持续活跃，换手率 > 2%。
-     - 使用 `get_realtime_quote` → volume_ratio 确认今日量能状态。
+    3. 股价在箱体上沿附近，具备突破潜力
 
-  3. **突破/逼近压力位**：
-     - 使用 `analyze_trend` → resistance_levels 获取关键平台压力位。
-     - 当前价格**逼近或刚突破**此平台位，突破乖离不超过 5%。
-     - 收盘价应站在 MA20 之上。
-     - breakthrough 强度 > 最低阈值，确认不是假突破。
+    4. 波动率较低的回踩确认信号，假突破概率更低
 
-  4. **K 线形态确认**：
-     - 出现大阳线（实体涨幅 > 3%）或连续放量中阳线。
-     - 收盘应在当日振幅上方 60% 以上（强势收盘）。
-     - 无长上影线（上影 < 实体 50%）。
+    5. 大盘蓝筹低换手与中小盘微跌触底均可覆盖
 
-  5. **风险过滤**（关联理念5：风险排查）：
-     - 排除 ST 股。
-     - 通过 `search_stock_news` 确认无重大利空。
-     - 股价不低于 3 元（排除仙股）。
-     - 主力资金无明显流出信号。
-
-  评分调整：
-  - 横盘 + 突破确认：sentiment_score +15
-  - 横盘周期加权：横盘越久突破信号越可靠，按横盘时长额外加分（参考华建集团 600629 在 2025-04-24 ~ 07-17 的真实横盘：57 天振幅 15.1%，close CV=3%）：
-    - 横盘 2-3 个月（40-60 交易日）：区间振幅 ≤ 18%，涨跌幅 -18% ~ +20%，close CV ≤ 6% → +3
-    - 横盘 3-6 个月（60-120 交易日）：区间振幅 ≤ 22%，涨跌幅 -22% ~ +25%，close CV ≤ 7% → +5
-    - 横盘 6 个月以上（120+ 交易日）：区间振幅 ≤ 28%，涨跌幅 -28% ~ +30%，close CV ≤ 8% → +8
-  - 板块联动共振：额外 +5
-  - 均线粘合后发散（MA5/10/20 开始上翘）：额外 +5
-  - 止损设在平台突破位下方 3-5%。
-  - 在 `buy_reason` 和 `volume_analysis` 中注明"横盘突破"及横盘时长。
+    '
+  risk_profile:
+    abnormal_volume_ratio: 5.0
+    chase_change_pct: 9.3
+    high_turnover_rate: 15.0
+    weak_signal_score: 40.0
+  scorecard_profile:
+    capital_confirmed_bonus: 2.0
+    hot_money_activity_min: 96.0
+    hot_money_penalty: 1.3
+    volume_spike_ratio: 8.0
+  scoring_profile:
+    activity_high_turnover_rate: 14.0
+    activity_high_volume_ratio: 5.0
+    activity_ideal_turnover_rate: 1.5
+    activity_ideal_volume_ratio: 2.0
+    consolidation_quality_base: 50.0
+    consolidation_quality_breakout_bonus_slope: 0.80
+    consolidation_quality_breakout_threshold_pct: 30.0
+    consolidation_quality_days_ideal: 10.0
+    consolidation_quality_days_slope: 4.0
+    consolidation_quality_range_ideal_max: 15.0
+    consolidation_quality_range_ideal_min: 2.0
+    consolidation_quality_range_penalty_slope: 1.5
+    consolidation_quality_volatility_ideal: 25.0
+    consolidation_quality_volatility_penalty_slope: 0.60
+    consolidation_quality_volume_ratio_ideal: 0.70
+    consolidation_quality_volume_ratio_penalty_slope: 15.0
+    consolidation_quality_overhead_threshold_pct: -15.0
+    consolidation_quality_overhead_penalty_slope: 0.5
+    consolidation_quality_near_high_threshold_pct: -5.0
+    consolidation_quality_near_high_penalty: 25.0
+    consolidation_quality_momentum_20d_threshold_pct: 5.0
+    consolidation_quality_momentum_20d_penalty_slope: 6.0
+    consolidation_quality_momentum_10d_threshold_pct: 3.0
+    consolidation_quality_momentum_10d_penalty_slope: 8.0
+    consolidation_quality_volume_expand_threshold: 1.0
+    consolidation_quality_volume_expand_bonus: 12.0
+    consolidation_quality_volume_spike_threshold: 1.5
+    consolidation_quality_volume_spike_bonus_slope: 45.0
+    consolidation_quality_consecutive_spike_2d_bonus: 8.0
+    consolidation_quality_consecutive_spike_3d_bonus: 15.0
+    consolidation_quality_coiled_spring_contraction_min: 15.0
+    consolidation_quality_coiled_spring_ramp_min: 1.15
+    consolidation_quality_coiled_spring_ramp_max: 3.5
+    consolidation_quality_coiled_spring_bonus: 20.0
+    consolidation_quality_surge_pullback_penalty_slope: 1.0
+    consolidation_quality_long_bonus_60d: 8.0
+    consolidation_quality_long_bonus_120d: 15.0
+    momentum_chase_penalty_slope: 10.0
+    momentum_chase_start_pct: 3.0
+    stability_hot_change_pct: 8.5
+  shape_window: 40
+  stratified_sampling:
+    enabled: true
+    industry_col: industry
+    max_per_group_share: 0.35
+    min_per_group: 5
+  tech_weight: 0.40
+style:
+  capital_profile: high_liquidity
+  execution_style: breakout
+  holding_period: short_term
+  market_regime:
+  - sideways
+  - risk_on
+  - trend
+  risk_profile: aggressive
+  ui_badge: 突破
+tags:
+- breakout
+- consolidation
+- concentration
+- low_volatility
+version: '1.8'
