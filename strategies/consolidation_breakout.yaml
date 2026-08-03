@@ -31,11 +31,11 @@ screening:
     - bearish
     price_max: 9999
     price_min: -999
-    range_20d_pct_max: 25.0
+    range_20d_pct_max: 20.0
     require_price_above_ma20: false
     signal_score_min: -999
     turnover_rate_min: -999
-    volatility_20d_pct_max: 45.0
+    volatility_20d_pct_max: 35.0
     volume_ratio_20d_min: -999
   market_scope:
   - cn
@@ -109,11 +109,11 @@ screening:
     consolidation_quality_breakout_threshold_pct: 30.0
     consolidation_quality_days_ideal: 10.0
     consolidation_quality_days_slope: 4.0
-    consolidation_quality_range_ideal_max: 15.0
+    consolidation_quality_range_ideal_max: 12.0
     consolidation_quality_range_ideal_min: 2.0
-    consolidation_quality_range_penalty_slope: 1.5
-    consolidation_quality_volatility_ideal: 25.0
-    consolidation_quality_volatility_penalty_slope: 0.60
+    consolidation_quality_range_penalty_slope: 2.5
+    consolidation_quality_volatility_ideal: 20.0
+    consolidation_quality_volatility_penalty_slope: 1.0
     consolidation_quality_volume_ratio_ideal: 0.70
     consolidation_quality_volume_ratio_penalty_slope: 15.0
     consolidation_quality_overhead_threshold_pct: -15.0
