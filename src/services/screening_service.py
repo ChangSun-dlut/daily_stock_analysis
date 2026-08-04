@@ -218,7 +218,7 @@ def _alphasift_screen_cache_path(strategy: str) -> Path:
 
 
 def read_alphasift_screen_cache(strategy: str) -> dict | None:
-    """返回某策略的最新缓存结果；无缓存或缓存过期（非今日）返回 None。"""
+    """返回某策略的最新缓存结果；无缓存或缓存超过 7 天返回 None。"""
     cache_path = _alphasift_screen_cache_path(strategy)
     try:
         raw = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -234,9 +234,13 @@ def read_alphasift_screen_cache(strategy: str) -> dict | None:
     cache_date = raw.get("date")
     if not cache_date:
         return None
-    today_str = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
-    if cache_date != today_str:
-        return None  # 仅当天有效
+    try:
+        cache_dt = datetime.strptime(cache_date, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    today = datetime.now(timezone.utc).astimezone().date()
+    if (today - cache_dt).days > 7:
+        return None  # 超过 7 天视为过期
 
     return raw
 
@@ -935,9 +939,9 @@ class AlphaSiftService:
     def status(self) -> Dict[str, Any]:
         adapter_status, available, diagnostics = _get_alphasift_status_snapshot()
         payload = {
-            "enabled": bool(self.config.alphasift_enabled),
+            "enabled": bool(self.config.screening_enabled),
             "available": available,
-            "install_spec_is_default": _is_default_alphasift_install_spec(self.config.alphasift_install_spec),
+            "install_spec_is_default": _is_default_alphasift_install_spec(self.config.screening_install_spec),
             "contract_version": adapter_status.get("contract_version"),
             "version": adapter_status.get("version"),
             "strategy_count": adapter_status.get("strategy_count"),
@@ -1265,7 +1269,7 @@ class AlphaSiftService:
         candidates = _normalize_candidates(raw_data)
         selected = candidates[:max_results]
         selected, dsa_enrichment = _enrich_candidates_with_dsa(selected)
-        return {
+        screen_result = {
             "enabled": True,
             "candidates": selected,
             "candidate_count": len(selected),
@@ -1292,6 +1296,16 @@ class AlphaSiftService:
             "portfolio_diversity_enabled": raw_data.get("portfolio_diversity_enabled"),
             "portfolio_concentration_notes": raw_data.get("portfolio_concentration_notes") or [],
         }
+
+        # 写入缓存——页面刷新后可恢复上次选股结果
+        try:
+            write_alphasift_screen_cache(
+                strategy=strategy, market=market, result=screen_result,
+            )
+        except Exception:
+            pass  # 缓存写入失败不影响选股结果返回
+
+        return screen_result
 
 
 def _normalize_alphasift_hotspot_detail(detail: Any, *, provider: str, requested_topic: str) -> Dict[str, Any]:
@@ -1460,7 +1474,7 @@ def _build_alphasift_hotspot_summary_text(summary: Dict[str, Any], *, topic: str
 
 def _install_alphasift(config: Config) -> Dict[str, Any]:
     with _ALPHASIFT_INSTALL_LOCK:
-        install_spec_is_default = _is_default_alphasift_install_spec(config.alphasift_install_spec)
+        install_spec_is_default = _is_default_alphasift_install_spec(config.screening_install_spec)
         if _is_alphasift_available():
             _get_dsa_adapter()
             return _build_install_response(
@@ -1468,7 +1482,7 @@ def _install_alphasift(config: Config) -> Dict[str, Any]:
                 install_spec_is_default=install_spec_is_default,
             )
 
-        install_spec = _validate_install_spec(config.alphasift_install_spec)
+        install_spec = _validate_install_spec(config.screening_install_spec)
 
         try:
             _purge_alphasift_modules()
@@ -1541,7 +1555,7 @@ def _validate_install_spec(raw_install_spec: str) -> str:
 
 
 def _ensure_alphasift_enabled(config: Config) -> None:
-    if not config.alphasift_enabled:
+    if not config.screening_enabled:
         raise HTTPException(
             status_code=403,
             detail={"error": "alphasift_disabled", "message": "ALPHASIFT_ENABLED is false."},

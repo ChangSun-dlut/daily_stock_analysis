@@ -13,7 +13,7 @@ from api.deps import get_config_dep
 from api.v1.errors import api_error
 from src.config import Config
 from src.services.alphasift_backtest_service import run_backtest, run_yesterday_backtest
-from src.services.alphasift_service import AlphaSiftService, read_alphasift_screen_cache, write_alphasift_screen_cache
+from src.services.screening_service import AlphaSiftService, read_alphasift_screen_cache, write_alphasift_screen_cache
 from src.services.task_queue import TaskStatus as QueueTaskStatus
 from src.services.task_queue import get_task_queue
 

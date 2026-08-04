@@ -255,7 +255,6 @@ def _compute_ma_snapshots(df: pd.DataFrame, idx: int) -> list[MaSnapshot]:
 # 主入口
 # ---------------------------------------------------------------------------
 @dataclass
-@dataclass
 class TrendSnapshot:
     """Compact trend analysis snapshot for yesterday backtest display."""
     trend_status: str = ""           # 趋势状态

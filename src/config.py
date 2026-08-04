@@ -75,6 +75,8 @@ from src.utils.market_review_region import normalize_market_review_region_lenien
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_ALPHASIFT_INSTALL_SPEC = "git+https://github.com/ZhuLinsen/alphasift.git@9f522747caafd3c1bddb7e14d5cf44c8580b6cf"
+
 @dataclass
 class ConfigIssue:
     """Structured configuration validation issue with a severity level.
@@ -732,6 +734,7 @@ class Config:
 
     # === Built-in stock screening ===
     screening_enabled: bool = False
+    screening_install_spec: str = DEFAULT_ALPHASIFT_INSTALL_SPEC
 
     # === AI 分析配置 ===
     generation_backend: str = LITELLM_BACKEND_ID
@@ -2100,7 +2103,8 @@ class Config:
                 minimum=1,
             ),
             portfolio_fx_update_enabled=os.getenv('PORTFOLIO_FX_UPDATE_ENABLED', 'true').lower() == 'true',
-            screening_enabled=parse_env_bool(os.getenv('SCREENING_ENABLED'), default=False),
+            screening_enabled=parse_env_bool(os.getenv('ALPHASIFT_ENABLED'), default=True),
+            screening_install_spec=os.getenv('ALPHASIFT_INSTALL_SPEC', DEFAULT_ALPHASIFT_INSTALL_SPEC),
         )
     
     @classmethod

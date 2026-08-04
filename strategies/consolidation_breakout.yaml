@@ -2,6 +2,55 @@ category: trend
 description: 横盘整理后量能温和回升，捕捉蓄势末期信号。consolidation_quality 专项因子主导评分，行业分层采样避免单一行业垄断。
 display_name: 横盘突破
 name: consolidation_breakout
+core_rules: [1, 2, 4]
+required_tools:
+  - get_daily_history
+  - analyze_trend
+  - get_realtime_quote
+aliases: [横盘突破, 蓄势突破]
+default_priority: 50
+market_regimes: [sideways, risk_on, trend]
+
+instructions: |
+  **横盘突破（Consolidation Breakout Strategy）**
+
+  入场判定标准：
+
+  1. **横盘整理确认**：
+     - 使用 `get_daily_history`（至少 40 个交易日）。
+     - 横盘整理时间至少 8 个交易日，60 天以上额外加分，120 天以上高权重加分。
+     - 20 日振幅 < 20%，振幅越窄越理想（2%~12% 为佳）。
+     - `analyze_trend` → 趋势处于横盘或温和上行阶段。
+
+  2. **量能信号**：
+     - 使用 `get_realtime_quote` 和 `analyze_trend`。
+     - 量比 0.8~2.5 为佳，量能较前一周温和回升，不过度放量。
+     - volume_ratio > 5.0 视为异常放量，需谨慎。
+     - 连续 2~3 日温和放量是加分信号（"弹簧压缩"形态）。
+
+  3. **价格位置**：
+     - 股价在箱体上沿附近（距 20 日高点 5% 以内）。
+     - 站上 MA20 为加分项。
+     - MACD 多头或走平为佳。
+
+  4. **风险确认**（关联理念5：风险排查）：
+     - 通过 `search_stock_news` 排除利空消息。
+     - 排除 ST 股票。
+     - 追涨涨幅 > 9.3% 或换手率 > 15% 需警惕。
+     - 60 日涨幅 > 10% 或 10 日涨幅 > 3% 的追高风险需注意。
+
+  5. **行业分层**：
+     - 同行业最多入选 1 只，避免单一行业垄断。
+     - 同类行业集中度超标时有惩罚权重。
+
+  评分调整：
+  - 横盘时间长（>60天）：consolidation_quality 额外 +8
+  - 横盘时间长（>120天）：consolidation_quality 额外 +15
+  - 连续 2 日温和放量（弹簧压缩）：consolidation_quality +8
+  - 连续 3 日温和放量：consolidation_quality +15
+  - 缩量回踩箱体上沿确认：低波动确认信号更可靠
+  - 止损设在箱体下沿下方 2%。
+  - 在 `buy_reason` 中注明"横盘突破"。
 screening:
   enabled: true
   factor_weights:

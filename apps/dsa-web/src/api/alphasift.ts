@@ -389,12 +389,12 @@ async function setAlphaSiftEnabled(value: 'true' | 'false'): Promise<void> {
 
 export const alphasiftApi = {
   async getStatus(): Promise<AlphaSiftStatus> {
-    const response = await apiClient.get<Record<string, unknown>>('/api/v1/alphasift/status');
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/screening/status');
     return toCamelCase<AlphaSiftStatus>(response.data);
   },
 
   async screen(payload: { market: string; strategy: string; maxResults: number }): Promise<AlphaSiftScreenResponse> {
-    const response = await apiClient.post<Record<string, unknown>>('/api/v1/alphasift/screen', {
+    const response = await apiClient.post<Record<string, unknown>>('/api/v1/screening/screen', {
       market: payload.market,
       strategy: payload.strategy,
       max_results: payload.maxResults,
@@ -403,7 +403,7 @@ export const alphasiftApi = {
   },
 
   async startScreen(payload: { market: string; strategy: string; maxResults: number }): Promise<AlphaSiftScreenAccepted> {
-    const response = await apiClient.post<Record<string, unknown>>('/api/v1/alphasift/screen/tasks', {
+    const response = await apiClient.post<Record<string, unknown>>('/api/v1/screening/screen/tasks', {
       market: payload.market,
       strategy: payload.strategy,
       max_results: payload.maxResults,
@@ -412,23 +412,23 @@ export const alphasiftApi = {
   },
 
   async getScreenTask(taskId: string): Promise<AlphaSiftScreenTaskStatus> {
-    const response = await apiClient.get<Record<string, unknown>>(`/api/v1/alphasift/screen/tasks/${encodeURIComponent(taskId)}`);
+    const response = await apiClient.get<Record<string, unknown>>(`/api/v1/screening/screen/tasks/${encodeURIComponent(taskId)}`);
     return toCamelCase<AlphaSiftScreenTaskStatus>(response.data);
   },
 
   async getScreenCache(strategy: string): Promise<Record<string, unknown> | null> {
-    const response = await apiClient.get<Record<string, unknown> | null>(`/api/v1/alphasift/screen/cache/${encodeURIComponent(strategy)}`);
+    const response = await apiClient.get<Record<string, unknown> | null>(`/api/v1/screening/screen/cache/${encodeURIComponent(strategy)}`);
     if (!response.data) return null;
     return toCamelCase<Record<string, unknown>>(response.data);
   },
 
   async getStrategies(): Promise<AlphaSiftStrategiesResponse> {
-    const response = await apiClient.get<Record<string, unknown>>('/api/v1/alphasift/strategies', { timeout: ALPHASIFT_INSTALL_TIMEOUT_MS });
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/screening/strategies', { timeout: ALPHASIFT_INSTALL_TIMEOUT_MS });
     return toCamelCase<AlphaSiftStrategiesResponse>(response.data);
   },
 
   async getHotspots(payload: { provider?: string; top?: number; refresh?: boolean; includeDetails?: boolean } = {}): Promise<AlphaSiftHotspotsResponse> {
-    const response = await apiClient.get<Record<string, unknown>>('/api/v1/alphasift/hotspots', {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/screening/hotspots', {
       params: {
         provider: payload.provider || 'akshare',
         top: payload.top ?? 12,
@@ -452,7 +452,7 @@ export const alphasiftApi = {
 
   async getHotspotDetail(payload: { topic: string; provider?: string; refresh?: boolean }): Promise<AlphaSiftHotspotDetail> {
     const response = await apiClient.get<Record<string, unknown>>(
-      `/api/v1/alphasift/hotspots/${encodeURIComponent(payload.topic)}`,
+      `/api/v1/screening/hotspots/${encodeURIComponent(payload.topic)}`,
       {
         params: { provider: payload.provider || 'akshare', refresh: payload.refresh ?? false },
         timeout: ALPHASIFT_INSTALL_TIMEOUT_MS,
@@ -462,7 +462,7 @@ export const alphasiftApi = {
   },
 
   async install(): Promise<AlphaSiftInstallResponse> {
-    const response = await apiClient.post<Record<string, unknown>>('/api/v1/alphasift/install', {}, { timeout: ALPHASIFT_INSTALL_TIMEOUT_MS });
+    const response = await apiClient.post<Record<string, unknown>>('/api/v1/screening/install', {}, { timeout: ALPHASIFT_INSTALL_TIMEOUT_MS });
     return toCamelCase<AlphaSiftInstallResponse>(response.data);
   },
 
@@ -489,7 +489,7 @@ export const alphasiftApi = {
     candidates: Array<{ code: string; name: string; price?: number | null }>;
   }): Promise<BacktestResponse> {
     const response = await apiClient.post<Record<string, unknown>>(
-      '/api/v1/alphasift/screen/backtest',
+      '/api/v1/screening/screen/backtest',
       payload,
       { timeout: 120000 },
     );
@@ -501,7 +501,7 @@ export const alphasiftApi = {
     candidates: Array<{ code: string; name: string; price?: number | null }>;
   }): Promise<YesterdayBacktestResponse> {
     const response = await apiClient.post<Record<string, unknown>>(
-      '/api/v1/alphasift/screen/backtest/yesterday',
+      '/api/v1/screening/screen/backtest/yesterday',
       payload,
       { timeout: 120000 },
     );
