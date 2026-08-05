@@ -106,6 +106,7 @@ def test_pipeline_loads_daily_market_context_when_market_review_enabled() -> Non
     pipeline.analyzer = MagicMock()
     pipeline.search_service = MagicMock()
     pipeline.query_id = "pipeline-query"
+    pipeline.daily_market_context_allow_generate = True
 
     with patch("src.core.pipeline.DailyMarketContextService") as service_cls:
         service = service_cls.return_value

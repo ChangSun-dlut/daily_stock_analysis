@@ -1,6 +1,6 @@
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, Loader2, Share2, TriangleAlert } from 'lucide-react';
+import { Check, Image, Loader2, Share2, TriangleAlert } from 'lucide-react';
 import { historyApi } from '../../api/history';
 import type { ReportLanguage } from '../../types/analysis';
 import { getReportText, normalizeReportLanguage } from '../../utils/reportLanguage';
@@ -52,9 +52,24 @@ export const ShareImageButton: React.FC<ShareImageButtonProps> = ({
   const resetTimerRef = useRef<number | null>(null);
   const loadTokenRef = useRef(0);
   const cachedImageRef = useRef<{ recordId: number; blob: Blob } | null>(null);
+  const imageUrlRef = useRef<string | null>(null);
   const state = stateSnapshot.recordId === activeRecordId ? stateSnapshot.state : 'idle';
   const setState = useCallback((nextState: ShareState) => {
     setStateSnapshot({ recordId: activeRecordId, state: nextState });
+  }, [activeRecordId]);
+  const cleanupImageUrl = useCallback(() => {
+    if (imageUrlRef.current) {
+      URL.revokeObjectURL(imageUrlRef.current);
+      imageUrlRef.current = null;
+    }
+  }, []);
+  const ensureImageUrl = useCallback((): string | null => {
+    const cached = cachedImageRef.current;
+    if (!cached || cached.recordId !== activeRecordId) return null;
+    if (!imageUrlRef.current) {
+      imageUrlRef.current = URL.createObjectURL(cached.blob);
+    }
+    return imageUrlRef.current;
   }, [activeRecordId]);
   const clearResetTimer = useCallback(() => {
     if (resetTimerRef.current !== null) {
@@ -79,12 +94,21 @@ export const ShareImageButton: React.FC<ShareImageButtonProps> = ({
     clearResetTimer();
     loadTokenRef.current += 1;
     cachedImageRef.current = null;
+    cleanupImageUrl();
 
     return () => {
       clearResetTimer();
       loadTokenRef.current += 1;
+      cleanupImageUrl();
     };
-  }, [activeRecordId, clearResetTimer]);
+  }, [activeRecordId, clearResetTimer, cleanupImageUrl]);
+
+  const handleViewImage = useCallback(() => {
+    const url = ensureImageUrl();
+    if (url) {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
+  }, [ensureImageUrl]);
 
   const handleShare = useCallback(async () => {
     if (activeRecordId === undefined || state === 'loading') return;
@@ -109,6 +133,7 @@ export const ShareImageButton: React.FC<ShareImageButtonProps> = ({
       }
       if (loadTokenRef.current !== loadToken) return;
       cachedImageRef.current = { recordId: activeRecordId, blob };
+      ensureImageUrl();
       generatedNow = true;
     }
 
@@ -152,7 +177,7 @@ export const ShareImageButton: React.FC<ShareImageButtonProps> = ({
       console.error('Generate share image failed:', error);
       setState('error');
     }
-  }, [activeRecordId, clearResetTimer, reportTitle, scheduleReset, setState, state]);
+  }, [activeRecordId, clearResetTimer, ensureImageUrl, reportTitle, scheduleReset, setState, state]);
 
   if (activeRecordId === undefined) return null;
 
@@ -166,23 +191,42 @@ export const ShareImageButton: React.FC<ShareImageButtonProps> = ({
         ? text.shareImageFailed
         : text.generateShareImage;
 
+  const showViewButton = state === 'ready' || state === 'success';
+
   return (
-    <Tooltip content={tooltipText}>
-      <span className="inline-flex shrink-0">
-        <button
-          type="button"
-          onClick={() => void handleShare()}
-          disabled={state === 'loading'}
-          className={`home-surface-button flex h-10 shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-3 text-sm font-medium text-secondary-text hover:text-foreground disabled:opacity-50 ${className}`}
-          aria-label={tooltipText}
-        >
-          {state === 'loading' ? <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" /> : null}
-          {state === 'success' ? <Check className="h-5 w-5 text-success" aria-hidden="true" /> : null}
-          {state === 'error' ? <TriangleAlert className="h-5 w-5 text-danger" aria-hidden="true" /> : null}
-          {state === 'idle' || state === 'ready' ? <Share2 className="h-5 w-5" aria-hidden="true" /> : null}
-          <span>{tooltipText}</span>
-        </button>
-      </span>
-    </Tooltip>
+    <div className={`inline-flex items-center gap-2 ${className}`}>
+      <Tooltip content={tooltipText}>
+        <span className="inline-flex shrink-0">
+          <button
+            type="button"
+            onClick={() => void handleShare()}
+            disabled={state === 'loading'}
+            className="home-surface-button flex h-10 shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-3 text-sm font-medium text-secondary-text hover:text-foreground disabled:opacity-50"
+            aria-label={tooltipText}
+          >
+            {state === 'loading' ? <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" /> : null}
+            {state === 'success' ? <Check className="h-5 w-5 text-success" aria-hidden="true" /> : null}
+            {state === 'error' ? <TriangleAlert className="h-5 w-5 text-danger" aria-hidden="true" /> : null}
+            {state === 'idle' || state === 'ready' ? <Share2 className="h-5 w-5" aria-hidden="true" /> : null}
+            <span>{tooltipText}</span>
+          </button>
+        </span>
+      </Tooltip>
+      {showViewButton ? (
+        <Tooltip content={text.viewShareImage}>
+          <span className="inline-flex shrink-0">
+            <button
+              type="button"
+              onClick={() => void handleViewImage()}
+              className="home-surface-button flex h-10 shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-3 text-sm font-medium text-secondary-text hover:text-foreground"
+              aria-label={text.viewShareImage}
+            >
+              <Image className="h-5 w-5" aria-hidden="true" />
+              <span>{text.viewShareImage}</span>
+            </button>
+          </span>
+        </Tooltip>
+      ) : null}
+    </div>
   );
 };

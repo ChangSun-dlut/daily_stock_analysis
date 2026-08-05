@@ -27,6 +27,27 @@ describe('ShareImageButton', () => {
     vi.restoreAllMocks();
   });
 
+  it('opens the generated PNG in a new tab when the view image button is clicked', async () => {
+    const windowOpen = vi.fn();
+    Object.defineProperty(window, 'open', { configurable: true, value: windowOpen });
+    mockedGetShareImage.mockResolvedValue(new Blob(['png'], { type: 'image/png' }));
+
+    render(
+      <ShareImageButton
+        recordId={24}
+        reportTitle="中钨高新-000657"
+        reportLanguage="zh"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '分享' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: '已生成' })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: '查看图片' }));
+    await waitFor(() => expect(windowOpen).toHaveBeenCalledTimes(1));
+    expect(windowOpen).toHaveBeenCalledWith('blob:share-image', '_blank', 'noopener,noreferrer');
+  });
+
   it('downloads the generated PNG when native file sharing is unavailable', async () => {
     mockedGetShareImage.mockResolvedValue(new Blob(['png'], { type: 'image/png' }));
 

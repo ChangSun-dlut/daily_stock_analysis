@@ -750,6 +750,12 @@ class Config:
 
     # Unified temperature for all LLM calls (LLM_TEMPERATURE); legacy per-provider temps are fallback only
     llm_temperature: float = 0.7
+    # 个股主分析 LLM 调用超时（秒）；0 表示不设置，由底层默认控制
+    litellm_analysis_timeout_seconds: float = 120.0
+    # 流式首次数据 chunk 超时（秒）；0 表示不设置，由底层默认控制
+    # DeepSeek 在排队期间会发送 SSE keep-alive 注释，不视为数据 chunk，
+    # 因此此值需要足够长以容忍排队时间，推荐 ≥30s
+    litellm_stream_timeout_seconds: float = 30.0
 
     # Provider prompt-cache controls. These do not control provider implicit cache.
     llm_prompt_cache_telemetry_enabled: bool = True
@@ -1653,6 +1659,18 @@ class Config:
             litellm_model=litellm_model,
             litellm_fallback_models=litellm_fallback_models,
             llm_temperature=resolve_unified_llm_temperature(litellm_model),
+            litellm_analysis_timeout_seconds=parse_env_float(
+                os.getenv('LITELLM_ANALYSIS_TIMEOUT_SECONDS'),
+                120.0,
+                field_name='LITELLM_ANALYSIS_TIMEOUT_SECONDS',
+                minimum=0.0,
+            ),
+            litellm_stream_timeout_seconds=parse_env_float(
+                os.getenv('LITELLM_STREAM_TIMEOUT_SECONDS'),
+                10.0,
+                field_name='LITELLM_STREAM_TIMEOUT_SECONDS',
+                minimum=0.0,
+            ),
             litellm_config_path=litellm_config_path,
             llm_models_source=llm_models_source,
             llm_channels=llm_channels,

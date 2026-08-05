@@ -11,13 +11,14 @@ A股自选股智能分析系统 - 核心分析流水线
 4. 提供股票分析的核心功能
 """
 
+import asyncio
 import logging
 import inspect
 import threading
 import time
 import uuid
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import List, Dict, Any, Optional, Tuple, Callable
@@ -223,7 +224,7 @@ class StockAnalysisPipeline:
         analysis_phase: str = "auto",
         portfolio_context: Optional[Dict[str, Any]] = None,
         daily_market_context_enabled: Optional[bool] = None,
-        daily_market_context_allow_generate: bool = True,
+        daily_market_context_allow_generate: bool = False,
     ):
         """
         初始化调度器
@@ -1862,7 +1863,7 @@ class StockAnalysisPipeline:
                 "analyzer": self.analyzer,
                 "search_service": self.search_service,
                 "force_refresh": force_refresh,
-                "allow_generate": getattr(self, "daily_market_context_allow_generate", True),
+                "allow_generate": getattr(self, "daily_market_context_allow_generate", False),
                 "target_date": target_date,
             }
             current_query_id = getattr(self, "query_id", None)
@@ -3198,54 +3199,58 @@ class StockAnalysisPipeline:
             )
         
         results: List[AnalysisResult] = []
-        
-        # 使用线程池并发处理
-        # 注意：max_workers 设置较低（默认3）以避免触发反爬
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # 提交任务
-            future_to_code = {
-                executor.submit(
-                    self.process_single_stock,
-                    code,
-                    skip_analysis=dry_run,
-                    single_stock_notify=False,
-                    report_type=report_type,  # Issue #119: 传递报告类型
-                    analysis_query_id=uuid.uuid4().hex,
-                    current_time=resume_reference_time,
-                ): code
-                for code in stock_codes
-            }
-            
-            # 收集结果
-            for idx, future in enumerate(as_completed(future_to_code)):
-                code = future_to_code[future]
-                try:
-                    result = future.result()
-                    if result and result.success:
-                        results.append(result)
-                        if single_stock_notify and send_notification and not dry_run:
-                            self._send_single_stock_notification(
-                                result,
-                                report_type=report_type,
-                                fallback_code=code,
-                            )
-                    elif result and not result.success:
-                        logger.warning(
-                            f"[{code}] 分析结果标记为失败，不计入汇总: "
-                            f"{result.error_message or '未知原因'}"
+        _result_lock = threading.Lock()
+
+        async def _process_stocks_async() -> None:
+            """使用 asyncio.Semaphore 控制并行度，避免线程池阻塞事件循环。"""
+            sem = asyncio.Semaphore(self.max_workers)  # 默认3个并行
+
+            async def _process_one(code: str, idx: int) -> None:
+                async with sem:
+                    qid = uuid.uuid4().hex
+                    try:
+                        # asyncio.to_thread 将阻塞的个股分析逻辑卸载到独立线程，
+                        # 底层HTTP(S)调用在GIL释放期间可真正并发，事件循环不阻塞。
+                        result = await asyncio.to_thread(
+                            self.process_single_stock,
+                            code,
+                            skip_analysis=dry_run,
+                            single_stock_notify=False,
+                            report_type=report_type,
+                            analysis_query_id=qid,
+                            current_time=resume_reference_time,
                         )
 
-                    # Issue #128: 分析间隔 - 在个股分析和大盘分析之间添加延迟
-                    if idx < len(stock_codes) - 1 and analysis_delay > 0:
-                        # 注意：此 sleep 发生在“主线程收集 future 的循环”中，
-                        # 并不会阻止线程池中的任务同时发起网络请求。
-                        # 因此它对降低并发请求峰值的效果有限；真正的峰值主要由 max_workers 决定。
-                        # 该行为目前保留（按需求不改逻辑）。
-                        logger.debug(f"等待 {analysis_delay} 秒后继续下一只股票...")
-                        time.sleep(analysis_delay)
+                        if result and result.success:
+                            with _result_lock:
+                                results.append(result)
+                            if single_stock_notify and send_notification and not dry_run:
+                                self._send_single_stock_notification(
+                                    result,
+                                    report_type=report_type,
+                                    fallback_code=code,
+                                )
+                        elif result and not result.success:
+                            logger.warning(
+                                f"[{code}] 分析结果标记为失败，不计入汇总: "
+                                f"{result.error_message or '未知原因'}"
+                            )
 
-                except Exception as e:
-                    logger.error(f"[{code}] 任务执行失败: {e}")
+                        # Issue #128: 分析完成后延迟（保护数据源）
+                        if idx < len(stock_codes) - 1 and analysis_delay > 0:
+                            logger.debug(f"等待 {analysis_delay} 秒后继续下一只股票...")
+                            await asyncio.sleep(analysis_delay)
+
+                    except Exception as e:
+                        logger.error(f"[{code}] 任务执行失败: {e}")
+
+            tasks = [
+                _process_one(code, i)
+                for i, code in enumerate(stock_codes)
+            ]
+            await asyncio.gather(*tasks)
+
+        asyncio.run(_process_stocks_async())
         
         # 统计
         elapsed_time = time.time() - start_time

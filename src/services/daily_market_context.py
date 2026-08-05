@@ -39,9 +39,9 @@ _UNTRUSTED_MARKET_SUMMARY_SENTINELS = (
     "END_UNTRUSTED_MARKET_SUMMARY",
 )
 _MARKET_REVIEW_LOCK_WAIT_INITIAL_INTERVAL_SECONDS = 0.5
-_MARKET_REVIEW_LOCK_WAIT_MAX_INTERVAL_SECONDS = 5.0
+_MARKET_REVIEW_LOCK_WAIT_MAX_INTERVAL_SECONDS = 1.0
 _MARKET_REVIEW_LOCK_WAIT_BACKOFF_MULTIPLIER = 1.5
-_MARKET_REVIEW_LOCK_WAIT_MAX_ATTEMPTS = 40
+_MARKET_REVIEW_LOCK_WAIT_MAX_ATTEMPTS = 30
 
 _RISK_PATTERNS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("high_risk", ("高风险", "风险偏高", "风险较高", "high risk", "elevated risk")),
@@ -99,6 +99,7 @@ class DailyMarketContextService:
         self._today_fn = today_fn or date.today
         self._cache: Dict[Tuple[Any, ...], DailyMarketContext] = {}
         self._lock = threading.Lock()
+        self._pending_events: Dict[Tuple[Any, ...], threading.Event] = {}
 
     def get_context(
         self,
@@ -191,6 +192,11 @@ class DailyMarketContextService:
                         return history_context
             return None
 
+        # --- lock 内: 快速缓存检查, 设置 pending 标记 ---
+        generate_result = None
+        pending_event = None
+        should_generate = False
+
         with self._lock:
             if not force_refresh:
                 cached = self._cache.get(cache_key)
@@ -221,20 +227,47 @@ class DailyMarketContextService:
                     self._cache[cache_key] = history_context
                     return history_context
 
-            generated = self._run_market_review_context(
-                region=normalized_region,
-                target_date=context_date,
-                config=config,
-                notifier=notifier,
-                analyzer=analyzer,
-                search_service=search_service,
-                persist_market_review_history=persist_market_review_history,
-                current_query_id=current_query_id,
-                require_query_id_match=require_query_id_match,
-            )
-            if generated is not None:
-                self._cache[cache_key] = generated
-            return generated
+            # 缓存未命中, 检查是否已有线程在生成
+            pending_event = self._pending_events.get(cache_key)
+            if pending_event is None:
+                pending_event = threading.Event()
+                self._pending_events[cache_key] = pending_event
+                should_generate = True
+
+        # --- lock 外: 等待或生成 ---
+        if should_generate:
+            try:
+                generate_result = self._run_market_review_context(
+                    region=normalized_region,
+                    target_date=context_date,
+                    config=config,
+                    notifier=notifier,
+                    analyzer=analyzer,
+                    search_service=search_service,
+                    persist_market_review_history=persist_market_review_history,
+                    current_query_id=current_query_id,
+                    require_query_id_match=require_query_id_match,
+                )
+            finally:
+                with self._lock:
+                    if generate_result is not None:
+                        self._cache[cache_key] = generate_result
+                    pending_event.set()
+                    self._pending_events.pop(cache_key, None)
+            return generate_result
+        else:
+            # 等待第一个线程生成完成 (最多等 60 秒)
+            if not pending_event.wait(timeout=60):
+                logger.warning(
+                    "等待大盘上下文生成超时: region=%s, date=%s",
+                    normalized_region,
+                    context_date.isoformat(),
+                )
+            with self._lock:
+                cached = self._cache.get(cache_key)
+                if cached is not None:
+                    return cached
+            return None
 
     def _load_same_day_history(
         self,
@@ -259,17 +292,58 @@ class DailyMarketContextService:
             logger.warning("读取大盘复盘历史失败，跳过市场上下文缓存: %s", exc)
             return None
 
-        for record in records or []:
-            if getattr(record, "report_type", None) != MARKET_REVIEW_REPORT_TYPE:
+        logger.info(
+            "[_load_same_day_history] DB 查询返回 %d 条记录: region=%s, target_date=%s, days=%d, current_query_id=%s",
+            len(records or []),
+            region,
+            target_date.isoformat(),
+            history_days,
+            current_query_id or "(none)",
+        )
+
+        for idx, record in enumerate(records or []):
+            record_id = getattr(record, "id", None)
+            record_type = getattr(record, "report_type", None)
+            record_created = getattr(record, "created_at", None)
+
+            if record_type != MARKET_REVIEW_REPORT_TYPE:
+                logger.debug(
+                    "[_load_same_day_history] record[%d] id=%s 跳过: report_type=%s != %s",
+                    idx, record_id, record_type, MARKET_REVIEW_REPORT_TYPE,
+                )
                 continue
 
             snapshot = _loads_mapping(getattr(record, "context_snapshot", None))
             record_region = snapshot.get("market_review_region")
             payload = snapshot.get("market_review_payload")
+            has_payload = isinstance(payload, Mapping)
+
+            logger.debug(
+                "[_load_same_day_history] record[%d] id=%s: created_at=%s, record_region=%s, has_market_review_payload=%s, has_context_snapshot=%s",
+                idx, record_id, record_created, record_region, has_payload, bool(snapshot),
+            )
+
             if not isinstance(payload, Mapping):
                 payload = _payload_from_raw_record(record)
+                logger.debug(
+                    "[_load_same_day_history] record[%d] id=%s: context_snapshot 无 payload，尝试从 raw_result 解析 -> has_payload=%s",
+                    idx, record_id, isinstance(payload, Mapping),
+                )
+
             if not self._record_supports_region(payload, record_region, region):
+                logger.debug(
+                    "[_load_same_day_history] record[%d] id=%s 跳过: region 不匹配 (need=%s, record_has=%s)",
+                    idx, record_id, region, record_region,
+                )
                 continue
+
+            payload_date = _payload_trade_date(
+                payload if isinstance(payload, Mapping) else {},
+                region,
+            )
+            language_match = _record_report_language_matches(record, report_language)
+            created_date = _coerce_date(record_created)
+
             if not _record_matches_target_date(
                 record=record,
                 payload=payload if isinstance(payload, Mapping) else {},
@@ -279,7 +353,22 @@ class DailyMarketContextService:
                 require_query_id_match=require_query_id_match,
                 report_language=report_language,
             ):
+                record_query_id = getattr(record, "query_id", None)
+                logger.info(
+                    "[_load_same_day_history] record[%d] id=%s 跳过: 日期不匹配 "
+                    "(target_date=%s, payload_date=%s, created_date=%s, "
+                    "lang_match=%s, require_query_id=%s, record_query_id=%s)",
+                    idx, record_id, target_date.isoformat(),
+                    payload_date.isoformat() if payload_date else "None",
+                    created_date.isoformat() if created_date else "None",
+                    language_match, require_query_id_match, record_query_id,
+                )
                 continue
+
+            logger.info(
+                "[_load_same_day_history] record[%d] id=%s ✓ 命中! 生成上下文",
+                idx, record_id,
+            )
 
             context = self._build_context_from_payload(
                 region=region,

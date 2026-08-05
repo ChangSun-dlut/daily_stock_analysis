@@ -209,6 +209,14 @@ def _markdown_to_image_wkhtml(
         return None
 
 
+def _engine_callers() -> Mapping[str, Any]:
+    return {
+        "wkhtmltoimage": _markdown_to_image_wkhtml,
+        "markdown-to-file": _markdown_to_image_m2f,
+        "playwright": _markdown_to_image_playwright,
+    }
+
+
 def markdown_to_image(
     markdown_text: str,
     max_chars: int = 15000,
@@ -218,7 +226,9 @@ def markdown_to_image(
     Convert Markdown to PNG image bytes.
 
     Engine is read from config.md2img_engine: wkhtmltoimage (default),
-    markdown-to-file, or playwright.
+    markdown-to-file, or playwright. When the configured engine fails, the
+    function automatically tries the remaining engines in priority order so
+    callers can degrade gracefully without manual configuration changes.
 
     When conversion fails or dependencies unavailable, returns None so caller
     can fall back to text sending.
@@ -245,14 +255,37 @@ def markdown_to_image(
         from src.config import get_config
 
         config = get_config()
-        engine = getattr(config, "md2img_engine", "wkhtmltoimage")
+        preferred_engine = getattr(config, "md2img_engine", "wkhtmltoimage")
         branding = _share_image_branding(config)
     except Exception:
-        engine = "wkhtmltoimage"
+        preferred_engine = "wkhtmltoimage"
         branding = ShareImageBranding()
 
-    if engine == "markdown-to-file":
-        return _markdown_to_image_m2f(markdown_text, structured_payload, branding)
-    if engine == "playwright":
-        return _markdown_to_image_playwright(markdown_text, structured_payload, branding)
-    return _markdown_to_image_wkhtml(markdown_text, structured_payload, branding)
+    callers = _engine_callers()
+    engine_order = [preferred_engine]
+    for engine in callers:
+        if engine != preferred_engine and engine in callers:
+            engine_order.append(engine)
+
+    last_error: Optional[str] = None
+    for engine in engine_order:
+        caller = callers.get(engine)
+        if caller is None:
+            continue
+        try:
+            logger.debug("markdown_to_image trying engine: %s", engine)
+            result = caller(markdown_text, structured_payload, branding)
+            if result:
+                logger.info("markdown_to_image succeeded with engine: %s", engine)
+                return result
+            last_error = f"engine {engine} returned empty result"
+        except Exception as exc:
+            last_error = f"engine {engine} raised {type(exc).__name__}: {exc}"
+            logger.warning("markdown_to_image engine %s failed: %s", engine, exc, exc_info=True)
+
+    logger.warning(
+        "markdown_to_image failed for all engines (%s): %s",
+        ", ".join(engine_order),
+        last_error or "no engine available",
+    )
+    return None

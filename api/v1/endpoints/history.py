@@ -9,6 +9,7 @@
 2. 提供 GET /api/v1/history/{query_id} 历史详情查询接口
 """
 
+import asyncio
 import logging
 from typing import Any, Mapping, Optional
 
@@ -775,7 +776,7 @@ def get_history_news(
     summary="生成历史报告分享图片",
     description="根据历史报告 Markdown 与持久化结构化数据生成确定性的 PNG 分享图片",
 )
-def get_history_share_image(
+async def get_history_share_image(
     record_id: str,
     db_manager: DatabaseManager = Depends(get_database_manager),
 ) -> Response:
@@ -812,7 +813,8 @@ def get_history_share_image(
         )
 
     config = get_config()
-    image_bytes = markdown_to_image(
+    image_bytes = await asyncio.to_thread(
+        markdown_to_image,
         markdown_content,
         max_chars=getattr(config, "markdown_to_image_max_chars", 15000),
         structured_payload=_history_share_image_payload(result),

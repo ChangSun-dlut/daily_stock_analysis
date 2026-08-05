@@ -34,16 +34,16 @@ def test_stock_share_image_uses_configured_xiaohongshu_branding():
     assert "个股决策卡" in html
     assert "贵州茅台" in html
     assert '<span class="code">600519</span>' in html
-    assert html.count('class="qr-frame"') == 1
-    assert html.count("data:image/jpeg;base64,") == 1
+    assert html.count('class="qr-frame"') == 0
+    assert html.count("data:image/jpeg;base64,") == 0
     assert "项目主页二维码" not in html
     assert "GitHub 项目" not in html
-    assert PROJECT_REPOSITORY in html
-    assert "小红书二维码" in html
-    assert PROJECT_DISPLAY_NAME in html
-    assert XIAOHONGSHU_HANDLE in html
-    assert f"<b>小红书</b> {XIAOHONGSHU_HANDLE} · ID 123456" in html
-    assert 'href="https://example.com/xiaohongshu"' in html
+    assert PROJECT_REPOSITORY not in html
+    assert "小红书二维码" not in html
+    assert PROJECT_DISPLAY_NAME not in html
+    assert XIAOHONGSHU_HANDLE not in html
+    assert f"<b>小红书</b> {XIAOHONGSHU_HANDLE} · ID 123456" not in html
+    assert 'href="https://example.com/xiaohongshu"' not in html
     assert "2026-07-31" in html
     assert html.count("<h1>") == 1
 
@@ -56,7 +56,7 @@ def test_stock_share_image_omits_unconfigured_social_account():
 
     assert 'class="qr-card' not in html
     assert "小红书" not in html
-    assert 'class="footer-brand full"' in html
+    assert 'class="footer-brand full"' not in html
 
 
 def test_stock_share_image_does_not_link_unsafe_social_url():
@@ -68,7 +68,7 @@ def test_stock_share_image_does_not_link_unsafe_social_url():
         ),
     )
 
-    assert "@自定义账号" in html
+    assert "@自定义账号" not in html
     assert "javascript:" not in html
 
 
@@ -773,7 +773,7 @@ def test_stock_share_image_reads_notification_service_chinese_market_snapshot_he
     assert "+1.20%" in html
     assert "1.35" in html
     assert "0.82%" in html
-    assert "数据源：腾讯财经" in html
+    assert "数据源：腾讯财经" not in html
 
 
 def test_stock_share_image_reads_close_only_market_snapshot_column():
@@ -905,7 +905,7 @@ def test_stock_payload_market_snapshot_overlays_only_populated_fields():
     assert "+1.20%" in html
     assert "1.35" in html
     assert "0.82%" in html
-    assert "数据源：tencent" in html
+    assert "数据源：tencent" not in html
 
 
 def test_stock_share_image_prefers_realtime_price_over_close_in_combined_snapshot():
@@ -1832,3 +1832,46 @@ def test_desktop_backend_build_scripts_bundle_share_image_assets():
     for relative_path in ("scripts/build-backend.ps1", "scripts/build-backend-macos.sh"):
         content = (root / relative_path).read_text(encoding="utf-8")
         assert "src/assets/share_image" in content
+
+
+def test_share_image_strips_image_directive_placeholders():
+    html = build_share_image_html(
+        """# 贵州茅台 600519 分析报告
+
+@image:image.png blob:http://127.0.0.1:8000/b651145c-f775-4578-af66-9252c4770dd6
+
+## 核心判断
+
+- 趋势偏多
+""",
+        generated_on=date(2026, 7, 31),
+    )
+
+    assert "@image:image.png" not in html
+    assert "blob:" not in html
+    assert "b651145c-f775-4578-af66-9252c4770dd6" not in html
+    assert "趋势偏多" in html
+
+
+def test_share_image_strips_raw_html_from_markdown_body():
+    html = build_share_image_html(
+        """# 贵州茅台 600519 分析报告
+
+## 核心判断
+
+- 趋势偏多
+
+<div class=\"injected-raw-html\">
+  不应出现在海报里
+</div>
+<p>
+  <span>extra tag</span>
+</p>
+""",
+        generated_on=date(2026, 7, 31),
+    )
+
+    assert "injected-raw-html" not in html
+    assert "不应出现在海报里" not in html
+    assert "extra tag" not in html
+    assert "趋势偏多" in html

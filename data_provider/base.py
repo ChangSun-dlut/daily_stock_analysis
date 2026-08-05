@@ -645,7 +645,7 @@ class DataFetcherManager:
         self._fetchers: List[BaseFetcher] = []
         self._fetchers_lock = RLock()
         self._fetchers_by_name: Dict[str, BaseFetcher] = {}
-        self._fetcher_call_locks: Dict[int, RLock] = {}
+        self._fetcher_call_locks: Dict[int, BoundedSemaphore] = {}
         self._fetcher_call_locks_lock = RLock()
         self._stock_name_cache: Dict[str, str] = {}
         self._stock_name_cache_lock = RLock()
@@ -732,13 +732,16 @@ class DataFetcherManager:
                 return result
         return True
 
-    def _get_fetcher_call_lock(self, fetcher: BaseFetcher) -> RLock:
+    # 每个数据源最大并发调用数，匹配分析线程池 worker 数
+    _FETCHER_MAX_CONCURRENT_CALLS = 3
+
+    def _get_fetcher_call_lock(self, fetcher: BaseFetcher) -> BoundedSemaphore:
         self._ensure_concurrency_guards()
         fetcher_id = id(fetcher)
         with self._fetcher_call_locks_lock:
             lock = self._fetcher_call_locks.get(fetcher_id)
             if lock is None:
-                lock = RLock()
+                lock = BoundedSemaphore(self._FETCHER_MAX_CONCURRENT_CALLS)
                 self._fetcher_call_locks[fetcher_id] = lock
             return lock
 
@@ -1951,12 +1954,17 @@ class DataFetcherManager:
                     else:
                         # Supplement missing fields from this source (limit attempts)
                         supplement_attempts += 1
-                        if supplement_attempts > 1:
-                            logger.debug(f"[实时行情] {stock_code} 补充尝试已达上限，停止继续")
+                        if supplement_attempts > 3:
+                            logger.debug(f"[实时行情] {stock_code} 补充尝试已达上限(3次)，停止继续")
                             break
                         merged = self._merge_quote_fields(primary_quote, quote)
                         if merged:
                             logger.info(f"[实时行情] {stock_code} 从 {source} 补充了缺失字段: {merged}")
+                        else:
+                            logger.debug(
+                                f"[实时行情] {stock_code} 源 {source} 无新字段可补充，"
+                                f"仍有缺失: {self._quote_needs_supplement(primary_quote)}"
+                            )
                         # Stop supplementing once all key fields are filled
                         if not self._quote_needs_supplement(primary_quote):
                             break

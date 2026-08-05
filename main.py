@@ -599,11 +599,10 @@ def _prime_daily_market_context(
     if context is None:
         return ("", "") if return_full_report else ""
 
-    # Runtime context generation is preload-only and must not replace the full
-    # market review run, except the query-scoped fallback after that run fails.
-    if context.source != "analysis_history" and not (
-        require_current_query_match and context.source == "market_review_runtime"
-    ):
+    # Accept both DB-persisted history and same-process runtime generation,
+    # avoiding duplicate market review execution when the pipeline already
+    # produced context during individual stock analysis.
+    if context.source not in ("analysis_history", "market_review_runtime"):
         return ("", "") if return_full_report else ""
 
     summary = str(getattr(context, "summary", ""))
@@ -858,7 +857,6 @@ def run_full_analysis(
                 allow_generate=False,
                 target_date=daily_market_context_target_date,
                 return_full_report=True,
-                require_current_query_match=True,
             )
 
         # 1. 运行个股分析
@@ -889,7 +887,6 @@ def run_full_analysis(
                 allow_generate=False,
                 target_date=daily_market_context_target_date,
                 return_full_report=True,
-                require_current_query_match=True,
             )
             market_context_generated_during_stock = bool(market_context_summary)
 
@@ -913,8 +910,7 @@ def run_full_analysis(
             )
 
             can_skip_market_review = (
-                (merge_notification or market_context_generated_during_stock)
-                and can_reuse_market_context
+                can_reuse_market_context
                 and bool(market_context_full_report or market_context_summary)
             )
             if can_skip_market_review:
@@ -975,7 +971,6 @@ def run_full_analysis(
                         allow_generate=False,
                         target_date=daily_market_context_target_date,
                         return_full_report=True,
-                        require_current_query_match=True,
                     )
                     can_reuse_market_context = _can_reuse_market_context_for_review(
                         market_context_summary,

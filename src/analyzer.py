@@ -3119,6 +3119,7 @@ class GeminiAnalyzer:
         )
         requested_temperature = generation_config.get('temperature', 0.7)
         requested_timeout = generation_config.get("timeout")
+        requested_response_format = generation_config.get("response_format")
 
         models_to_try = [config.litellm_model] + (config.litellm_fallback_models or [])
         models_to_try = [m for m in models_to_try if m]
@@ -3176,8 +3177,15 @@ class GeminiAnalyzer:
                 }
                 if requested_timeout not in (None, ""):
                     call_kwargs["timeout"] = requested_timeout
+                # 流式首次数据 chunk 超时（默认 30s），注意 DeepSeek 排队期间会发送
+                # SSE keep-alive 注释而非数据 chunk，需容忍足够的排队等待时间
+                stream_timeout = float(getattr(config, "litellm_stream_timeout_seconds", 30) or 30)
+                if stream_timeout > 0:
+                    call_kwargs["stream_timeout"] = stream_timeout
                 if extra:
                     call_kwargs["extra_body"] = extra
+                if requested_response_format is not None:
+                    call_kwargs["response_format"] = requested_response_format
                 uses_router = (
                     (use_channel_router and self._router and model in router_model_names)
                     or (self._router and model == config.litellm_model and not use_channel_router)
@@ -3544,8 +3552,13 @@ class GeminiAnalyzer:
             # 设置生成配置
             generation_config = {
                 "temperature": config.llm_temperature,
-                "max_output_tokens": 8192,
+                "max_output_tokens": 4096,
+                # 强制 JSON 输出，解决 deepseek 等模型返回非 JSON 文本导致
+                # 完整性校验反复失败、每只股票浪费数轮无效 API 调用的超时问题。
+                "response_format": {"type": "json_object"},
             }
+            if getattr(config, "litellm_analysis_timeout_seconds", 0) > 0:
+                generation_config["timeout"] = config.litellm_analysis_timeout_seconds
 
             logger.info(f"[LLM调用] 开始调用 {model_name}...")
             _emit_progress(68, f"{name}：LLM 已接收请求，等待响应")

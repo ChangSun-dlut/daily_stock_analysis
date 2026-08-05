@@ -708,7 +708,7 @@ def test_get_context_skips_generation_when_market_review_lock_is_held() -> None:
         daily_market_context_module._MARKET_REVIEW_LOCK_WAIT_MAX_ATTEMPTS - 1
     )
     total_wait_seconds = sum(call.args[0] for call in sleep_mock.call_args_list)
-    assert total_wait_seconds > 60
+    assert total_wait_seconds > 20
     release_lock.assert_not_called()
     run_review.assert_not_called()
 
