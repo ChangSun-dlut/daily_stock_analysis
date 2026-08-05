@@ -24,6 +24,8 @@ class HardFilterConfig:
     turnover_rate_min: float | None = None
     change_pct_min: float | None = None
     change_pct_max: float | None = None
+    change_20d_min: float | None = None
+    change_20d_max: float | None = None
     change_60d_min: float | None = None
     change_60d_max: float | None = None
     require_ma_bullish: bool = False
@@ -48,6 +50,9 @@ class HardFilterConfig:
     max_drawdown_20d_pct_max: float | None = None
     atr_20_pct_min: float | None = None
     atr_20_pct_max: float | None = None
+    # 底部吸筹旁路：为 True 时，底部吸筹信号达标的个股可跳过
+    # consolidation_days_20d / range_20d_pct / volatility_20d_pct 约束
+    bottom_accumulation_bypass: bool = False
 
 
 @dataclass
@@ -163,6 +168,10 @@ class Pick:
     daily_quality_flags: str = ""
     daily_source: str = ""
     factor_scores: dict[str, float] = field(default_factory=dict)
+    mf_net_inflow_5d: float | None = None
+    mf_consecutive_days: int | None = None
+    mf_inflow_strength_pct: float | None = None
+    mf_available: bool | None = None
     llm_confidence: float | None = None
     llm_sector: str = ""
     llm_theme: str = ""

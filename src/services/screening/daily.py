@@ -45,14 +45,21 @@ _DAILY_FEATURE_DEFAULTS = {
     "daily_quality_score": pd.NA,
     "daily_quality_flags": "",
     "daily_source": "",
+    "mf_net_inflow": pd.NA,
+    "mf_net_inflow_5d": pd.NA,
+    "mf_consecutive_days": pd.NA,
+    "mf_inflow_strength_pct": pd.NA,
+    "mf_available": False,
 }
+_MF_LOOKBACK_DAYS = 15
+_MF_CALL_TIMEOUT_SECONDS = 15.0
 _DAILY_ENRICH_MAX_WORKERS = 1
 _DAILY_HISTORY_CACHE_VERSION = 1
 _DAILY_HISTORY_CACHE_TTL_SECONDS = 24 * 60 * 60
 _SOURCE_HEALTH_FAILURE_THRESHOLD = 3
 _SOURCE_HEALTH_COOLDOWN_SECONDS = 5 * 60
 _DAILY_CALL_TIMEOUT_SECONDS = 20.0
-_DEFAULT_TUSHARE_HTTP_URL = "http://api.waditu.com"
+_DEFAULT_TUSHARE_HTTP_URL = "http://api.waditu.com/dataapi"
 _BAOSTOCK_LOCK = threading.Lock()
 _BAOSTOCK_OUTAGE_ERROR: str | None = None
 _SOURCE_HEALTH: dict[str, dict[str, object]] = {}
@@ -153,6 +160,36 @@ def enrich_daily_features(
                 daily_source_health.update(source_health)
         for key, value in features.items():
             result.at[idx, key] = value
+
+    # ---- moneyflow pass: independent of daily K-line fetch ----
+    # moneyflow_dc data is fetched via Tushare (with AkShare fallback) and is not
+    # gated by the success of the K-line data source. This ensures 5日净流入 and
+    # related fields are populated even when the daily history provider is not
+    # Tushare.
+    _mf_requests: list[tuple[object, str]] = []
+    for idx in result.index:
+        raw_code = str(result.at[idx, "code"] if "code" in result.columns else "").strip()
+        if raw_code:
+            mf_code = raw_code.zfill(6) if raw_code.isdigit() else raw_code
+            _mf_requests.append((idx, mf_code))
+
+    def _fetch_one_mf(request: tuple[object, str]) -> tuple[object, dict[str, object]]:
+        idx, mf_code = request
+        try:
+            mf = _compute_moneyflow_features(mf_code, lookback_days=_MF_LOOKBACK_DAYS)
+        except Exception:
+            mf = {"mf_available": False}
+        return idx, mf
+
+    if _mf_requests:
+        _mf_workers = min(3, len(_mf_requests))
+        with ThreadPoolExecutor(max_workers=_mf_workers) as _executor:
+            _mf_results: list[tuple[object, dict[str, object]]] = list(
+                _executor.map(_fetch_one_mf, _mf_requests)
+            )
+        for _idx, _mf in _mf_results:
+            for _key, _value in _mf.items():
+                result.at[_idx, _key] = _value
 
     result.attrs["daily_errors"] = daily_errors
     result.attrs["daily_success_count"] = success_count
@@ -890,6 +927,11 @@ def compute_daily_features(hist: pd.DataFrame) -> dict[str, object]:
         rsi_status=rsi_status,
     )
 
+    bottom = _compute_bottom_accumulation_features(
+        df=df, close=close, change_60d=change_60d,
+        rsi_value=rsi_value, ma5=ma5,
+    )
+
     return {
         "daily_data_points": int(len(close)),
         "change_60d": None if change_60d is None else round(float(change_60d), 4),
@@ -904,6 +946,121 @@ def compute_daily_features(hist: pd.DataFrame) -> dict[str, object]:
         "signal_score": round(float(signal_score), 4),
         **shape,
         **quality,
+        **bottom,
+    }
+
+
+def _compute_bottom_accumulation_features(
+    df: pd.DataFrame,
+    close: pd.Series,
+    change_60d: float | None,
+    rsi_value: float | None,
+    ma5: pd.Series,
+) -> dict[str, object]:
+    """Compute bottom accumulation pattern features.
+
+    Bottom accumulation (底部吸筹) occurs when a stock that has experienced
+    significant decline begins to show institutional buying signals:
+    volume expansion from compressed levels, RSI recovering from oversold,
+    MACD improving or golden cross near the bottom, price stabilization.
+
+    Returns a dict of feature values suitable for hard-filter bypass and
+    scoring in the bottom_accumulation_quality factor.
+    """
+    last_close = float(close.iloc[-1])
+
+    # ---- RSI oversold / recovery ----
+    change = close.diff()
+    gain = change.clip(lower=0)
+    loss = (-change).clip(lower=0)
+    avg_gain_14 = gain.rolling(14, min_periods=14).mean().dropna()
+    avg_loss_14 = loss.rolling(14, min_periods=14).mean().dropna()
+    rsi_series = 100.0 - (100.0 / (1.0 + avg_gain_14 / avg_loss_14.replace(0, 1e-9)))
+    rsi_tail = rsi_series.tail(20)
+    rsi_oversold_20d = False
+    rsi_recovery_pct = 0.0
+    if not rsi_tail.empty and rsi_value is not None:
+        rsi_low_20d = float(rsi_tail.min())
+        rsi_oversold_20d = bool(rsi_low_20d <= 35.0)
+        if rsi_oversold_20d and rsi_low_20d > 0:
+            rsi_recovery_pct = (float(rsi_value) - rsi_low_20d)
+
+    # ---- MACD bottom cross / improvement ----
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    dif = ema12 - ema26
+    dea = dif.ewm(span=9, adjust=False).mean()
+    if len(dif) >= 20 and len(dea) >= 20:
+        dif_tail = dif.tail(20)
+        dea_tail = dea.tail(20)
+        dif_min = float(dif_tail.min())
+        dea_last = float(dea.iloc[-1])
+        dif_last = float(dif.iloc[-1])
+        # Bottom golden cross: DIF was negative and crossed above DEA recently
+        dif_was_below = bool((dif_tail.iloc[:-1] < dea_tail.iloc[:-1]).any())
+        dif_now_above = bool(dif_last >= dea_last)
+        # DIF/DEA still below zero = bottom context
+        below_zero = bool(dif_last < 0 and dea_last < 0)
+        macd_bottom_cross = bool(
+            dif_was_below and dif_now_above and below_zero
+            and dif_min < -0.5
+        )
+    else:
+        macd_bottom_cross = False
+
+    # ---- MA5 turn-up (slope improvement) ----
+    ma5_tail = ma5.dropna().tail(10)
+    if len(ma5_tail) >= 5:
+        half = len(ma5_tail) // 2
+        older = float(ma5_tail.iloc[:half].mean())
+        newer = float(ma5_tail.iloc[-half:].mean())
+        if older != 0:
+            ma5_turn_up_pct = (newer / older - 1.0) * 100
+        else:
+            ma5_turn_up_pct = 0.0
+    else:
+        ma5_turn_up_pct = 0.0
+
+    # ---- Price vs 60-day low ----
+    low_60d = float(close.tail(60).min())
+    if low_60d > 0:
+        price_vs_60d_low_pct = (last_close / low_60d - 1.0) * 100
+    else:
+        price_vs_60d_low_pct = 0.0
+
+    # ---- Composite bottom accumulation signal ----
+    # Requirements:
+    #   1. Significant 60d decline (>15%)
+    #   2. Volume expanding (5d > 20d avg × 1.3) — checked via volume_expand_5d
+    #   3. RSI was oversold and recovering OR MACD bottom cross
+    #   4. Price has bounced off 60d low (>5%)
+    change_60d_val = change_60d or 0.0
+    vol = df["volume"] if "volume" in df.columns else pd.Series(dtype=float)
+    vol_5d_avg = float(vol.tail(5).mean()) if len(vol) >= 5 else 0
+    vol_20d_avg = float(vol.tail(20).mean()) if len(vol) >= 20 else 1e-9
+    volume_expanding = bool(vol_20d_avg > 0 and vol_5d_avg / max(vol_20d_avg, 1e-9) >= 1.3)
+
+    signal_conditions = 0
+    if change_60d_val <= -15.0:
+        signal_conditions += 1
+    if volume_expanding:
+        signal_conditions += 1
+    if rsi_oversold_20d and rsi_recovery_pct >= 5.0:
+        signal_conditions += 1
+    if macd_bottom_cross:
+        signal_conditions += 1
+    if price_vs_60d_low_pct >= 3.0:
+        signal_conditions += 1
+
+    bottom_accumulation_signal = bool(signal_conditions >= 3)
+
+    return {
+        "rsi_oversold_20d": rsi_oversold_20d,
+        "rsi_recovery_pct": None if (rsi_value is None or rsi_series.empty) else round(float(rsi_recovery_pct), 4),
+        "macd_bottom_cross": macd_bottom_cross,
+        "ma5_turn_up_pct": None if ma5.tail(10).dropna().empty else round(float(ma5_turn_up_pct), 4),
+        "price_vs_60d_low_pct": None if pd.isna(low_60d) else round(float(price_vs_60d_low_pct), 4),
+        "bottom_accumulation_signal": bottom_accumulation_signal,
     }
 
 
@@ -997,6 +1154,81 @@ def _compute_daily_quality(raw: pd.DataFrame, normalized: pd.DataFrame) -> dict[
     }
 
 
+def _change_pct(close_series: pd.Series, window: int) -> float | None:
+    """Return the percentage change of the last close vs close window days ago."""
+    values = pd.to_numeric(close_series, errors="coerce").dropna()
+    if len(values) < window + 1:
+        return None
+    prev = float(values.iloc[-(window + 1)])
+    last = float(values.iloc[-1])
+    if prev <= 0:
+        return None
+    return (last / prev - 1.0) * 100
+
+
+def _volume_expand_1d(df: pd.DataFrame) -> float | None:
+    """今日成交量相对近5日均量的扩张倍数。"""
+    if "volume" not in df.columns or len(df) < 6:
+        return None
+    volume = pd.to_numeric(df["volume"], errors="coerce").dropna()
+    if len(volume) < 6:
+        return None
+    prior_5_mean = float(volume.iloc[-6:-1].mean())
+    if prior_5_mean <= 0:
+        return None
+    return float(volume.iloc[-1]) / prior_5_mean
+
+
+def _volume_expand_5d(df: pd.DataFrame) -> float | None:
+    """近5日均量相对再前5日均量的扩张倍数。"""
+    if "volume" not in df.columns or len(df) < 11:
+        return None
+    volume = pd.to_numeric(df["volume"], errors="coerce").dropna()
+    if len(volume) < 11:
+        return None
+    prior = float(volume.iloc[-10:-5].mean())
+    recent = float(volume.iloc[-5:].mean())
+    if prior <= 0:
+        return None
+    return recent / prior
+
+
+def _consecutive_volume_spike(df: pd.DataFrame, days: int) -> bool:
+    """最近连续 `days` 个交易日是否都放量（成交量 >= 近5日均量）。"""
+    if "volume" not in df.columns or len(df) < days + 5:
+        return False
+    volume = pd.to_numeric(df["volume"], errors="coerce").dropna()
+    if len(volume) < days + 5:
+        return False
+    for i in range(1, days + 1):
+        row_idx = -i
+        today_vol = float(volume.iloc[row_idx])
+        prior_5_mean = float(volume.iloc[row_idx - 5:row_idx].mean())
+        if prior_5_mean <= 0 or today_vol < prior_5_mean:
+            return False
+    return True
+
+
+def _coiled_spring_metrics(df: pd.DataFrame) -> tuple[float | None, float | None]:
+    """Return (contraction_pct, ramp_ratio) for spring-compression detection.
+
+    contraction_pct: 近5日均量相对再前5日均量的收缩百分比 (正数表示缩量).
+    ramp_ratio: 当日成交量 / 近5日均量.
+    """
+    if "volume" not in df.columns or len(df) < 11:
+        return None, None
+    volume = pd.to_numeric(df["volume"], errors="coerce").dropna()
+    if len(volume) < 11:
+        return None, None
+    prior = float(volume.iloc[-10:-5].mean())
+    recent = float(volume.iloc[-5:].mean())
+    if prior <= 0 or recent <= 0:
+        return None, None
+    contraction_pct = (1 - recent / prior) * 100
+    ramp_ratio = float(volume.iloc[-1]) / recent
+    return contraction_pct, ramp_ratio
+
+
 def _compute_shape_features(
     df: pd.DataFrame,
     *,
@@ -1025,6 +1257,8 @@ def _compute_shape_features(
     max_drawdown_20d_pct = _max_drawdown_pct(recent["close"])
     atr_20_pct = _atr_20_pct(df)
 
+    contraction_pct, ramp_ratio = _coiled_spring_metrics(df)
+
     return {
         "prev_high_20d": _round_or_none(prev_high_20d),
         "range_20d_pct": _round_or_none(range_20d_pct),
@@ -1033,9 +1267,20 @@ def _compute_shape_features(
         "body_pct": _round_or_none(body_pct),
         "pullback_to_ma20_pct": _round_or_none(pullback_to_ma20_pct),
         "consolidation_days_20d": _consolidation_days(previous),
+        "consolidation_days_60d": _consolidation_days(df.iloc[:-1].tail(60)),
+        "consolidation_days_120d": _consolidation_days(df.iloc[:-1].tail(120)),
         "volatility_20d_pct": _round_or_none(volatility_20d_pct),
         "max_drawdown_20d_pct": _round_or_none(max_drawdown_20d_pct),
         "atr_20_pct": _round_or_none(atr_20_pct),
+        "change_5d": _round_or_none(_change_pct(df["close"], 5)),
+        "change_10d": _round_or_none(_change_pct(df["close"], 10)),
+        "change_20d": _round_or_none(_change_pct(df["close"], 20)),
+        "volume_expand_1d": _round_or_none(_volume_expand_1d(df)),
+        "volume_expand_5d": _round_or_none(_volume_expand_5d(df)),
+        "consecutive_volume_spike_2d": _consecutive_volume_spike(df, 2),
+        "consecutive_volume_spike_3d": _consecutive_volume_spike(df, 3),
+        "coiled_spring_contraction_pct": _round_or_none(contraction_pct),
+        "coiled_spring_ramp_ratio": _round_or_none(ramp_ratio),
     }
 
 
@@ -1218,3 +1463,174 @@ def _last_float(series: pd.Series) -> float | None:
 
 def _is_true(value: bool) -> bool:
     return bool(value)
+
+
+# ---------------------------------------------------------------------------
+# Moneyflow (主力资金流) helpers
+# ---------------------------------------------------------------------------
+
+def _fetch_moneyflow_tushare(
+    code: str,
+    *,
+    lookback_days: int = _MF_LOOKBACK_DAYS,
+) -> pd.DataFrame | None:
+    """Fetch daily moneyflow from Tushare ``moneyflow_dc``.
+
+    ``moneyflow_dc`` returns:
+      - net_amount      → 今日主力净流入额（万元）
+      - net_amount_rate → 今日主力净流入净占比（%）
+
+    External-standard 5-day net inflow = sum of ``net_amount`` over the last 5
+    trading days.
+    """
+    token = _tushare_token()
+    if not token:
+        return None
+
+    import tushare as ts
+
+    pro = ts.pro_api(token)
+    _configure_tushare_client(pro, token=token)
+
+    ts_code = _to_tushare_code(code)
+    # Request enough calendar days to cover lookback_days trading days
+    start_date = (datetime.now() - timedelta(days=lookback_days * 2 + 10)).strftime("%Y%m%d")
+    end_date = datetime.now().strftime("%Y%m%d")
+
+    df = pro.moneyflow_dc(
+        ts_code=ts_code,
+        start_date=start_date,
+        end_date=end_date,
+        fields="trade_date,ts_code,net_amount,net_amount_rate",
+    )
+    if df is None or df.empty:
+        return None
+    df = df.sort_values("trade_date")
+    return df.tail(lookback_days).copy()
+
+
+def _fetch_moneyflow_akshare(
+    code: str,
+    *,
+    lookback_days: int = _MF_LOOKBACK_DAYS,
+) -> pd.DataFrame | None:
+    """Fetch moneyflow via AkShare as a free fallback.
+
+    AkShare ``stock_fund_flow_individual`` returns Chinese-named columns;
+    they are normalised to ``trade_date / net_amount / net_amount_rate``.
+    """
+    try:
+        import akshare as ak
+    except ImportError:
+        return None
+
+    try:
+        df = ak.stock_fund_flow_individual(symbol=str(code).zfill(6))
+    except Exception:
+        return None
+
+    if df is None or df.empty:
+        return None
+
+    rename_map = {
+        "日期": "trade_date",
+        "主力净流入-净额": "net_amount",
+        "主力净流入-净占比": "net_amount_rate",
+    }
+    df = df.rename(columns=rename_map)
+    for k in ("trade_date", "net_amount", "net_amount_rate"):
+        if k not in df.columns:
+            return None
+    df = df.sort_values("trade_date")
+    return df.tail(lookback_days).copy()
+
+
+def _fetch_moneyflow(
+    code: str,
+    *,
+    lookback_days: int = _MF_LOOKBACK_DAYS,
+    timeout: float = _MF_CALL_TIMEOUT_SECONDS,
+) -> tuple[pd.DataFrame | None, str]:
+    """Fetch moneyflow with fallback: tushare → akshare.
+
+    Returns ``(DataFrame, source_label)``.
+    """
+    try:
+        df = _fetch_moneyflow_tushare(code, lookback_days=lookback_days)
+    except Exception:
+        df = None
+    if df is not None and not df.empty:
+        return df, "tushare"
+
+    try:
+        df = _fetch_moneyflow_akshare(code, lookback_days=lookback_days)
+    except Exception:
+        df = None
+    if df is not None and not df.empty:
+        return df, "akshare"
+
+    return None, "unavailable"
+
+
+def _compute_moneyflow_features(
+    code: str,
+    *,
+    lookback_days: int = _MF_LOOKBACK_DAYS,
+) -> dict[str, object]:
+    """Compute main-force moneyflow features for a single stock.
+
+    **5日净流入 — 万元**: 最近5个交易日主力净流入额之和（万元）。
+    采用外部常用计算方式：对 Tushare ``moneyflow_dc`` 的 ``net_amount``
+    字段取近5日滚动求和。
+    """
+    mf_defaults: dict[str, object] = {
+        "mf_net_inflow": None,
+        "mf_net_inflow_5d": None,
+        "mf_consecutive_days": None,
+        "mf_inflow_strength_pct": None,
+        "mf_available": False,
+    }
+
+    if not _has_tushare_token():
+        return mf_defaults
+
+    moneyflow, _src = _fetch_moneyflow(code, lookback_days=lookback_days)
+    if moneyflow is None or moneyflow.empty:
+        return mf_defaults
+
+    net_amounts = pd.to_numeric(moneyflow["net_amount"], errors="coerce").dropna()
+    net_amount_rates = pd.to_numeric(moneyflow["net_amount_rate"], errors="coerce").dropna()
+
+    if len(net_amounts) == 0:
+        return mf_defaults
+
+    # 5日净流入 = sum of last 5 trading days' net_amount (万元)
+    recent_5d = net_amounts.tail(5)
+    mf_net_inflow_5d = float(recent_5d.sum())
+
+    # 今日净流入（万元）
+    mf_net_inflow = float(recent_5d.iloc[-1]) if len(recent_5d) > 0 else None
+
+    # 连续主力净流入天数（从最近往前数）
+    mf_consecutive_days = 0
+    for amt in reversed(net_amounts.values):
+        if float(amt) > 0:
+            mf_consecutive_days += 1
+        else:
+            break
+
+    # 流入强度 = 近5日 net_amount_rate 均值（%）
+    if len(net_amount_rates) >= 5:
+        mf_inflow_strength_pct = round(float(net_amount_rates.tail(5).mean()), 2)
+    elif len(net_amount_rates) > 0:
+        mf_inflow_strength_pct = round(float(net_amount_rates.mean()), 2)
+    else:
+        mf_inflow_strength_pct = None
+
+    return {
+        "mf_net_inflow": None if mf_net_inflow is None else round(mf_net_inflow, 2),
+        "mf_net_inflow_5d": round(mf_net_inflow_5d, 2),
+        "mf_consecutive_days": int(mf_consecutive_days),
+        "mf_inflow_strength_pct": mf_inflow_strength_pct,
+        "mf_available": True,
+    }

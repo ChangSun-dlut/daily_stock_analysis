@@ -4062,6 +4062,10 @@ def _normalize_candidate(raw: Any, rank: int) -> Dict[str, Any]:
         "dsa_analysis_summary": dsa_analysis_summary,
         "post_analysis_summaries": item.get("post_analysis_summaries") or source.get("post_analysis_summaries") or {},
         "post_analysis_tags": item.get("post_analysis_tags") or source.get("post_analysis_tags") or [],
+        "mf_net_inflow_5d": _first_present(item, source, "mf_net_inflow_5d"),
+        "mf_consecutive_days": _first_present(item, source, "mf_consecutive_days"),
+        "mf_inflow_strength_pct": _first_present(item, source, "mf_inflow_strength_pct"),
+        "mf_available": _first_present(item, source, "mf_available"),
         "raw": source,
     }
 

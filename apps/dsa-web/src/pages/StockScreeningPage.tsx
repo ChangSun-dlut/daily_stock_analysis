@@ -1650,6 +1650,21 @@ const StockScreeningPage: React.FC = () => {
                                       : '无'}
                                   </p>
                                 </div>
+                                <div>
+                                  <p className="text-xs font-semibold text-secondary-text">主力资金</p>
+                                  {item.mfAvailable ? (
+                                    <p className="mt-1 text-sm text-foreground">
+                                      5日净流入 {formatNumber(item.mfNetInflow5d)} 万元
+                                      {' · '}
+                                      连续 {item.mfConsecutiveDays ?? 0} 天流入
+                                      {item.mfInflowStrengthPct != null ? (
+                                        <>{' · '}净流入强度 {formatNumber(item.mfInflowStrengthPct)}%</>
+                                      ) : null}
+                                    </p>
+                                  ) : (
+                                    <p className="mt-1 text-sm text-secondary-text">暂无主力资金数据</p>
+                                  )}
+                                </div>
                               </div>
                               <div className="space-y-3">
                                 <div>

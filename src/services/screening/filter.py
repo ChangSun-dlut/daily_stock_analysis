@@ -44,12 +44,25 @@ class SnapshotFieldMissingError(ValueError):
 
 
 def apply_hard_filters(df: pd.DataFrame, filters: HardFilterConfig) -> pd.DataFrame:
-    """Filter snapshot DataFrame by hard conditions. Returns filtered copy."""
+    """Filter snapshot DataFrame by hard conditions. Returns filtered copy.
+
+    When ``bottom_accumulation_bypass`` is enabled, stocks whose
+    ``bottom_accumulation_signal`` column is ``True`` skip the three
+    consolidation/range/volatility constraints so bottom-reversal
+    candidates are not unfairly filtered out.
+    """
     result = df.copy()
     if result.empty:
         return result
 
     mask = pd.Series(True, index=result.index)
+
+    # ---- bottom accumulation bypass mask ----
+    has_ba = (
+        filters.bottom_accumulation_bypass
+        and "bottom_accumulation_signal" in result.columns
+    )
+    ba_bypass = result["bottom_accumulation_signal"].astype(bool).fillna(False) if has_ba else pd.Series(False, index=result.index)
 
     if filters.exclude_st:
         name_col = _find_col(result, ["name", "股票名称", "名称"]) if mask.any() else None
@@ -83,17 +96,17 @@ def apply_hard_filters(df: pd.DataFrame, filters: HardFilterConfig) -> pd.DataFr
     mask = _filter_in(result, mask, "rsi_status", filters.rsi_status_whitelist)
     mask = _filter_min(result, mask, ["breakout_20d_pct"], filters.breakout_20d_pct_min)
     mask = _filter_max(result, mask, ["breakout_20d_pct"], filters.breakout_20d_pct_max)
-    mask = _filter_max(result, mask, ["range_20d_pct"], filters.range_20d_pct_max)
+    mask = _filter_max_bypass(result, mask, ["range_20d_pct"], filters.range_20d_pct_max, bypass=ba_bypass)
     mask = _filter_min(result, mask, ["volume_ratio_20d"], filters.volume_ratio_20d_min)
     mask = _filter_max(result, mask, ["volume_ratio_20d"], filters.volume_ratio_20d_max)
     mask = _filter_min(result, mask, ["body_pct"], filters.body_pct_min)
     mask = _filter_max(result, mask, ["body_pct"], filters.body_pct_max)
     mask = _filter_min(result, mask, ["pullback_to_ma20_pct"], filters.pullback_to_ma20_pct_min)
     mask = _filter_max(result, mask, ["pullback_to_ma20_pct"], filters.pullback_to_ma20_pct_max)
-    mask = _filter_min(result, mask, ["consolidation_days_20d"], filters.consolidation_days_20d_min)
+    mask = _filter_min_bypass(result, mask, ["consolidation_days_20d"], filters.consolidation_days_20d_min, bypass=ba_bypass)
     mask = _filter_max(result, mask, ["consolidation_days_20d"], filters.consolidation_days_20d_max)
     mask = _filter_min(result, mask, ["volatility_20d_pct"], filters.volatility_20d_pct_min)
-    mask = _filter_max(result, mask, ["volatility_20d_pct"], filters.volatility_20d_pct_max)
+    mask = _filter_max_bypass(result, mask, ["volatility_20d_pct"], filters.volatility_20d_pct_max, bypass=ba_bypass)
     mask = _filter_min(result, mask, ["max_drawdown_20d_pct"], filters.max_drawdown_20d_pct_min)
     mask = _filter_max(result, mask, ["max_drawdown_20d_pct"], filters.max_drawdown_20d_pct_max)
     mask = _filter_min(result, mask, ["atr_20_pct"], filters.atr_20_pct_min)
@@ -168,17 +181,37 @@ def hard_filter_rejection_summary(
         record("rsi_status_whitelist", _filter_in(df, mask, "rsi_status", filters.rsi_status_whitelist))
     record_min("breakout_20d_pct_min", ["breakout_20d_pct"], filters.breakout_20d_pct_min)
     record_max("breakout_20d_pct_max", ["breakout_20d_pct"], filters.breakout_20d_pct_max)
-    record_max("range_20d_pct_max", ["range_20d_pct"], filters.range_20d_pct_max)
+
+    # Bottom accumulation bypass for rejection summary
+    ba = (
+        filters.bottom_accumulation_bypass
+        and "bottom_accumulation_signal" in df.columns
+    )
+    ba_bypass = df["bottom_accumulation_signal"].astype(bool).fillna(False) if ba else pd.Series(False, index=df.index)
+
+    def _record_bypass_min(label: str, cols: list[str], val: float | None) -> None:
+        if val is not None and ba:
+            record(label, _filter_min_bypass(df, mask, cols, val, bypass=ba_bypass))
+        else:
+            record_min(label, cols, val)
+
+    def _record_bypass_max(label: str, cols: list[str], val: float | None) -> None:
+        if val is not None and ba:
+            record(label, _filter_max_bypass(df, mask, cols, val, bypass=ba_bypass))
+        else:
+            record_max(label, cols, val)
+
+    _record_bypass_max("range_20d_pct_max", ["range_20d_pct"], filters.range_20d_pct_max)
     record_min("volume_ratio_20d_min", ["volume_ratio_20d"], filters.volume_ratio_20d_min)
     record_max("volume_ratio_20d_max", ["volume_ratio_20d"], filters.volume_ratio_20d_max)
     record_min("body_pct_min", ["body_pct"], filters.body_pct_min)
     record_max("body_pct_max", ["body_pct"], filters.body_pct_max)
     record_min("pullback_to_ma20_pct_min", ["pullback_to_ma20_pct"], filters.pullback_to_ma20_pct_min)
     record_max("pullback_to_ma20_pct_max", ["pullback_to_ma20_pct"], filters.pullback_to_ma20_pct_max)
-    record_min("consolidation_days_20d_min", ["consolidation_days_20d"], filters.consolidation_days_20d_min)
+    _record_bypass_min("consolidation_days_20d_min", ["consolidation_days_20d"], filters.consolidation_days_20d_min)
     record_max("consolidation_days_20d_max", ["consolidation_days_20d"], filters.consolidation_days_20d_max)
     record_min("volatility_20d_pct_min", ["volatility_20d_pct"], filters.volatility_20d_pct_min)
-    record_max("volatility_20d_pct_max", ["volatility_20d_pct"], filters.volatility_20d_pct_max)
+    _record_bypass_max("volatility_20d_pct_max", ["volatility_20d_pct"], filters.volatility_20d_pct_max)
     record_min("max_drawdown_20d_pct_min", ["max_drawdown_20d_pct"], filters.max_drawdown_20d_pct_min)
     record_max("max_drawdown_20d_pct_max", ["max_drawdown_20d_pct"], filters.max_drawdown_20d_pct_max)
     record_min("atr_20_pct_min", ["atr_20_pct"], filters.atr_20_pct_min)
@@ -369,6 +402,54 @@ def _filter_max(
     return mask & series.le(value) & series.notna()
 
 
+def _filter_min_bypass(
+    df: pd.DataFrame,
+    mask: pd.Series,
+    col_names: list[str],
+    value: float | None,
+    *,
+    bypass: pd.Series,
+) -> pd.Series:
+    """Like ``_filter_min``, but rows where ``bypass`` is True always pass."""
+    if value is None:
+        return mask
+    if not mask.any():
+        return mask
+    col = _find_col(df, col_names)
+    if not col:
+        raise SnapshotFieldMissingError(
+            f"Missing required snapshot column for min-bypass filter {col_names}: "
+            f"configured value={value}"
+        )
+    series = pd.to_numeric(df[col], errors="coerce")
+    normal_pass = series.ge(value) & series.notna()
+    return mask & (normal_pass | bypass.reindex(mask.index, fill_value=False))
+
+
+def _filter_max_bypass(
+    df: pd.DataFrame,
+    mask: pd.Series,
+    col_names: list[str],
+    value: float | None,
+    *,
+    bypass: pd.Series,
+) -> pd.Series:
+    """Like ``_filter_max``, but rows where ``bypass`` is True always pass."""
+    if value is None:
+        return mask
+    if not mask.any():
+        return mask
+    col = _find_col(df, col_names)
+    if not col:
+        raise SnapshotFieldMissingError(
+            f"Missing required snapshot column for max-bypass filter {col_names}: "
+            f"configured value={value}"
+        )
+    series = pd.to_numeric(df[col], errors="coerce")
+    normal_pass = series.le(value) & series.notna()
+    return mask & (normal_pass | bypass.reindex(mask.index, fill_value=False))
+
+
 def _filter_bool_true(
     df: pd.DataFrame,
     mask: pd.Series,
@@ -402,7 +483,6 @@ def _filter_in(
         )
     allowed_set = {str(item) for item in allowed}
     return mask & df[col_name].astype(str).isin(allowed_set)
-
 
 
 def _rejection_samples(

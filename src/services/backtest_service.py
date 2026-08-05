@@ -836,17 +836,30 @@ class BacktestService:
             return
 
         try:
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+
             from data_provider.base import DataFetcherManager
 
             # fetch a window that covers start + forward bars
             end_date = analysis_date + timedelta(days=max(eval_window_days * 2, 30))
-            manager = DataFetcherManager()
-            df, source = manager.get_daily_data(
-                stock_code=refill_code,
-                start_date=analysis_date.strftime("%Y-%m-%d"),
-                end_date=end_date.strftime("%Y-%m-%d"),
-                days=eval_window_days * 2,
-            )
+
+            def _fetch():
+                manager = DataFetcherManager()
+                return manager.get_daily_data(
+                    stock_code=refill_code,
+                    start_date=analysis_date.strftime("%Y-%m-%d"),
+                    end_date=end_date.strftime("%Y-%m-%d"),
+                    days=eval_window_days * 2,
+                )
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_fetch)
+                try:
+                    df, source = future.result(timeout=30)
+                except FutureTimeoutError:
+                    logger.warning(f"补全日线数据超时({refill_code})")
+                    return
+
             if df is None or df.empty:
                 return
             self.db.save_daily_data(df, code=refill_code, data_source=source)

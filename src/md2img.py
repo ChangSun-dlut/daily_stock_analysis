@@ -25,6 +25,12 @@ from src.share_image import ShareImageBranding, build_share_image_html
 
 logger = logging.getLogger(__name__)
 
+# Cache m2f (markdown-to-file) health status so we don't keep retrying a
+# broken engine on every API call.  The bundled Puppeteer browser can crash
+# (e.g. SEGV on macOS ARM) while the subprocess returns exit 0, making the
+# failure silent but reproducible across requests.
+_m2f_healthy: Optional[bool] = None
+
 
 def _share_image_branding(config: object) -> ShareImageBranding:
     return ShareImageBranding(
@@ -113,12 +119,17 @@ def _markdown_to_image_m2f(
     branding: Optional[ShareImageBranding] = None,
 ) -> Optional[bytes]:
     """Convert Markdown to PNG via markdown-to-file (m2f) CLI. Better emoji support (Issue #455)."""
+    global _m2f_healthy
+    if _m2f_healthy is False:
+        return None
+
     m2f_command = shutil.which("m2f")
     if m2f_command is None:
         logger.warning(
             "m2f (markdown-to-file) not found in PATH. "
             "Install with: npm i -g markdown-to-file. Fallback to text."
         )
+        _m2f_healthy = False
         return None
 
     temp_dir = None
@@ -144,20 +155,25 @@ def _markdown_to_image_m2f(
         )
         png_path = os.path.join(temp_dir, "report.png")
         if result.returncode != 0 or not os.path.isfile(png_path):
-            logger.warning(
-                "m2f conversion failed: returncode=%s, stderr=%s",
+            logger.info(
+                "m2f conversion skipped (engine unavailable, will fallback): "
+                "returncode=%s, stderr=%s",
                 result.returncode,
                 (result.stderr or b"").decode("utf-8", errors="replace")[:200],
             )
+            _m2f_healthy = False
             return None
 
+        _m2f_healthy = True
         with open(png_path, "rb") as f:
             return f.read()
     except subprocess.TimeoutExpired:
         logger.warning("m2f conversion timed out (60s)")
+        _m2f_healthy = False
         return None
     except Exception as e:
         logger.warning("markdown_to_image (m2f) failed: %s", e)
+        _m2f_healthy = False
         return None
     finally:
         if temp_dir and os.path.isdir(temp_dir):

@@ -5,6 +5,7 @@
 
 import copy
 import logging
+import math
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -628,6 +629,10 @@ def _df_to_picks(df: pd.DataFrame) -> list[Pick]:
             daily_quality_flags=_safe_text(row.get("daily_quality_flags")),
             daily_source=_safe_text(row.get("daily_source")),
             factor_scores=factor_scores,
+            mf_net_inflow_5d=_safe_float(row.get("mf_net_inflow_5d")),
+            mf_consecutive_days=_safe_int(row.get("mf_consecutive_days")),
+            mf_inflow_strength_pct=_safe_float(row.get("mf_inflow_strength_pct")),
+            mf_available=_safe_bool(row.get("mf_available")),
         ))
     return picks
 
@@ -764,3 +769,33 @@ def _format_filter_waterfall(steps: list[dict[str, object]], *, limit: int = 8) 
 
 def _safe_text(v: object) -> str:
     return safe_text(v, max_len=120)
+
+
+def _safe_float(v: object) -> float | None:
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(v: object) -> int | None:
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_bool(v: object) -> bool | None:
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    if isinstance(v, str):
+        return v.lower() in ("true", "1", "yes", "y")
+    return None

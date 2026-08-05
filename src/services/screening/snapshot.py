@@ -26,7 +26,7 @@ from src.services.screening.source_guard import call_with_timeout, parse_source_
 logger = logging.getLogger(__name__)
 
 _SNAPSHOT_CACHE_VERSION = 1
-_DEFAULT_TUSHARE_HTTP_URL = "http://api.waditu.com"
+_DEFAULT_TUSHARE_HTTP_URL = "http://api.waditu.com/dataapi"
 _EM_REQUEST_MIN_INTERVAL_SECONDS = 1.0
 _EM_REQUEST_JITTER_SECONDS = 0.3
 _SOURCE_HEALTH_FAILURE_THRESHOLD = 3

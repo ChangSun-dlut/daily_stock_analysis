@@ -33,7 +33,7 @@ instructions: |
      - 站上 MA20 为加分项。
      - MACD 多头或走平为佳。
 
-  4. **风险确认**（关联理念5：风险排查）：
+  4. **风险确认（关联理念5：风险排查）**：
      - 通过 `search_stock_news` 排除利空消息。
      - 排除 ST 股票。
      - 追涨涨幅 > 9.3% 或换手率 > 15% 需警惕。
@@ -186,9 +186,13 @@ screening:
     consolidation_quality_surge_pullback_penalty_slope: 1.0
     consolidation_quality_long_bonus_60d: 8.0
     consolidation_quality_long_bonus_120d: 15.0
+    consolidation_quality_ma_bullish_bonus: 5.0
+    consolidation_quality_price_above_ma20_bonus: 3.0
     momentum_chase_penalty_slope: 10.0
     momentum_chase_start_pct: 3.0
     stability_hot_change_pct: 8.5
+    consolidation_mf_inflow_5d_min: 300.0
+    consolidation_mf_inflow_5d_max: 3000.0
   shape_window: 40
   stratified_sampling:
     enabled: true

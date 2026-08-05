@@ -17,6 +17,8 @@ _FACTOR_COLUMNS = {
     "size": "factor_size_score",
     "theme_heat": "factor_theme_heat_score",
     "topic_alignment": "factor_topic_alignment_score",
+    "consolidation_quality": "factor_consolidation_quality_score",
+    "bottom_accumulation_quality": "factor_bottom_accumulation_quality_score",
 }
 _DEFAULT_SCORING_PROFILE = {
     "momentum_base": 60.0,
@@ -86,6 +88,57 @@ _DEFAULT_SCORING_PROFILE = {
     "topic_alignment_match_bonus": 25.0,
     "topic_alignment_heat_weight": 0.25,
     "topic_alignment_unmatched_penalty": 12.0,
+    "consolidation_quality_base": 50.0,
+    "consolidation_quality_breakout_bonus_slope": 0.80,
+    "consolidation_quality_breakout_threshold_pct": 30.0,
+    "consolidation_quality_days_ideal": 10.0,
+    "consolidation_quality_days_slope": 4.0,
+    "consolidation_quality_range_ideal_max": 12.0,
+    "consolidation_quality_range_ideal_min": 2.0,
+    "consolidation_quality_range_penalty_slope": 2.5,
+    "consolidation_quality_volatility_ideal": 20.0,
+    "consolidation_quality_volatility_penalty_slope": 1.0,
+    "consolidation_quality_volume_ratio_ideal": 0.70,
+    "consolidation_quality_volume_ratio_penalty_slope": 15.0,
+    "consolidation_quality_overhead_threshold_pct": -15.0,
+    "consolidation_quality_overhead_penalty_slope": 0.5,
+    "consolidation_quality_near_high_threshold_pct": -5.0,
+    "consolidation_quality_near_high_penalty": 25.0,
+    "consolidation_quality_momentum_20d_threshold_pct": 5.0,
+    "consolidation_quality_momentum_20d_penalty_slope": 4.0,
+    "consolidation_quality_momentum_10d_threshold_pct": 3.0,
+    "consolidation_quality_momentum_10d_penalty_slope": 4.0,
+    "consolidation_quality_volume_expand_threshold": 1.0,
+    "consolidation_quality_volume_expand_bonus": 12.0,
+    "consolidation_quality_volume_spike_threshold": 1.5,
+    "consolidation_quality_volume_spike_bonus_slope": 45.0,
+    "consolidation_quality_consecutive_spike_2d_bonus": 8.0,
+    "consolidation_quality_consecutive_spike_3d_bonus": 15.0,
+    "consolidation_quality_coiled_spring_contraction_min": 15.0,
+    "consolidation_quality_coiled_spring_ramp_min": 1.15,
+    "consolidation_quality_coiled_spring_ramp_max": 3.5,
+    "consolidation_quality_coiled_spring_bonus": 20.0,
+    "consolidation_quality_surge_pullback_penalty_slope": 1.0,
+    "consolidation_quality_long_bonus_60d": 8.0,
+    "consolidation_quality_long_bonus_120d": 15.0,
+    "consolidation_quality_ma_bullish_bonus": 5.0,
+    "consolidation_quality_price_above_ma20_bonus": 3.0,
+    # --- bottom_accumulation_quality ---
+    "bottom_accumulation_decline_sweet_min": 15.0,
+    "bottom_accumulation_decline_sweet_max": 40.0,
+    "bottom_accumulation_decline_too_deep_max": 60.0,
+    "bottom_accumulation_rsi_oversold_threshold": 35.0,
+    "bottom_accumulation_rsi_recovery_min": 5.0,
+    "bottom_accumulation_volume_expand_min": 1.3,
+    "bottom_accumulation_price_vs_60d_low_min": 3.0,
+    "bottom_accumulation_ma5_turn_up_min": 1.0,
+    "bottom_accumulation_signal_min_signals": 3,
+    "bottom_accumulation_mf_inflow_5d_min": 500.0,
+    "bottom_accumulation_mf_inflow_5d_max": 5000.0,
+    "bottom_accumulation_mf_strength_pct_min": 2.0,
+    "bottom_accumulation_mf_strength_pct_max": 10.0,
+    "consolidation_mf_inflow_5d_min": 300.0,
+    "consolidation_mf_inflow_5d_max": 3000.0,
 }
 
 
@@ -148,6 +201,8 @@ def _compute_factor_scores(df: pd.DataFrame, config: ScreeningConfig | None = No
         "size": _compute_size_score(df),
         "theme_heat": _compute_theme_heat_score(df, profile),
         "topic_alignment": _compute_topic_alignment_score(df, profile),
+        "consolidation_quality": _compute_consolidation_quality_score(df, profile),
+        "bottom_accumulation_quality": _compute_bottom_accumulation_quality_score(df, profile),
     }
 
 
@@ -466,6 +521,134 @@ def _compute_topic_alignment_score(df: pd.DataFrame, profile: dict[str, float]) 
     return pd.Series(scores, index=df.index).clip(0, 100)
 
 
+def _compute_consolidation_quality_score(df: pd.DataFrame, profile: dict[str, float]) -> pd.Series:
+    """Score how well a candidate matches the consolidation-breakout pattern.
+
+    Rewards tight/long consolidation, gentle volume expansion, MACD bullishness,
+    proximity to 20-day highs, and spring-compression patterns.
+    Penalizes excessive range, volatility, and late chasing.
+    """
+    score = pd.Series(float(profile["consolidation_quality_base"]), index=df.index)
+
+    # 1. Consolidation duration: longer is better once the minimum is met.
+    # Penalize only stocks that have not consolidated enough; reward marginal
+    # extra duration to reflect the strategy's rule that "the longer the base,
+    # the more reliable the breakout".
+    if "consolidation_days_20d" in df.columns:
+        days = pd.to_numeric(df["consolidation_days_20d"], errors="coerce").fillna(0)
+        ideal = profile["consolidation_quality_days_ideal"]
+        slope = profile["consolidation_quality_days_slope"]
+        shortfall = (ideal - days).clip(lower=0)
+        score -= shortfall * slope
+        score += (days - ideal).clip(lower=0) * (slope * 0.25)
+
+    # 2. Consolidation range: prefer a tight but not flat range.
+    if "range_20d_pct" in df.columns:
+        range_ = pd.to_numeric(df["range_20d_pct"], errors="coerce")
+        ideal_min = profile["consolidation_quality_range_ideal_min"]
+        ideal_max = profile["consolidation_quality_range_ideal_max"]
+        slope = profile["consolidation_quality_range_penalty_slope"]
+        penalty = (
+            (range_ - ideal_max).clip(lower=0) + (ideal_min - range_).clip(lower=0)
+        ) * slope
+        score -= penalty.fillna(0)
+
+    # 3. Volatility: lower is better for a clean base.
+    if "volatility_20d_pct" in df.columns:
+        vol = pd.to_numeric(df["volatility_20d_pct"], errors="coerce")
+        ideal = profile["consolidation_quality_volatility_ideal"]
+        slope = profile["consolidation_quality_volatility_penalty_slope"]
+        score -= (vol - ideal).clip(lower=0).fillna(0) * slope
+
+    # 4. Breakout / near-high bonus.
+    if "breakout_20d_pct" in df.columns:
+        breakout = pd.to_numeric(df["breakout_20d_pct"], errors="coerce").fillna(-100)
+        near_high = breakout >= profile["consolidation_quality_near_high_threshold_pct"]
+        score += near_high.astype(float) * profile["consolidation_quality_near_high_penalty"]
+        score += breakout.clip(lower=0) * profile["consolidation_quality_breakout_bonus_slope"]
+
+    # 5. Momentum penalty: avoid chasing stocks that have already moved too far.
+    if "change_10d" in df.columns:
+        c10 = pd.to_numeric(df["change_10d"], errors="coerce").fillna(0)
+        score -= (
+            c10 - profile["consolidation_quality_momentum_10d_threshold_pct"]
+        ).clip(lower=0) * profile["consolidation_quality_momentum_10d_penalty_slope"]
+    if "change_20d" in df.columns:
+        c20 = pd.to_numeric(df["change_20d"], errors="coerce").fillna(0)
+        score -= (
+            c20 - profile["consolidation_quality_momentum_20d_threshold_pct"]
+        ).clip(lower=0) * profile["consolidation_quality_momentum_20d_penalty_slope"]
+
+    # 6. Volume expansion: reward today's volume pick-up and recent volume ramp.
+    if "volume_expand_1d" in df.columns:
+        ve1 = pd.to_numeric(df["volume_expand_1d"], errors="coerce").fillna(1.0)
+        threshold = profile["consolidation_quality_volume_expand_threshold"]
+        score += (ve1 - threshold).clip(lower=0) * profile["consolidation_quality_volume_expand_bonus"]
+    if "volume_expand_5d" in df.columns:
+        ve5 = pd.to_numeric(df["volume_expand_5d"], errors="coerce").fillna(1.0)
+        threshold = profile["consolidation_quality_volume_expand_threshold"]
+        score += (ve5 - threshold).clip(lower=0) * (profile["consolidation_quality_volume_expand_bonus"] * 0.5)
+
+    # 7. Consecutive volume spikes: reward sustained demand.
+    if "consecutive_volume_spike_3d" in df.columns:
+        spike3 = df["consecutive_volume_spike_3d"].fillna(False).astype(bool)
+        score += spike3.astype(float) * profile["consolidation_quality_consecutive_spike_3d_bonus"]
+    if "consecutive_volume_spike_2d" in df.columns:
+        spike2 = df["consecutive_volume_spike_2d"].fillna(False).astype(bool)
+        score += spike2.astype(float) * profile["consolidation_quality_consecutive_spike_2d_bonus"]
+
+    # 8. Spring compression: reward contraction followed by controlled expansion.
+    if {"coiled_spring_contraction_pct", "coiled_spring_ramp_ratio"} <= set(df.columns):
+        contraction = pd.to_numeric(df["coiled_spring_contraction_pct"], errors="coerce").fillna(0)
+        ramp = pd.to_numeric(df["coiled_spring_ramp_ratio"], errors="coerce").fillna(1.0)
+        is_spring = (
+            (contraction >= profile["consolidation_quality_coiled_spring_contraction_min"])
+            & (ramp >= profile["consolidation_quality_coiled_spring_ramp_min"])
+            & (ramp <= profile["consolidation_quality_coiled_spring_ramp_max"])
+        )
+        score += is_spring.astype(float) * profile["consolidation_quality_coiled_spring_bonus"]
+
+    # 9. Longer-base bonus: stocks that have consolidated across 60/120 days.
+    if "consolidation_days_60d" in df.columns:
+        c60 = pd.to_numeric(df["consolidation_days_60d"], errors="coerce").fillna(0)
+        score += (c60 > 0).astype(float) * profile["consolidation_quality_long_bonus_60d"]
+    if "consolidation_days_120d" in df.columns:
+        c120 = pd.to_numeric(df["consolidation_days_120d"], errors="coerce").fillna(0)
+        score += (c120 > 0).astype(float) * profile["consolidation_quality_long_bonus_120d"]
+
+    # 10. MA structure bonus.
+    ma_bullish_bonus = profile.get("consolidation_quality_ma_bullish_bonus", 5.0)
+    price_above_ma20_bonus = profile.get("consolidation_quality_price_above_ma20_bonus", 3.0)
+    if "ma_bullish" in df.columns:
+        score += df["ma_bullish"].fillna(False).astype(bool).astype(float) * ma_bullish_bonus
+    if "price_above_ma20" in df.columns:
+        score += df["price_above_ma20"].fillna(False).astype(bool).astype(float) * price_above_ma20_bonus
+
+    # --- Money Flow Confirmation (0-10 pts, consolidation-breakout overlay) ---
+    mf_score = pd.Series(5.0, index=df.index)
+    if "mf_available" in df.columns:
+        mf_avail = df["mf_available"].fillna(False).astype(bool)
+        mf_norm_min = profile.get("consolidation_mf_inflow_5d_min", 300)
+        mf_norm_max = profile.get("consolidation_mf_inflow_5d_max", 3000)
+        if "mf_net_inflow_5d" in df.columns:
+            inflow5d = pd.to_numeric(df["mf_net_inflow_5d"], errors="coerce").fillna(0.0)
+            mf_score = mf_score + (
+                mf_avail & (inflow5d > mf_norm_min)
+            ).astype(float) * ((inflow5d - mf_norm_min) / max(mf_norm_max - mf_norm_min, 1.0)).clip(
+                lower=0, upper=1.0
+            ) * 5.0
+        if "mf_consecutive_days" in df.columns:
+            cons = pd.to_numeric(df["mf_consecutive_days"], errors="coerce").fillna(0).clip(lower=0)
+            mf_score = mf_score + (mf_avail & (cons >= 3)).astype(float) * 3.0
+        if "mf_inflow_strength_pct" in df.columns:
+            strength = pd.to_numeric(df["mf_inflow_strength_pct"], errors="coerce").fillna(0.0)
+            mf_score = mf_score + (mf_avail & (strength > 2.0)).astype(float) * ((strength - 2.0) / 10.0).clip(lower=0, upper=1.0) * 2.0
+    mf_score = mf_score.clip(lower=0, upper=10.0)
+    score = score + mf_score
+
+    return score.clip(0, 100)
+
+
 def _topic_tokens(value: object) -> set[str]:
     text = str(value or "").strip()
     if not text or text.lower() in {"nan", "none", "<na>"}:
@@ -503,3 +686,194 @@ def _rank_score(
         pct=True,
     ) * 100
     return ranks.fillna(float(na_score)).clip(0, 100)
+
+
+def _compute_bottom_accumulation_quality_score(df: pd.DataFrame, profile: dict[str, float]) -> pd.Series:
+    """Score how well a candidate matches the bottom-accumulation (底部吸筹) pattern.
+
+    Bottom accumulation describes stocks that have experienced significant
+    decline and are now showing institutional accumulation signals:
+
+    1. **Decline Depth** (0-25 pts): 60d decline in sweet-spot range
+       (15-40%). Too shallow = no real bottom; too deep = breakdown risk.
+
+    2. **RSI Recovery** (0-20 pts): RSI was oversold (<35) and now recovering.
+       Stronger recovery = more points.
+
+    3. **Volume Accumulation** (0-18 pts): Moderate expansion (温和放量)
+       confirming quiet accumulation at the bottom.  Sweet spot 1.1-1.6x;
+       explosive volume (>2x) penalized to exclude limit-up chasers.
+
+    4. **MACD Bottom Structure** (0-15 pts): MACD improving or golden cross
+       in negative territory (bottom context).
+
+    5. **Price Stabilization** (0-20 pts): Price bounced off 60d low and
+       is stabilizing (MA5 turning up, moderate rebound distance).
+
+    6. **Money Flow Confirmation** (0-15 pts): Main-force net inflow from
+       Tushare moneyflow_dc (→AkShare→efinance fallback). Rewards 5d
+       cumulative inflow amount, consecutive inflow days, and inflow
+       strength as % of turnover. No data → neutral 7 pts.
+
+    Total: 0-100. Each sub-score contributes additively.
+    """
+    score = pd.Series(0.0, index=df.index)
+
+    # --- 1. Decline Depth (0-25 points) ---
+    if "change_60d" in df.columns:
+        c60 = pd.to_numeric(df["change_60d"], errors="coerce").fillna(0)
+        sweet_min = profile.get("bottom_accumulation_decline_sweet_min", 15.0)
+        sweet_max = profile.get("bottom_accumulation_decline_sweet_max", 40.0)
+        too_deep = profile.get("bottom_accumulation_decline_too_deep_max", 60.0)
+
+        decline = (-c60).clip(lower=0)
+
+        # Piecewise linear:
+        #   0–5%: 0 pts (trivial decline → no bottom)
+        #   5–15%: ramp 0 → 25
+        #   15–40%: full 25 pts (sweet spot)
+        #   40–60%: ramp 25 → 0
+        #   >60%: 0 pts (too risky / breakdown)
+        deep_slope = 25.0 / max(too_deep - sweet_max, 1.0)
+        shallow_slope = 25.0 / max(sweet_min - 5.0, 1.0)
+
+        decline_score = pd.Series(0.0, index=df.index)
+        decline_score = decline_score.where(
+            (decline < 5.0) | (decline > too_deep), 0.0
+        )
+        # 5–15% ramp up
+        mask_shallow = (decline >= 5.0) & (decline < sweet_min)
+        decline_score = decline_score.where(
+            ~mask_shallow, (decline - 5.0) * shallow_slope
+        )
+        # 15–40% full
+        mask_sweet = (decline >= sweet_min) & (decline <= sweet_max)
+        decline_score = decline_score.where(~mask_sweet, 25.0)
+        # 40–60% ramp down
+        mask_deep = (decline > sweet_max) & (decline <= too_deep)
+        decline_score = decline_score.where(
+            ~mask_deep, 25.0 - (decline - sweet_max) * deep_slope
+        )
+        decline_score = decline_score.clip(lower=0, upper=25.0)
+        score = score + decline_score
+    else:
+        score = score + 10.0  # neutral
+
+    # --- 2. RSI Oversold Recovery (0-20 points) ---
+    if "rsi_oversold_20d" in df.columns and "rsi_recovery_pct" in df.columns:
+        rsi_oversold = df["rsi_oversold_20d"].astype(bool)
+        rsi_rec = pd.to_numeric(df["rsi_recovery_pct"], errors="coerce").fillna(0)
+
+        rsi_score = rsi_oversold.astype(float) * 5.0
+        rec_bonus = (rsi_rec / 20.0).clip(lower=0, upper=1.0) * 15.0
+        rsi_score = (rsi_score + rec_bonus).clip(lower=0, upper=20.0)
+        score = score + rsi_score
+    else:
+        score = score + 5.0
+
+    # --- 3. Volume Accumulation (0-18 points, moderate-expansion preference) ---
+    #     Favor 温和放量 (moderate volume expansion) as confirmation of quiet
+    #     accumulation. Penalize 爆量 (explosive volume) which correlates with
+    #     chase chasers and limit-up stocks that have already run.
+    vol_score = pd.Series(3.0, index=df.index)
+
+    # 3a. Volume expansion ratio (放量): sweet spot 1.1-1.6x over 20d avg.
+    #     Below 1.1: negligible; 1.1-1.6: ideal bottom accumulation;
+    #     beyond 1.6: diminishing, risk of hot-money chase; >2.0: penalty.
+    if "volume_expand_5d" in df.columns:
+        ve5 = pd.to_numeric(df["volume_expand_5d"], errors="coerce").fillna(1.0)
+        # mild zone (1.0-1.3): gradual ramp +0..+3
+        vol_score = vol_score + ((ve5 - 1.0) / 0.3).clip(lower=0, upper=1.0) * 3.0
+        # ideal zone (1.3-1.6): peak bonus +3..+5, total 3+5=8 for ideal
+        vol_score = vol_score + ((ve5 - 1.3) / 0.3).clip(lower=0, upper=1.0) * 2.0
+        # cooling zone (1.6-2.0): give back from peak, down to +0 at >2.0
+        vol_score = vol_score - ((ve5 - 1.6) / 0.4).clip(lower=0, upper=1.0) * 5.0
+
+    # 3b. Consecutive volume spike days (连续放量天数):
+    #     2-4 days = sustained quiet buying (good); 5+ days = too hot.
+    if "consecutive_volume_spike_days" in df.columns:
+        spike_days = pd.to_numeric(df["consecutive_volume_spike_days"], errors="coerce").fillna(0).clip(lower=0)
+        vol_score = vol_score + ((spike_days >= 2) & (spike_days <= 4)).astype(float) * 3.0
+
+    # 3c. 倍量 bonus (volume_ratio_20d): sweet spot 1.1-1.5x.
+    #     Mild above-baseline = good; >2.0x = explosive chase → penalty.
+    if "volume_ratio_20d" in df.columns:
+        vr20 = pd.to_numeric(df["volume_ratio_20d"], errors="coerce").fillna(1.0)
+        vol_score = vol_score + ((vr20 > 1.1) & (vr20 <= 1.3)).astype(float) * 2.0
+        vol_score = vol_score + ((vr20 > 1.3) & (vr20 <= 1.5)).astype(float) * 3.0
+        vol_score = vol_score + ((vr20 > 1.5) & (vr20 <= 2.0)).astype(float) * 1.0
+        vol_score = vol_score - (vr20 > 2.0).astype(float) * 2.0
+
+    vol_score = vol_score.clip(lower=0, upper=18.0)
+    score = score + vol_score
+
+    # --- 4. MACD Bottom Structure (0-15 points) ---
+    if "macd_bottom_cross" in df.columns:
+        macd_cross = df["macd_bottom_cross"].astype(bool)
+        macd_score = macd_cross.astype(float) * 15.0
+        score = score + macd_score
+    else:
+        score = score + 5.0
+
+    # --- 5. Price Stabilization (0-20 points) ---
+    stab_score = pd.Series(5.0, index=df.index)
+
+    if "price_vs_60d_low_pct" in df.columns:
+        p_low = pd.to_numeric(df["price_vs_60d_low_pct"], errors="coerce").fillna(0)
+        # Sweet spot: 3-20% above 60d low
+        # 3% = 0 bonus, 20% = 10 bonus, >20% = 10 bonus (capped)
+        low_bonus = ((p_low - 3.0) / 17.0).clip(lower=0, upper=1.0) * 10.0
+        stab_score = stab_score + low_bonus
+
+    if "ma5_turn_up_pct" in df.columns:
+        ma5_turn = pd.to_numeric(df["ma5_turn_up_pct"], errors="coerce").fillna(0)
+        turn_min = profile.get("bottom_accumulation_ma5_turn_up_min", 1.0)
+        turn_bonus = ((ma5_turn - (-2.0)) / (turn_min + 2.0)).clip(lower=0, upper=1.0) * 5.0
+        stab_score = stab_score + turn_bonus
+
+    stab_score = stab_score.clip(lower=0, upper=20.0)
+    score = score + stab_score
+
+    # --- 6. Money Flow Confirmation (0-15 points) ---
+    #     Tushare moneyflow_dc → AkShare → efinance fallback chain.
+    #     Rewards names with rising main-force stakes: inflow amount,
+    #     inflow strength as % of turnover, and consecutive days.
+    #     No data available → neutral 7 pts (not penalized).
+    mf_score = pd.Series(7.0, index=df.index)
+
+    if "mf_available" in df.columns:
+        mf_avail = df["mf_available"].fillna(False).astype(bool)
+
+        # 6a. 5-day cumulative net inflow (万元): positive & large → rewarded
+        inflow_min = profile.get("bottom_accumulation_mf_inflow_5d_min", 500)
+        inflow_max = profile.get("bottom_accumulation_mf_inflow_5d_max", 5000)
+        if "mf_net_inflow_5d" in df.columns:
+            inflow5d = pd.to_numeric(df["mf_net_inflow_5d"], errors="coerce").fillna(0.0)
+            mf_score = mf_score + (
+                mf_avail & (inflow5d > inflow_min)
+            ).astype(float) * ((inflow5d - inflow_min) / max(inflow_max - inflow_min, 1.0)).clip(
+                lower=0, upper=1.0
+            ) * 6.0
+
+        # 6b. Consecutive positive inflow days:
+        #     1-2 days → mild interest, 3-4 → sustained, 5+ → strong commitment
+        if "mf_consecutive_days" in df.columns:
+            cons = pd.to_numeric(df["mf_consecutive_days"], errors="coerce").fillna(0).clip(lower=0)
+            mf_score = mf_score + (mf_avail & (cons >= 2) & (cons < 4)).astype(float) * 3.0
+            mf_score = mf_score + (mf_avail & (cons >= 4)).astype(float) * 5.0
+
+        # 6c. Inflow strength (% of turnover): higher % → stronger conviction
+        strength_min = profile.get("bottom_accumulation_mf_strength_pct_min", 2.0)
+        strength_max = profile.get("bottom_accumulation_mf_strength_pct_max", 10.0)
+        if "mf_inflow_strength_pct" in df.columns:
+            strength = pd.to_numeric(df["mf_inflow_strength_pct"], errors="coerce").fillna(0.0)
+            mf_score = mf_score + (
+                mf_avail & (strength > strength_min)
+            ).astype(float) * ((strength - strength_min) / max(strength_max - strength_min, 1.0)).clip(
+                lower=0, upper=1.0
+            ) * 4.0
+
+    mf_score = mf_score.clip(lower=0, upper=15.0)
+    score = score + mf_score
+
+    return score.clip(lower=0, upper=100.0)
