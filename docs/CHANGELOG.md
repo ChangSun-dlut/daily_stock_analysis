@@ -68,6 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [改进] bottom_accumulation / consolidation_breakout 选股结果卡片新增主力资金字段展示（5日净流入、连续流入天数、净流入强度），并将对应字段从 alphasift Pick 模型透传至 API 响应与前端类型。
 - [改进] `capital_heat`（主力热度）策略新增 `capital_heat_quality` 因子评分，接入 Tushare moneyflow_dc 主力资金数据：5日净流入为正时加分、净流出时扣分、流入强度高/连续流入天数多时额外奖励，资金流不可用时保持中性。同步修复 bottom_accumulation / consolidation 中 outflow 分母取反导致的流出扣分失效 bug。screening_service 中 AlphaSift 运行时环境同步注入 DSA 的 `_compute_capital_heat_quality_score`。
 - [改进] 个股报告页主力资金数据缺失时展示更明确的空状态文案（"主力资金数据暂不可用" + "数据源未返回该股票的主力资金流"），避免与选股页缓存问题混淆
+- [修复] 历史报告详情接口 `GET /api/v1/history/{record_id}` 缺失 `summary.capital_flow_summary` 字段：补齐 `ReportSummary` Pydantic schema 字段、把 `raw_result["capital_flow_summary"]` 透传给前端，并对 8 月 7 日 commit `b247187b` 之前生成的历史报告按需通过 Tushare `moneyflow_dc` 补全主力资金摘要；修复 storage_stock_code 含 `.SH` 后缀时 `_to_tushare_code` 拼出 `<code>.SH.SH` 导致 fallback 静默失败的 bug
+- [改进] 个股分享图片主力资金栏目改为数值指标网格（今日净流入 / 5日净流入 / 10日净流入，带正负色值），替代原本仅展示摘要文本的单一结论行；`_history_share_image_payload` 对老报告自动注入 `capital_flow_data` + `capital_flow_summary` 确保海报展示一致
+- [修复] `deepseek-v4-pro` 等推理型模型个股分析偶发 `invalid_json` 失败：`max_output_tokens` 从 4096 提到 8192（该值对推理模型是推理+回答总预算），新增 `LLM_ANALYSIS_MAX_TOKENS` 环境变量；同步更新 `.env.example`
+- [修复] 选股卡片"5日净流入"恒为空：`camelcase-keys` 把 `mf_net_inflow_5d` 转成 `mfNetInflow5D`（数字段首字母大写），前端模板却读 `item.mfNetInflow5d`，导致字段永远 `undefined`。同步修正类型与渲染逻辑；保留 `mfNetInflow5d` 别名兜底历史缓存
+- [修复] 一键回测对北交所股票（如 920019）始终报"无交易数据"：`_a_stock_ticker` 没有北交所识别分支，会被错误映射为 `.{SZ}`。新增 `8/4/92` 前缀识别为 `.BJ`，同时对 `.BJ` ticker 无 Yahoo Finance 数据的情况给出更明确的错误文案
 
 ## [3.29.0] - 2026-08-02
 

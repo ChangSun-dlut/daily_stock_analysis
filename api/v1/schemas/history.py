@@ -152,8 +152,12 @@ class ReportMeta(BaseModel):
 
 class ReportSummary(BaseModel):
     """报告概览区"""
-    
+
     analysis_summary: Optional[str] = Field(None, description="关键结论")
+    capital_flow_summary: Optional[str] = Field(
+        None,
+        description="主力资金摘要（独立栏目展示字段）；老历史报告可能为空",
+    )
     operation_advice: Optional[str] = Field(None, description="操作建议")
     action: Optional[DecisionAction] = Field(None, description="结构化建议动作 taxonomy")
     action_label: Optional[str] = Field(None, description="建议动作展示标签")

@@ -68,7 +68,12 @@ _DELETE_BY_CODE_BATCH_SIZE = 10_000
 
 
 def _history_share_image_payload(result: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
-    """Return the exact persisted payload used by the deterministic poster."""
+    """Return the exact persisted payload used by the deterministic poster.
+
+    Augments stock-report raw_result with ``capital_flow_summary`` and
+    ``capital_flow_data`` so the poster's moneyflow grid is populated even
+    for pre-``b247187b`` histories.
+    """
 
     if result.get("report_type") == "market_review":
         context_snapshot = result.get("context_snapshot")
@@ -78,7 +83,48 @@ def _history_share_image_payload(result: Mapping[str, Any]) -> Optional[Mapping[
                 return market_payload
 
     raw_result = result.get("raw_result")
-    return raw_result if isinstance(raw_result, Mapping) else None
+    if not isinstance(raw_result, Mapping):
+        return None
+
+    # Augment with moneyflow data for the poster grid
+    has_summary = isinstance(raw_result.get("capital_flow_summary"), str) and raw_result.get(
+        "capital_flow_summary", ""
+    ).strip()
+    has_data = isinstance(raw_result.get("capital_flow_data"), Mapping)
+
+    if not has_summary or not has_data:
+        try:
+            stock_code = result.get("storage_stock_code") or result.get("stock_code") or ""
+            if stock_code:
+                from data_provider.base import _market_tag, _is_etf_code, normalize_stock_code
+
+                if _market_tag(stock_code) == "cn" and not _is_etf_code(stock_code):
+                    stock_code = normalize_stock_code(stock_code)
+                    from src.services.screening.daily import build_moneyflow_capital_flow_fallback
+                    from src.analyzer import _format_capital_flow_summary
+
+                    fallback = build_moneyflow_capital_flow_fallback(stock_code)
+                    if isinstance(fallback, dict):
+                        raw_result = dict(raw_result)
+                        if not has_summary:
+                            report_language = normalize_report_language(
+                                raw_result.get("report_language")
+                                or result.get("report_language")
+                            )
+                            ctx: dict[str, Any] = {"capital_flow": fallback}
+                            summary = _format_capital_flow_summary(ctx, language=report_language)
+                            if summary:
+                                raw_result["capital_flow_summary"] = summary
+                        if not has_data:
+                            raw_result["capital_flow_data"] = fallback
+        except Exception as exc:  # pragma: no cover — fail-open
+            logger.debug(
+                "share-image moneyflow augmentation failed for %s: %s",
+                result.get("stock_code"),
+                exc,
+            )
+
+    return raw_result
 
 
 def _normalize_code_for_grouping(code: str) -> str:
@@ -89,6 +135,66 @@ def _normalize_code_for_grouping(code: str) -> str:
     """
     from data_provider.base import normalize_stock_code
     return normalize_stock_code(code or "")
+
+
+def _resolve_capital_flow_summary_for_history(
+    *,
+    result: Mapping[str, Any],
+    raw_result: Mapping[str, Any],
+    context_snapshot: Optional[Mapping[str, Any]],
+) -> Optional[str]:
+    """Return ``capital_flow_summary`` for a historical report.
+
+    New analyses (post ``b247187b``) persist the summary into ``raw_result``
+    under ``capital_flow_summary`` and the API response is expected to surface
+    it as ``summary.capital_flow_summary``.  Pre-existing records predate that
+    field, so this helper backfills them on read using the screening pipeline's
+    Tushare ``moneyflow_dc`` fallback (AkShare / Eastmoney primary sources are
+    no longer trustworthy for the record's analysis time).  The fallback runs
+    only for A-share codes (Tushare coverage) and is fail-open: any failure is
+    swallowed and ``None`` is returned so the front-end falls back to its
+    "no data" placeholder.
+
+    Returns:
+        Summary string, or ``None`` if the source data is unavailable.
+    """
+
+    persisted = raw_result.get("capital_flow_summary") if isinstance(raw_result, Mapping) else None
+    if isinstance(persisted, str) and persisted.strip():
+        return persisted
+
+    try:
+        stock_code = result.get("storage_stock_code") or result.get("stock_code") or ""
+        if not stock_code:
+            return None
+        # Skip non-A-share codes — Tushare moneyflow_dc only covers A-shares
+        from data_provider.base import _market_tag, _is_etf_code, normalize_stock_code
+
+        if _market_tag(stock_code) != "cn" or _is_etf_code(stock_code):
+            return None
+        # Strip exchange suffix so ``_to_tushare_code`` does not produce
+        # ``<code>.SH.SH`` (which silently returns no rows).
+        stock_code = normalize_stock_code(stock_code)
+
+        from src.services.screening.daily import build_moneyflow_capital_flow_fallback
+        from src.analyzer import _format_capital_flow_summary
+
+        report_language = normalize_report_language(
+            (raw_result.get("report_language") if isinstance(raw_result, Mapping) else None)
+            or result.get("report_language")
+        )
+        fallback_block = build_moneyflow_capital_flow_fallback(stock_code)
+        if not isinstance(fallback_block, dict):
+            return None
+        synthetic_ctx: dict[str, Any] = {"capital_flow": fallback_block}
+        return _format_capital_flow_summary(synthetic_ctx, language=report_language)
+    except Exception as exc:  # pragma: no cover — fail-open
+        logger.debug(
+            "history capital_flow_summary fallback failed for %s: %s",
+            result.get("stock_code"),
+            exc,
+        )
+        return None
 
 
 def _raw_result_value(raw_result: Any, key: str) -> Any:
@@ -545,6 +651,11 @@ def get_history_detail(
         
         summary = ReportSummary(
             analysis_summary=result.get("analysis_summary"),
+            capital_flow_summary=_resolve_capital_flow_summary_for_history(
+                result=result,
+                raw_result=raw_result,
+                context_snapshot=context_snapshot,
+            ),
             operation_advice=localize_operation_advice(
                 result.get("operation_advice"),
                 report_language,

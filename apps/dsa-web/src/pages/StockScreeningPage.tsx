@@ -1692,7 +1692,7 @@ const StockScreeningPage: React.FC = () => {
                                     <p className="mt-1 text-sm text-foreground">
                                       当日净流入 {formatWanAmount(item.mfNetInflow)}
                                       {' · '}
-                                      5日净流入 {formatWanAmount(item.mfNetInflow5d)}
+                                      5日净流入 {formatWanAmount(item.mfNetInflow5D ?? item.mfNetInflow5d)}
                                       {' · '}
                                       连续 {item.mfConsecutiveDays ?? 0} 天流入
                                       {item.mfInflowStrengthPct != null ? (

@@ -89,6 +89,11 @@ export type ScreeningCandidate = {
    * 单位：万元；按 toCamelCase 从后端 snake_case 字段透出
    */
   mfNetInflow?: number | null;
+  /**
+   * camelcase-keys 把 `mf_net_inflow_5d` 转成 `mfNetInflow5D`（数字段首字母大写），
+   * 旧别名 `mfNetInflow5d` 仍兼容以防个别环境配置不同。
+   */
+  mfNetInflow5D?: number | null;
   mfNetInflow5d?: number | null;
   mfConsecutiveDays?: number | null;
   mfInflowStrengthPct?: number | null;

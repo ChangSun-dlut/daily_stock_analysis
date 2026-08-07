@@ -94,9 +94,29 @@ class BacktestResponse:
 # 工具
 # ---------------------------------------------------------------------------
 def _a_stock_ticker(code: str) -> str:
-    if code.startswith("60") or code.startswith("68"):
-        return f"{code}.SS"
-    return f"{code}.SZ"
+    """Convert a bare A-share code to a yfinance-compatible ticker.
+
+    Returns:
+        - ``{code}.SS`` for Shanghai (``60xxxx``, ``68xxxx``)
+        - ``{code}.SZ`` for Shenzhen (``00xxxx``, ``30xxxx``)
+        - ``{code}.BJ`` for Beijing Stock Exchange (``4xxxxx``/``8xxxxx``/``92xxxx``)
+
+    Note: Yahoo Finance currently does not serve BSE daily data; the call will
+    still return an empty frame, but we surface a clearer error downstream.
+    """
+    bare = code.upper().lstrip(".")
+    # Normalise bare codes that already carry a suffix
+    for suffix in (".SS", ".SH", ".SZ", ".BJ"):
+        if bare.endswith(suffix):
+            return bare
+
+    if bare.startswith(("60", "68")):
+        return f"{bare}.SS"
+    if bare.startswith(("8", "4", "92")):
+        # Beijing Stock Exchange (北交所)
+        return f"{bare}.BJ"
+    # 000xxx, 002xxx, 003xxx, 300xxx, 301xxx ...
+    return f"{bare}.SZ"
 
 
 def _round(val: float, ndigits: int = 2) -> float:
@@ -442,7 +462,12 @@ def run_yesterday_backtest(
             continue
 
         if df is None or df.empty:
-            result.error = "无交易数据"
+            # Yahoo Finance has limited BSE coverage; surface a clearer hint
+            # for those tickers so users don't mistake it for a code bug.
+            if ticker.endswith(".BJ"):
+                result.error = "无交易数据（Yahoo Finance 不提供北交所历史数据）"
+            else:
+                result.error = "无交易数据"
             result.has_anomaly = True
             result.anomaly_reasons.append("无交易数据")
             results.append(result)

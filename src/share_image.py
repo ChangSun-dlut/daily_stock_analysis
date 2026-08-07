@@ -196,6 +196,7 @@ class StockPoster:
     confidence: str = ""
     conclusion: str = ""
     capital_flow: str = ""
+    moneyflow_items: list[tuple[str, str, str]] = field(default_factory=list)
     snapshot: list[tuple[str, str, str]] = field(default_factory=list)
     sniper: list[tuple[str, str, str]] = field(default_factory=list)
     technical: list[tuple[str, str, str]] = field(default_factory=list)
@@ -1099,6 +1100,61 @@ def _stock_data(markdown_text: str, generated_on: date) -> StockPoster:
     return poster
 
 
+def _build_moneyflow_metric_items(
+    cap_data: Mapping[str, Any],
+    *,
+    language: str = "zh",
+) -> list[tuple[str, str, str]]:
+    """Extract main-force capital-flow values from a capital_flow block.
+
+    Returns ``[(label, formatted_value, tone), ...]`` suitable for use as
+    ``StockPoster.moneyflow_items``.  The block is expected to contain
+    ``data.stock_flow`` with ``main_net_inflow`` / ``inflow_5d`` /
+    ``inflow_10d`` in *yuan* (the DSA capital_flow contract).
+    """
+    stock_flow = _nested_mapping(cap_data, "data", "stock_flow")
+    if not isinstance(stock_flow, Mapping):
+        return []
+
+    labels = {
+        "zh": {
+            "main_net_inflow": "今日净流入",
+            "inflow_5d": "5日净流入",
+            "inflow_10d": "10日净流入",
+        },
+        "en": {
+            "main_net_inflow": "Today Inflow",
+            "inflow_5d": "5-Day Inflow",
+            "inflow_10d": "10-Day Inflow",
+        },
+    }
+    lang_labels = labels.get(language, labels["zh"])
+
+    items: list[tuple[str, str, str]] = []
+    for key in ("main_net_inflow", "inflow_5d", "inflow_10d"):
+        value = stock_flow.get(key)
+        if value is None or (isinstance(value, float) and not value):
+            continue
+        try:
+            amount = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        label = lang_labels.get(key, key)
+        formatted = _format_moneyflow_short(amount)
+        tone = "positive" if amount > 0 else "negative" if amount < 0 else "neutral"
+        items.append((label, formatted, tone))
+    return items
+
+
+def _format_moneyflow_short(value: float) -> str:
+    """Format yuan amount compactly: ``+641万`` / ``+3.34亿``."""
+    sign = "+" if value > 0 else ""
+    abs_val = abs(value)
+    if abs_val >= 100_000_000:
+        return f"{sign}{abs_val / 100_000_000:.2f}亿"
+    return f"{sign}{abs_val / 10000:.2f}万"
+
+
 def _stock_data_from_payload(
     payload: Mapping[str, Any],
     markdown_text: str,
@@ -1138,6 +1194,11 @@ def _stock_data_from_payload(
     )
     poster.conclusion = _compact_text(core.get("one_sentence"), limit=54) or poster.conclusion
     poster.capital_flow = _compact_text(payload.get("capital_flow_summary"), limit=90) or poster.capital_flow
+    cap_data = payload.get("capital_flow_data")
+    if isinstance(cap_data, Mapping):
+        poster.moneyflow_items = _build_moneyflow_metric_items(
+            cap_data, language=poster.language,
+        )
 
     persisted_snapshot = _nested_mapping(payload, "market_snapshot")
     current = _number_text(payload.get("current_price") or price.get("current_price"))
@@ -1805,7 +1866,19 @@ def _stock_body(data: StockPoster, fallback_html: str) -> str:
     action = f'<div class="action-chip {tone}">{_escape(data.action)}</div>' if data.action else ""
     signal_row = f'<div class="signal-row">{action}{score}{trend}</div>' if action or score or trend else ""
     conclusion = _section_html(_poster_text(language, "core"), "◎", f'<div class="conclusion">{_escape(data.conclusion)}</div>') if data.conclusion else ""
-    capital_flow = _section_html(_poster_text(language, "capital_flow"), "⇄", f'<div class="conclusion capital-flow">{_escape(data.capital_flow)}</div>') if data.capital_flow else ""
+    capital_flow = ""
+    if data.moneyflow_items:
+        capital_flow = _section_html(
+            _poster_text(language, "capital_flow"),
+            "⇄",
+            f'<div class="metric-grid snapshot-grid">{_metric_cards(data.moneyflow_items, language=language)}</div>',
+        )
+    elif data.capital_flow:
+        capital_flow = _section_html(
+            _poster_text(language, "capital_flow"),
+            "⇄",
+            f'<div class="conclusion capital-flow">{_escape(data.capital_flow)}</div>',
+        )
     snapshot = _section_html(_poster_text(language, "snapshot"), "▥", f'<div class="metric-grid snapshot-grid">{_metric_cards(data.snapshot, language=language)}</div>') if data.snapshot else ""
     sniper = _section_html(_poster_text(language, "execution"), "◎", f'<div class="metric-grid sniper-grid sniper-table">{_metric_cards(data.sniper, "sniper", language=language)}</div>') if data.sniper else ""
     technical = _section_html(_poster_text(language, "technical"), "⌁", f'<div class="metric-grid technical-grid">{_metric_cards(data.technical, language=language)}</div>') if data.technical else ""

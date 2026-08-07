@@ -13,6 +13,7 @@ A股自选股智能分析系统 - AI分析层
 import json
 import logging
 import math
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -3698,7 +3699,11 @@ class GeminiAnalyzer:
             # 设置生成配置
             generation_config = {
                 "temperature": config.llm_temperature,
-                "max_output_tokens": 4096,
+                # 推理型模型（如 deepseek-v4-pro 等）max_tokens 是推理 + 回答总预算；
+                # 复杂股票分析 prompt 中推理阶段可能消耗大部分配额导致回答为空，
+                # 因此将默认值从 4096 提到 8192。
+                # 可通过 LLM_ANALYSIS_MAX_TOKENS 环境变量按需调整。
+                "max_output_tokens": int(os.environ.get("LLM_ANALYSIS_MAX_TOKENS", "8192")),
                 # 强制 JSON 输出，解决 deepseek 等模型返回非 JSON 文本导致
                 # 完整性校验反复失败、每只股票浪费数轮无效 API 调用的超时问题。
                 "response_format": {"type": "json_object"},
