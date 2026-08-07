@@ -73,6 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] `deepseek-v4-pro` 等推理型模型个股分析偶发 `invalid_json` 失败：`max_output_tokens` 从 4096 提到 8192（该值对推理模型是推理+回答总预算），新增 `LLM_ANALYSIS_MAX_TOKENS` 环境变量；同步更新 `.env.example`
 - [修复] 选股卡片"5日净流入"恒为空：`camelcase-keys` 把 `mf_net_inflow_5d` 转成 `mfNetInflow5D`（数字段首字母大写），前端模板却读 `item.mfNetInflow5d`，导致字段永远 `undefined`。同步修正类型与渲染逻辑；保留 `mfNetInflow5d` 别名兜底历史缓存
 - [修复] 一键回测对北交所股票（如 920019）始终报"无交易数据"：`_a_stock_ticker` 没有北交所识别分支，会被错误映射为 `.{SZ}`。新增 `8/4/92` 前缀识别为 `.BJ`，同时对 `.BJ` ticker 无 Yahoo Finance 数据的情况给出更明确的错误文案
+- [新功能] 回测 / 昨日复盘新增多源日线 fallback：yfinance 返回空数据时自动切换 `fetch_daily_history`（Tushare→Tencent→Sina→Akshare→Baostock），北交所、免费源受限等情况均可按需降级获取到数据；API 响应新增 `fallback_source` 字段标记降级链路
 
 ## [3.29.0] - 2026-08-02
 

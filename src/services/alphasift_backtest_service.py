@@ -27,6 +27,53 @@ LOOKBACK_TRADING_DAYS = 60
 
 
 # ---------------------------------------------------------------------------
+# 数据获取 fallback — BSE / 免费源失败时切换到 Tushare / Tencent / Akshare 等
+# ---------------------------------------------------------------------------
+def _cn_stock_daily_fallback(
+    code: str,
+    *,
+    lookback_days: int = LOOKBACK_TRADING_DAYS,
+    fallback_source: str = "auto",
+) -> pd.DataFrame | None:
+    """Try to get CN stock daily history from DSA's multi-source pipeline.
+
+    Used as a fallback when yfinance returns empty data (most commonly for
+    BSE stocks that Yahoo Finance does not cover).
+
+    ``fallback_source`` is passed as ``source`` to
+    :func:`src.services.screening.daily.fetch_daily_history`.  ``auto``
+    tries Tushare → Tencent → Sina → Akshare → Baostock in order,
+    respecting health scores.
+
+    Returns a DataFrame with columns ``date, open, high, low, close, volume``
+    already normalised for :func:`_ensure_df`, or ``None`` on failure.
+    """
+    from src.services.screening.daily import fetch_daily_history
+
+    try:
+        raw = fetch_daily_history(
+            code,
+            lookback_days=lookback_days,
+            source=fallback_source,
+        )
+    except Exception:
+        logger.debug("cn daily fallback failed for %s", code, exc_info=True)
+        return None
+
+    if raw is None or (hasattr(raw, "empty") and raw.empty):
+        return None
+
+    # Keep only the subset consumed by _ensure_df
+    wanted = ["date", "open", "high", "low", "close", "volume"]
+    cols = [c for c in wanted if c in raw.columns]
+    if "close" not in cols:
+        return None
+    df = raw[cols].copy()
+    # _ensure_df handles datetime / numeric coercion automatically
+    return df
+
+
+# ---------------------------------------------------------------------------
 # 数据结构
 # ---------------------------------------------------------------------------
 @dataclass
@@ -80,6 +127,7 @@ class CandidateBacktestResult:
     ma_snapshots: list[MaSnapshot] = field(default_factory=list)
     window_simulations: list[WindowSimulation] = field(default_factory=list)
     error: str | None = None
+    fallback_source: str | None = None
 
 
 @dataclass
@@ -320,6 +368,7 @@ class YesterdayCandidateResult:
     has_anomaly: bool = False
     anomaly_reasons: list[str] = field(default_factory=list)
     error: str | None = None
+    fallback_source: str | None = None
     trend: TrendSnapshot | None = None   # 技术面分析快照
 
 
@@ -360,6 +409,17 @@ def run_backtest(
         try:
             raw = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
             df = _ensure_df(raw)
+            if df is None:
+                # --- try CN fallback data sources ---
+                fallback_df = _cn_stock_daily_fallback(
+                    code, lookback_days=LOOKBACK_TRADING_DAYS,
+                )
+                if fallback_df is None:
+                    result.error = "无法获取历史数据"
+                    results.append(result)
+                    continue
+                df = _ensure_df(fallback_df)
+                result.fallback_source = "cn_daily_pipeline"
             if df is None:
                 result.error = "无法获取历史数据"
                 results.append(result)
@@ -462,16 +522,22 @@ def run_yesterday_backtest(
             continue
 
         if df is None or df.empty:
-            # Yahoo Finance has limited BSE coverage; surface a clearer hint
-            # for those tickers so users don't mistake it for a code bug.
-            if ticker.endswith(".BJ"):
-                result.error = "无交易数据（Yahoo Finance 不提供北交所历史数据）"
-            else:
-                result.error = "无交易数据"
-            result.has_anomaly = True
-            result.anomaly_reasons.append("无交易数据")
-            results.append(result)
-            continue
+            # --- try CN fallback data sources ---
+            fallback_df = _cn_stock_daily_fallback(
+                code, lookback_days=LOOKBACK_TRADING_DAYS,
+            )
+            if fallback_df is not None:
+                df = _ensure_df(fallback_df)
+                result.fallback_source = "cn_daily_pipeline"
+            if df is None or df.empty:
+                if ticker.endswith(".BJ"):
+                    result.error = "无交易数据（所有数据源均不覆盖该北交所标的）"
+                else:
+                    result.error = "无交易数据"
+                result.has_anomaly = True
+                result.anomaly_reasons.append("无交易数据")
+                results.append(result)
+                continue
 
         if len(df) < 2:
             result.error = f"数据不足（仅 {len(df)} 个交易日，需要至少 2 个）"

@@ -272,6 +272,7 @@ def alphasift_screen_backtest(
                     for w in c.window_simulations
                 ],
                 "error": c.error,
+                "fallback_source": c.fallback_source,
             }
             for c in resp.candidates
         ],
@@ -324,6 +325,7 @@ def alphasift_screen_backtest_yesterday(
                 "has_anomaly": c.has_anomaly,
                 "anomaly_reasons": c.anomaly_reasons,
                 "error": c.error,
+                "fallback_source": c.fallback_source,
                 "trend": {
                     "trend_status": c.trend.trend_status,
                     "trend_strength": c.trend.trend_strength,
