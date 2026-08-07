@@ -19,6 +19,7 @@ _FACTOR_COLUMNS = {
     "topic_alignment": "factor_topic_alignment_score",
     "consolidation_quality": "factor_consolidation_quality_score",
     "bottom_accumulation_quality": "factor_bottom_accumulation_quality_score",
+    "capital_heat_quality": "factor_capital_heat_quality_score",
 }
 _DEFAULT_SCORING_PROFILE = {
     "momentum_base": 60.0,
@@ -135,10 +136,28 @@ _DEFAULT_SCORING_PROFILE = {
     "bottom_accumulation_signal_min_signals": 3,
     "bottom_accumulation_mf_inflow_5d_min": 500.0,
     "bottom_accumulation_mf_inflow_5d_max": 5000.0,
+    "bottom_accumulation_mf_outflow_5d_min": -500.0,
+    "bottom_accumulation_mf_outflow_5d_max": -5000.0,
     "bottom_accumulation_mf_strength_pct_min": 2.0,
     "bottom_accumulation_mf_strength_pct_max": 10.0,
+    "bottom_accumulation_chase_20d_start_pct": 8.0,
+    "bottom_accumulation_chase_20d_max_pct": 20.0,
+    "bottom_accumulation_chase_10d_start_pct": 5.0,
+    "bottom_accumulation_upper_shadow_threshold_pct": 50.0,
+    "bottom_accumulation_upper_shadow_rise_min_pct": 3.0,
     "consolidation_mf_inflow_5d_min": 300.0,
     "consolidation_mf_inflow_5d_max": 3000.0,
+    "consolidation_mf_outflow_5d_min": -300.0,
+    "consolidation_mf_outflow_5d_max": -3000.0,
+    # capital_heat moneyflow scorecard
+    "capital_heat_quality_base": 50.0,
+    "capital_heat_mf_inflow_5d_min": 500.0,
+    "capital_heat_mf_inflow_5d_max": 5000.0,
+    "capital_heat_mf_outflow_5d_min": -500.0,
+    "capital_heat_mf_outflow_5d_max": -5000.0,
+    "capital_heat_mf_strength_pct_min": 3.0,
+    "capital_heat_mf_strength_pct_max": 10.0,
+    "capital_heat_capital_confirmed_bonus": 2.4,
 }
 
 
@@ -203,6 +222,7 @@ def _compute_factor_scores(df: pd.DataFrame, config: ScreeningConfig | None = No
         "topic_alignment": _compute_topic_alignment_score(df, profile),
         "consolidation_quality": _compute_consolidation_quality_score(df, profile),
         "bottom_accumulation_quality": _compute_bottom_accumulation_quality_score(df, profile),
+        "capital_heat_quality": _compute_capital_heat_quality_score(df, profile),
     }
 
 
@@ -625,24 +645,39 @@ def _compute_consolidation_quality_score(df: pd.DataFrame, profile: dict[str, fl
         score += df["price_above_ma20"].fillna(False).astype(bool).astype(float) * price_above_ma20_bonus
 
     # --- Money Flow Confirmation (0-10 pts, consolidation-breakout overlay) ---
+    #     Rewards sustained main-force accumulation; penalises outflow.
     mf_score = pd.Series(5.0, index=df.index)
     if "mf_available" in df.columns:
         mf_avail = df["mf_available"].fillna(False).astype(bool)
         mf_norm_min = profile.get("consolidation_mf_inflow_5d_min", 300)
         mf_norm_max = profile.get("consolidation_mf_inflow_5d_max", 3000)
+        mf_outflow_min = profile.get("consolidation_mf_outflow_5d_min", -300)
+        mf_outflow_max = profile.get("consolidation_mf_outflow_5d_max", -3000)
         if "mf_net_inflow_5d" in df.columns:
             inflow5d = pd.to_numeric(df["mf_net_inflow_5d"], errors="coerce").fillna(0.0)
+            # reward positive inflow
             mf_score = mf_score + (
                 mf_avail & (inflow5d > mf_norm_min)
             ).astype(float) * ((inflow5d - mf_norm_min) / max(mf_norm_max - mf_norm_min, 1.0)).clip(
                 lower=0, upper=1.0
             ) * 5.0
+            # penalise outflow (up to -3 pts)
+            outflow_mask = mf_avail & (inflow5d < 0)
+            outflow_ratio = ((inflow5d - mf_outflow_min) / max(mf_outflow_max - mf_outflow_min, 1.0)).clip(
+                lower=0, upper=1.0
+            )
+            mf_score = mf_score - outflow_mask.astype(float) * outflow_ratio * 3.0
         if "mf_consecutive_days" in df.columns:
             cons = pd.to_numeric(df["mf_consecutive_days"], errors="coerce").fillna(0).clip(lower=0)
             mf_score = mf_score + (mf_avail & (cons >= 3)).astype(float) * 3.0
         if "mf_inflow_strength_pct" in df.columns:
             strength = pd.to_numeric(df["mf_inflow_strength_pct"], errors="coerce").fillna(0.0)
+            # reward positive strength
             mf_score = mf_score + (mf_avail & (strength > 2.0)).astype(float) * ((strength - 2.0) / 10.0).clip(lower=0, upper=1.0) * 2.0
+            # penalise negative strength (up to -2 pts)
+            neg_strength_mask = mf_avail & (strength < 0)
+            neg_strength_ratio = (strength / -10.0).clip(lower=0, upper=1.0)
+            mf_score = mf_score - neg_strength_mask.astype(float) * neg_strength_ratio * 2.0
     mf_score = mf_score.clip(lower=0, upper=10.0)
     score = score + mf_score
 
@@ -708,14 +743,27 @@ def _compute_bottom_accumulation_quality_score(df: pd.DataFrame, profile: dict[s
        in negative territory (bottom context).
 
     5. **Price Stabilization** (0-20 pts): Price bounced off 60d low and
-       is stabilizing (MA5 turning up, moderate rebound distance).
+       is stabilizing (MA5 turning up). **Hump-shaped curve**: 3-8% = ideal
+       (ramps to 10), 8-15% = diminishing (10→5), 15-20% = tapering (5→0),
+       >20% = 0 — penalises stocks that have already run far from the bottom.
 
     6. **Money Flow Confirmation** (0-15 pts): Main-force net inflow from
        Tushare moneyflow_dc (→AkShare→efinance fallback). Rewards 5d
        cumulative inflow amount, consecutive inflow days, and inflow
        strength as % of turnover. No data → neutral 7 pts.
 
-    Total: 0-100. Each sub-score contributes additively.
+    7. **Chase Penalty** (0 to -20 pts): Stock has already run up too much
+       from the bottom (change_20d > 8% → -0..-15, change_10d > 5% →
+       up to -5 more). Reduces score for stocks that have left the bottom
+       zone. Hard filter change_20d_max=20% still applies.
+
+    8. **Upper Shadow Risk** (0 to -10 pts): Long upper shadow (>50% of
+       daily range) combined with recent rise (>3% 10d) is a bearish
+       reversal signal (长上影线出货). Penalised only when both conditions
+       co-occur.
+
+    Total: 0-100. Each sub-score contributes additively;
+           factors 7 & 8 are penalty-only (≤0).
     """
     score = pd.Series(0.0, index=df.index)
 
@@ -815,14 +863,39 @@ def _compute_bottom_accumulation_quality_score(df: pd.DataFrame, profile: dict[s
     else:
         score = score + 5.0
 
-    # --- 5. Price Stabilization (0-20 points) ---
+    # --- 5. Price Stabilization (0-20 points, hump-shaped) ---
+    # Hump-shaped: sweet spot is 3-8% above 60d low — confirmed bottom
+    # bounce but still near accumulation zone. Beyond 8% the stock has
+    # already run and the bonus declines. >20% = 0 (not a bottom stock).
     stab_score = pd.Series(5.0, index=df.index)
 
     if "price_vs_60d_low_pct" in df.columns:
         p_low = pd.to_numeric(df["price_vs_60d_low_pct"], errors="coerce").fillna(0)
-        # Sweet spot: 3-20% above 60d low
-        # 3% = 0 bonus, 20% = 10 bonus, >20% = 10 bonus (capped)
-        low_bonus = ((p_low - 3.0) / 17.0).clip(lower=0, upper=1.0) * 10.0
+
+        low_bonus = pd.Series(0.0, index=df.index)
+
+        # 3-8%: ideal near-bottom zone → ramp 0 → 10
+        mask_ideal = (p_low >= 3.0) & (p_low < 8.0)
+        low_bonus = low_bonus.where(
+            ~mask_ideal, (p_low - 3.0) / 5.0 * 10.0
+        )
+
+        # 8-15%: leaving the bottom → decline 10 → 5
+        mask_diminish = (p_low >= 8.0) & (p_low < 15.0)
+        low_bonus = low_bonus.where(
+            ~mask_diminish, 10.0 - (p_low - 8.0) / 7.0 * 5.0
+        )
+
+        # 15-20%: too far from bottom → decline 5 → 0
+        mask_taper = (p_low >= 15.0) & (p_low < 20.0)
+        low_bonus = low_bonus.where(
+            ~mask_taper, 5.0 - (p_low - 15.0) / 5.0 * 5.0
+        )
+
+        # >20%: 0 (not a bottom stock; price has already run away)
+        # <3%: 0 (too weak bounce)
+
+        low_bonus = low_bonus.clip(lower=0, upper=10.0)
         stab_score = stab_score + low_bonus
 
     if "ma5_turn_up_pct" in df.columns:
@@ -839,41 +912,208 @@ def _compute_bottom_accumulation_quality_score(df: pd.DataFrame, profile: dict[s
     #     Rewards names with rising main-force stakes: inflow amount,
     #     inflow strength as % of turnover, and consecutive days.
     #     No data available → neutral 7 pts (not penalized).
+    #     Negative main-force flow is penalised because outflow contradicts the
+    #     bottom-accumulation thesis.
     mf_score = pd.Series(7.0, index=df.index)
 
     if "mf_available" in df.columns:
         mf_avail = df["mf_available"].fillna(False).astype(bool)
 
-        # 6a. 5-day cumulative net inflow (万元): positive & large → rewarded
+        # 6a. 5-day cumulative net inflow (万元): positive & large → rewarded;
+        #     negative → penalised.
         inflow_min = profile.get("bottom_accumulation_mf_inflow_5d_min", 500)
         inflow_max = profile.get("bottom_accumulation_mf_inflow_5d_max", 5000)
+        outflow_min = profile.get("bottom_accumulation_mf_outflow_5d_min", -500)
+        outflow_max = profile.get("bottom_accumulation_mf_outflow_5d_max", -5000)
         if "mf_net_inflow_5d" in df.columns:
             inflow5d = pd.to_numeric(df["mf_net_inflow_5d"], errors="coerce").fillna(0.0)
+            # reward positive inflow
             mf_score = mf_score + (
                 mf_avail & (inflow5d > inflow_min)
             ).astype(float) * ((inflow5d - inflow_min) / max(inflow_max - inflow_min, 1.0)).clip(
                 lower=0, upper=1.0
             ) * 6.0
+            # penalise outflow (milder than reward: up to -4 pts)
+            outflow_mask = mf_avail & (inflow5d < 0)
+            outflow_range = outflow_min - outflow_max
+            outflow_ratio = (
+                (outflow_min - inflow5d) / max(outflow_range, 1.0)
+            ).clip(lower=0, upper=1.0)
+            mf_score = mf_score - outflow_mask.astype(float) * outflow_ratio * 4.0
 
         # 6b. Consecutive positive inflow days:
         #     1-2 days → mild interest, 3-4 → sustained, 5+ → strong commitment
+        #     Consecutive outflow days → penalty.
         if "mf_consecutive_days" in df.columns:
             cons = pd.to_numeric(df["mf_consecutive_days"], errors="coerce").fillna(0).clip(lower=0)
             mf_score = mf_score + (mf_avail & (cons >= 2) & (cons < 4)).astype(float) * 3.0
             mf_score = mf_score + (mf_avail & (cons >= 4)).astype(float) * 5.0
 
-        # 6c. Inflow strength (% of turnover): higher % → stronger conviction
+        # 6c. Inflow strength (% of turnover): higher % → stronger conviction;
+        #     negative strength → penalised.
         strength_min = profile.get("bottom_accumulation_mf_strength_pct_min", 2.0)
         strength_max = profile.get("bottom_accumulation_mf_strength_pct_max", 10.0)
         if "mf_inflow_strength_pct" in df.columns:
             strength = pd.to_numeric(df["mf_inflow_strength_pct"], errors="coerce").fillna(0.0)
+            # reward positive strength
             mf_score = mf_score + (
                 mf_avail & (strength > strength_min)
             ).astype(float) * ((strength - strength_min) / max(strength_max - strength_min, 1.0)).clip(
                 lower=0, upper=1.0
             ) * 4.0
+            # penalise negative strength (up to -3 pts)
+            neg_strength_mask = mf_avail & (strength < 0)
+            neg_strength_ratio = (strength / -10.0).clip(lower=0, upper=1.0)
+            mf_score = mf_score - neg_strength_mask.astype(float) * neg_strength_ratio * 3.0
 
     mf_score = mf_score.clip(lower=0, upper=15.0)
     score = score + mf_score
+
+    # --- 7. Chase Penalty (0 to -20 points) ---
+    # Stocks that have already run up significantly from the bottom are no
+    # longer good accumulation candidates. Uses 20d momentum (primary) and
+    # 10d momentum (secondary, catches recent sprint).
+    chase_penalty = pd.Series(0.0, index=df.index)
+
+    chase_20d_start = profile.get("bottom_accumulation_chase_20d_start_pct", 8.0)
+    chase_20d_max = profile.get("bottom_accumulation_chase_20d_max_pct", 20.0)
+    chase_10d_start = profile.get("bottom_accumulation_chase_10d_start_pct", 5.0)
+
+    if "change_20d" in df.columns:
+        c20 = pd.to_numeric(df["change_20d"], errors="coerce").fillna(0)
+        # 8-15%: linear penalty 0 → -10
+        c20_early = ((c20 - chase_20d_start) / (15.0 - chase_20d_start)).clip(
+            lower=0, upper=1.0
+        ) * (-10.0)
+        # 15-20%: additional penalty -10 → -15
+        c20_late = ((c20 - 15.0) / max(chase_20d_max - 15.0, 1.0)).clip(
+            lower=0, upper=1.0
+        ) * (-5.0)
+        chase_penalty = chase_penalty + c20_early + c20_late
+
+    if "change_10d" in df.columns:
+        c10 = pd.to_numeric(df["change_10d"], errors="coerce").fillna(0)
+        # 5-10%: recent sprint penalty 0 → -5
+        c10_penalty = ((c10 - chase_10d_start) / 5.0).clip(
+            lower=0, upper=1.0
+        ) * (-5.0)
+        chase_penalty = chase_penalty + c10_penalty
+
+    chase_penalty = chase_penalty.clip(lower=-20.0, upper=0.0)
+    score = score + chase_penalty
+
+    # --- 8. Upper Shadow Risk Penalty (0 to -10 points) ---
+    # Long upper shadow (长上影) after a rise = bearish reversal / profit-
+    # taking signal. Penalised only when shadow >50% of daily range AND
+    # the stock has risen >3% in 10d (confirms it's a top-of-move shadow).
+    shadow_penalty = pd.Series(0.0, index=df.index)
+
+    shadow_threshold = profile.get(
+        "bottom_accumulation_upper_shadow_threshold_pct", 50.0
+    )
+    shadow_rise_min = profile.get(
+        "bottom_accumulation_upper_shadow_rise_min_pct", 3.0
+    )
+
+    if "upper_shadow_pct" in df.columns and "change_10d" in df.columns:
+        us = pd.to_numeric(df["upper_shadow_pct"], errors="coerce").fillna(0)
+        c10 = pd.to_numeric(df["change_10d"], errors="coerce").fillna(0)
+
+        long_shadow = us > shadow_threshold
+        rising = c10 > shadow_rise_min
+        trigger = long_shadow & rising
+
+        # Shadow severity: 50-100% → linear penalty 0 → -10
+        shadow_severity = (
+            (us - shadow_threshold) / max(100.0 - shadow_threshold, 1.0)
+        ).clip(lower=0, upper=1.0)
+        shadow_penalty = shadow_penalty + trigger.astype(float) * shadow_severity * (-10.0)
+
+    shadow_penalty = shadow_penalty.clip(lower=-10.0, upper=0.0)
+    score = score + shadow_penalty
+
+    return score.clip(lower=0, upper=100.0)
+
+
+def _compute_capital_heat_quality_score(
+    df: pd.DataFrame, profile: dict[str, float]
+) -> pd.Series:
+    """Score-card adjustment for capital_heat strategy using moneyflow data.
+
+    Capital heat targets stocks with active capital flow — the thesis
+    depends on genuine main-force participation, not just high volume.
+    This scorer confirms / refutes the thesis with Tushare moneyflow_dc:
+
+    * Positive 5d net inflow → capital_confirmed bonus
+    * Strong inflow (% of turnover) → extra bonus
+    * Consecutive inflow days → sustained-interest bonus
+    * Net outflow → penalty (contradicts the capital-heat thesis)
+
+    When moneyflow data is unavailable the function returns a neutral
+    base score (50), so it does not distort results.
+    """
+    base = float(profile.get("capital_heat_quality_base", 50.0))
+    score = pd.Series(base, index=df.index)
+
+    if "mf_available" not in df.columns:
+        return score
+
+    mf_avail = df["mf_available"].fillna(False).astype(bool)
+    bonus = float(profile.get("capital_heat_capital_confirmed_bonus", 2.4))
+
+    # --- 5-day net inflow: positive = reward, negative = penalise ---
+    inflow_min = float(profile.get("capital_heat_mf_inflow_5d_min", 500.0))
+    inflow_max = float(profile.get("capital_heat_mf_inflow_5d_max", 5000.0))
+    outflow_min = float(profile.get("capital_heat_mf_outflow_5d_min", -500.0))
+    outflow_max = float(profile.get("capital_heat_mf_outflow_5d_max", -5000.0))
+
+    if "mf_net_inflow_5d" in df.columns:
+        inflow5d = pd.to_numeric(
+            df["mf_net_inflow_5d"], errors="coerce"
+        ).fillna(0.0)
+
+        # reward positive inflow (up to bonus * 1.5 pts)
+        reward_mask = mf_avail & (inflow5d > inflow_min)
+        reward_ratio = (
+            (inflow5d - inflow_min) / max(inflow_max - inflow_min, 1.0)
+        ).clip(lower=0, upper=1.0)
+        score = score + reward_mask.astype(float) * reward_ratio * bonus * 1.5
+
+        # penalise outflow (up to -bonus * 0.8 pts)
+        outflow_mask = mf_avail & (inflow5d < 0)
+        outflow_range = outflow_min - outflow_max
+        outflow_ratio = (
+            (outflow_min - inflow5d) / max(outflow_range, 1.0)
+        ).clip(lower=0, upper=1.0)
+        score = score - outflow_mask.astype(float) * outflow_ratio * bonus * 0.8
+
+    # --- Inflow strength (% of turnover): higher = stronger conviction ---
+    strength_min = float(profile.get("capital_heat_mf_strength_pct_min", 3.0))
+    strength_max = float(profile.get("capital_heat_mf_strength_pct_max", 10.0))
+    if "mf_inflow_strength_pct" in df.columns:
+        strength = pd.to_numeric(
+            df["mf_inflow_strength_pct"], errors="coerce"
+        ).fillna(0.0)
+        # reward strong inflow %
+        strength_reward = mf_avail & (strength > strength_min)
+        strength_ratio = (
+            (strength - strength_min) / max(strength_max - strength_min, 1.0)
+        ).clip(lower=0, upper=1.0)
+        score = score + strength_reward.astype(float) * strength_ratio * bonus
+        # penalise negative strength
+        neg_strength = mf_avail & (strength < 0)
+        score = score - neg_strength.astype(float) * (strength / -10.0).clip(
+            lower=0, upper=1.0
+        ) * bonus * 0.6
+
+    # --- Consecutive days: sustained inflow = genuine interest ---
+    if "mf_consecutive_days" in df.columns:
+        cons = (
+            pd.to_numeric(df["mf_consecutive_days"], errors="coerce")
+            .fillna(0)
+            .clip(lower=0)
+        )
+        score = score + (mf_avail & (cons >= 2)).astype(float) * bonus * 0.5
+        score = score + (mf_avail & (cons >= 4)).astype(float) * bonus * 0.3
 
     return score.clip(lower=0, upper=100.0)

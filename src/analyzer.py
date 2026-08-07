@@ -1043,6 +1043,32 @@ def stabilize_decision_with_structure(
         )
 
         flow_bias, flow_reason = _capital_flow_bias_with_status(fundamental_context)
+
+        # 双重保险：若 primary capital_flow 不可用，尝试用 Tushare moneyflow 补全
+        if flow_bias == "unavailable":
+            if isinstance(fundamental_context, dict):
+                try:
+                    from src.services.screening.daily import (
+                        build_moneyflow_capital_flow_fallback,
+                    )
+
+                    code = getattr(result, "code", None)
+                    if code:
+                        _fallback = build_moneyflow_capital_flow_fallback(str(code))
+                        if _fallback is not None:
+                            fundamental_context["capital_flow"] = _fallback
+                            flow_bias, flow_reason = _capital_flow_bias_with_status(
+                                fundamental_context
+                            )
+                            logger.info(
+                                "分析器为 %s 使用 Tushare moneyflow 补全主力资金流"
+                                "（原状态: %s）",
+                                code,
+                                flow_reason,
+                            )
+                except Exception as _mf_err:
+                    logger.debug("分析器主力资金流补全失败: %s", _mf_err)
+
         if flow_bias == "unavailable":
             if isinstance(fundamental_context, dict) and "capital_flow" in fundamental_context:
                 if decision_type == "buy" or advice_decision_type == "buy":
@@ -1064,6 +1090,14 @@ def stabilize_decision_with_structure(
                         flow_status=flow_reason,
                     )
             return
+
+        # 生成主力资金摘要，供前端独立栏目展示
+        try:
+            result.capital_flow_summary = _format_capital_flow_summary(
+                fundamental_context, language
+            )
+        except Exception as _cap_err:
+            logger.debug("生成主力资金摘要失败: %s", _cap_err)
 
         if current_price is None:
             return
@@ -1311,6 +1345,84 @@ def _capital_flow_bias_with_status(
         if signal is not None:
             return signal, "ok"
     return "neutral", "neutral"
+
+
+def _format_capital_flow_amount(value: Optional[float]) -> str:
+    """格式化主力资金金额：根据大小自动使用万元或亿元。"""
+    if value is None:
+        return "--"
+    amount = float(value)
+    if abs(amount) >= 100000000:
+        return f"{amount / 100000000:+.2f}亿"
+    return f"{amount / 10000:+.2f}万"
+
+
+def _format_capital_flow_summary(
+    fundamental_context: Optional[Dict[str, Any]],
+    language: str = "zh",
+) -> Optional[str]:
+    """根据 fundamental_context 中的 capital_flow 生成主力资金摘要。"""
+    if not isinstance(fundamental_context, dict):
+        return None
+    block = fundamental_context.get("capital_flow")
+    if not isinstance(block, dict):
+        return None
+    status = str(block.get("status") or "").strip().lower()
+    if status in _CAPITAL_FLOW_UNAVAILABLE_STATUS:
+        return None
+    data = block.get("data") if isinstance(block.get("data"), dict) else block
+    stock_flow = data.get("stock_flow") if isinstance(data, dict) else None
+    if not isinstance(stock_flow, dict) or not stock_flow:
+        return None
+
+    main_inflow = _coerce_numeric_value(stock_flow.get("main_net_inflow"))
+    inflow_5d = _coerce_numeric_value(stock_flow.get("inflow_5d"))
+    inflow_10d = _coerce_numeric_value(stock_flow.get("inflow_10d"))
+
+    if main_inflow is None and inflow_5d is None and inflow_10d is None:
+        return None
+
+    def _direction_text(value: Optional[float]) -> str:
+        if value is None or value == 0:
+            return "中性" if language == "zh" else "neutral"
+        return ("净流入" if value > 0 else "净流出") if language == "zh" else (
+            "inflow" if value > 0 else "outflow"
+        )
+
+    def _overall_bias() -> str:
+        # 按优先级综合判断：今日 > 5日 > 10日
+        signals = [main_inflow, inflow_5d, inflow_10d]
+        directions = ["inflow" if v and v > 0 else "outflow" if v and v < 0 else "neutral" for v in signals]
+        non_neutral = [d for d in directions if d != "neutral"]
+        if not non_neutral:
+            return "中性" if language == "zh" else "neutral"
+        if len(set(non_neutral)) == 1:
+            return _direction_text(1.0 if non_neutral[0] == "inflow" else -1.0)
+        # 方向冲突，以今日流向为准
+        return _direction_text(main_inflow)
+
+    if language == "zh":
+        parts = []
+        if main_inflow is not None:
+            parts.append(f"今日{_direction_text(main_inflow)}{_format_capital_flow_amount(main_inflow)}")
+        if inflow_5d is not None:
+            parts.append(f"5日{_direction_text(inflow_5d)}{_format_capital_flow_amount(inflow_5d)}")
+        if inflow_10d is not None:
+            parts.append(f"10日{_direction_text(inflow_10d)}{_format_capital_flow_amount(inflow_10d)}")
+        if not parts:
+            return None
+        return f"主力资金：{', '.join(parts)}；整体呈{_overall_bias()}态势。"
+
+    parts = []
+    if main_inflow is not None:
+        parts.append(f"today {_direction_text(main_inflow)} {_format_capital_flow_amount(main_inflow)}")
+    if inflow_5d is not None:
+        parts.append(f"5D {_direction_text(inflow_5d)} {_format_capital_flow_amount(inflow_5d)}")
+    if inflow_10d is not None:
+        parts.append(f"10D {_direction_text(inflow_10d)} {_format_capital_flow_amount(inflow_10d)}")
+    if not parts:
+        return None
+    return f"Main capital flow: {', '.join(parts)}; overall {_overall_bias()}."
 
 
 def _capital_flow_status_for_stability(reason: str, language: str) -> str:
@@ -1734,6 +1846,9 @@ class AnalysisResult:
     # ========== 历史对比（Report Engine P0）==========
     query_id: Optional[str] = None  # 本次分析 query_id，用于历史对比时排除本次记录
 
+    # ========== 主力资金摘要（供前端独立栏目展示）==========
+    capital_flow_summary: Optional[str] = None
+
     # ========== 基本面上下文（仅运行时，用于通知拼装；不持久化到 to_dict）==========
     fundamental_context: Optional[Dict[str, Any]] = None
     market_structure_context: Optional[Dict[str, Any]] = None
@@ -1776,6 +1891,7 @@ class AnalysisResult:
             'current_price': self.current_price,
             'change_pct': self.change_pct,
             'model_used': self.model_used,
+            'capital_flow_summary': self.capital_flow_summary,
             'market_structure_context': self.market_structure_context,
         }
 
@@ -1908,7 +2024,7 @@ class GeminiAnalyzer:
 
     "dashboard": {
         "core_conclusion": {
-            "one_sentence": "一句话核心结论（30字以内，直接告诉用户做什么）",
+            "one_sentence": "一句话核心结论（40字以内，直接告诉用户做什么；必须包含主力资金流向结论，例如'主力资金净流入/净流出'）",
             "signal_type": "🟢买入信号/🟡持有观望/🔴卖出信号/⚠️风险警告",
             "time_sensitivity": "立即行动/今日内/本周内/不急",
             "position_advice": {
@@ -2053,7 +2169,7 @@ class GeminiAnalyzer:
 
 ## 决策仪表盘核心原则
 
-1. **核心结论先行**：一句话说清该买该卖
+1. **核心结论先行**：一句话说清该买该卖，并明确写出主力资金流向结论（净流入/净流出/中性）
 2. **分持仓建议**：空仓者和持仓者给不同建议
 3. **精确狙击点**：必须给出具体价格，不说模糊的话
 4. **检查清单可视化**：用 ✅⚠️❌ 明确显示每项检查结果
@@ -2096,7 +2212,7 @@ class GeminiAnalyzer:
 
     "dashboard": {
         "core_conclusion": {
-            "one_sentence": "一句话核心结论（30字以内，直接告诉用户做什么）",
+            "one_sentence": "一句话核心结论（40字以内，直接告诉用户做什么；必须包含主力资金流向结论，例如'主力资金净流入/净流出'）",
             "signal_type": "🟢买入信号/🟡持有观望/🔴卖出信号/⚠️风险警告",
             "time_sensitivity": "立即行动/今日内/本周内/不急",
             "position_advice": {
@@ -2239,7 +2355,7 @@ class GeminiAnalyzer:
 
 ## 决策仪表盘核心原则
 
-1. **核心结论先行**：一句话说清该买该卖
+1. **核心结论先行**：一句话说清该买该卖，并明确写出主力资金流向结论（净流入/净流出/中性）
 2. **分持仓建议**：空仓者和持仓者给不同建议
 3. **精确狙击点**：必须给出具体价格，不说模糊的话
 4. **检查清单可视化**：用 ✅⚠️❌ 明确显示每项检查结果
@@ -2916,11 +3032,22 @@ class GeminiAnalyzer:
         provider: Optional[str] = None,
         progress_callback: Optional[Callable[[int], None]] = None,
     ) -> Tuple[str, Dict[str, Any]]:
-        """Consume a LiteLLM stream into a single text payload."""
+        """Consume a LiteLLM stream into a single text payload.
+
+        Includes early-abort logic: if the stream produces only empty
+        chunks (e.g. SSE keep-alive comments) with zero real text for
+        more than *empty_stream_abort_seconds*, the consumer aborts
+        early instead of exhausting the full stream_timeout.
+        """
         chunks: List[str] = []
         usage: Dict[str, Any] = {}
         chars_received = 0
         next_emit_at = 1
+        stream_start = time.time()
+        # DeepSeek / overloaded providers may send empty keep-alive chunks
+        # without any delta.content.  Abort early so the non-stream fallback
+        # can start sooner rather than burning the full stream_timeout.
+        _EMPTY_STREAM_ABORT_SECONDS: float = 15.0
 
         try:
             for chunk in stream_response:
@@ -2935,6 +3062,12 @@ class GeminiAnalyzer:
 
                 delta_text = self._extract_stream_text(chunk)
                 if not delta_text:
+                    if chars_received == 0 and (time.time() - stream_start) > _EMPTY_STREAM_ABORT_SECONDS:
+                        raise _LiteLLMStreamError(
+                            f"{model} stream produced no text after {_EMPTY_STREAM_ABORT_SECONDS:.0f}s, "
+                            f"likely sending only keep-alive chunks",
+                            partial_received=False,
+                        )
                     continue
 
                 chunks.append(delta_text)
@@ -3278,6 +3411,19 @@ class GeminiAnalyzer:
                     if response_validator is not None:
                         response_validator(_stream_text)
                     return _stream_text, model, _stream_usage
+
+                # Stream failed — fall back to non-streaming for the same model.
+                # Ensure a hard timeout is set so non-stream calls cannot hang
+                # indefinitely (e.g. when the provider is overloaded).
+                _fallback_timeout = float(call_kwargs.get("timeout") or 0)
+                if _fallback_timeout <= 0:
+                    _fallback_timeout = 300.0
+                    call_kwargs["timeout"] = _fallback_timeout
+                logger.info(
+                    "[LiteLLM] %s stream unavailable, trying non-stream fallback (timeout=%.0fs)",
+                    model,
+                    _fallback_timeout,
+                )
 
                 response = call_litellm_with_param_recovery(
                     lambda kwargs: self._dispatch_litellm_completion(
@@ -4151,7 +4297,7 @@ class GeminiAnalyzer:
 
 ### 决策仪表盘要求：
 - **股票名称**：必须输出正确的中文全称（如"贵州茅台"而非"股票600519"）
-- **核心结论**：一句话说清该买/该卖/该等
+- **核心结论**：一句话说清该买/该卖/该等，必须包含主力资金流向结论（如'主力资金净流入/净流出/中性'）
 - **持仓分类建议**：空仓者怎么做 vs 持仓者怎么做
 - **具体狙击点位**：买入价、止损价、目标价（精确到分）
 - **检查清单**：每项用 ✅/⚠️/❌ 标记

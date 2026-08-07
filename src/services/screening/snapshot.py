@@ -582,6 +582,12 @@ def _fetch_tushare() -> pd.DataFrame:
 
     Tushare is not a real-time source here. It is used as a resilient fallback
     by joining the latest open trading day's daily quote and daily_basic data.
+
+    The latest trading day's daily information may not be published yet
+    when screening runs before market open, shortly after open, or
+    immediately after close.  We walk recent trading days (newest first)
+    and use the first date whose daily + daily_basic data are both
+    non-empty.
     """
     token = (
         os.getenv("TUSHARE_TOKEN", "").strip()
@@ -594,27 +600,41 @@ def _fetch_tushare() -> pd.DataFrame:
 
     pro = ts.pro_api(token)
     _configure_tushare_client(pro, token=token)
-    trade_date = _resolve_tushare_trade_date(pro)
-    daily = pro.daily(
-        trade_date=trade_date,
-        fields="ts_code,trade_date,close,pct_chg,amount",
-    )
-    daily_basic = pro.daily_basic(
-        trade_date=trade_date,
-        fields="ts_code,turnover_rate,volume_ratio,pe,pb,total_mv,circ_mv",
-    )
+    trade_dates = _recent_tushare_trade_dates(pro)
+
+    # Pre-fetch stock_basic (reusable across all dates).
     stock_basic = pro.stock_basic(
         exchange="",
         list_status="L",
         fields="ts_code,symbol,name,industry",
     )
 
-    if daily is None or daily.empty:
-        raise RuntimeError(f"tushare daily returned empty data for {trade_date}")
-    if daily_basic is None or daily_basic.empty:
-        raise RuntimeError(f"tushare daily_basic returned empty data for {trade_date}")
+    tried: list[str] = []
+    for trade_date in trade_dates:
+        tried.append(trade_date)
+        daily = pro.daily(
+            trade_date=trade_date,
+            fields="ts_code,trade_date,close,pct_chg,amount",
+        )
+        if daily is None or daily.empty:
+            continue
+        daily_basic = pro.daily_basic(
+            trade_date=trade_date,
+            fields="ts_code,turnover_rate,volume_ratio,pe,pb,total_mv,circ_mv",
+        )
+        if daily_basic is None or daily_basic.empty:
+            continue
+        logger.info(
+            "Tushare snapshot using trade_date %s (tried: %s)",
+            trade_date,
+            ",".join(tried),
+        )
+        return _prepare_tushare_snapshot(daily, daily_basic, stock_basic)
 
-    return _prepare_tushare_snapshot(daily, daily_basic, stock_basic)
+    raise RuntimeError(
+        "tushare daily / daily_basic returned empty data for all "
+        f"trade dates: {', '.join(tried)}"
+    )
 
 
 def _configure_tushare_client(pro: object, *, token: str) -> None:
@@ -634,11 +654,17 @@ def _configure_tushare_client(pro: object, *, token: str) -> None:
         pass
 
 
-def _resolve_tushare_trade_date(pro) -> str:
-    """Return the latest open trade date for Tushare requests."""
+def _recent_tushare_trade_dates(pro, *, limit: int = 5) -> list[str]:
+    """Return the most recent open trade dates (newest first) for Tushare.
+
+    When called before market open or shortly after close, the latest
+    trading day's daily/daily_basic data may not be available yet from
+    the Tushare API.  Callers should iterate this list and use the first
+    date whose daily data loads successfully.
+    """
     explicit = os.getenv("TUSHARE_TRADE_DATE", "").strip()
     if explicit:
-        return explicit
+        return [explicit]
 
     end = date.today()
     start = end - timedelta(days=30)
@@ -651,7 +677,17 @@ def _resolve_tushare_trade_date(pro) -> str:
     )
     if calendar is None or calendar.empty or "cal_date" not in calendar.columns:
         raise RuntimeError("tushare trade_cal returned no open trading days")
-    return str(calendar["cal_date"].max())
+
+    dates = sorted(
+        (str(d) for d in calendar["cal_date"].to_list()),
+        reverse=True,
+    )
+    return dates[: min(len(dates), max(1, limit))]
+
+
+def _resolve_tushare_trade_date(pro) -> str:
+    """Return the latest open trade date (backwards-compatible wrapper)."""
+    return _recent_tushare_trade_dates(pro)[0]
 
 
 def _prepare_tushare_snapshot(

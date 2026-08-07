@@ -7,6 +7,9 @@ const REPORT_TEXT = {
   zh: {
     keyInsights: '核心洞察',
     noAnalysisSummary: '暂无分析结论',
+    capitalFlow: '主力资金',
+    noCapitalFlow: '主力资金数据暂不可用',
+    noCapitalFlowDescription: '数据源未返回该股票的主力资金流（可能不在覆盖范围或尚未更新）',
     actionAdvice: '操作建议',
     noAdvice: '暂无建议',
     trendPrediction: '趋势预测',
@@ -59,6 +62,9 @@ const REPORT_TEXT = {
   en: {
     keyInsights: 'KEY INSIGHTS',
     noAnalysisSummary: 'No analysis summary yet',
+    capitalFlow: 'Main Capital Flow',
+    noCapitalFlow: 'Capital flow data unavailable',
+    noCapitalFlowDescription: 'The data source did not return capital flow for this stock (may be out of coverage or not yet updated).',
     actionAdvice: 'Action Advice',
     noAdvice: 'No advice yet',
     trendPrediction: 'Trend Outlook',
@@ -111,6 +117,9 @@ const REPORT_TEXT = {
   ko: {
     keyInsights: '핵심 인사이트',
     noAnalysisSummary: '분석 결론 없음',
+    capitalFlow: '주력 자금',
+    noCapitalFlow: '주력 자금 데이터 이용 불가',
+    noCapitalFlowDescription: '데이터 소스가 해당 종목의 주력 자금 흐름을 반환하지 않았습니다(커버리지 밖이거나 아직 업데이트되지 않았을 수 있습니다).',
     actionAdvice: '대응 전략',
     noAdvice: '제안 없음',
     trendPrediction: '추세 전망',

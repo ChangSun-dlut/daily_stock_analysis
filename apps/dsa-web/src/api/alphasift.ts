@@ -35,6 +35,7 @@ export type AlphaSiftCandidate = {
   riskFlags?: string[];
   llmScore?: number | null;
   llmConfidence?: number | null;
+  mfNetInflow?: number | null;
   mfNetInflow5d?: number | null;
   mfConsecutiveDays?: number | null;
   mfInflowStrengthPct?: number | null;

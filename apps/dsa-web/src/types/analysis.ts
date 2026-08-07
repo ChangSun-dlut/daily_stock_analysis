@@ -107,6 +107,7 @@ export type DecisionAction = 'buy' | 'add' | 'hold' | 'reduce' | 'sell' | 'watch
 /** Report summary section */
 export interface ReportSummary {
   analysisSummary: string;
+  capitalFlowSummary?: string | null;
   operationAdvice: string;
   action?: DecisionAction | null;
   actionLabel?: string | null;

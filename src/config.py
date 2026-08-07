@@ -103,6 +103,7 @@ _FALSEY_ENV_VALUES = {"0", "false", "no", "off"}
 PROMPT_CACHE_DIAGNOSTICS_LEVELS = {"off", "basic", "debug"}
 SUPPORTED_AGENT_BACKENDS = {"auto", "litellm", "codex_app_server"}
 TICKFLOW_KLINE_ADJUST_VALUES = {"none", "forward", "backward", "forward_additive", "backward_additive"}
+TUSHARE_KLINE_ADJUST_VALUES = {"none", "qfq"}
 # Fallback defaults used when ANSPIRE_API_KEYS is reused as legacy OpenAI-compatible source.
 # These are compatibility examples; actual availability should be validated by Anspire console/model entitlement.
 ANSPIRE_LLM_BASE_URL_DEFAULT = "https://open-gateway.anspire.cn/v6"
@@ -144,6 +145,22 @@ def normalize_tickflow_kline_adjust(value: Optional[str]) -> str:
         value,
     )
     return "none"
+
+
+def normalize_tushare_kline_adjust(value: Optional[str]) -> str:
+    """Normalize Tushare daily K-line adjustment mode.
+
+    默认 ``qfq``：与 AkShare / Tencent / Baostock / efinance / hithink 等
+    A 股数据源的前复权口径保持一致，避免 fallback 链内价格口径混用。
+    """
+    normalized = (value or "qfq").strip().lower()
+    if normalized in TUSHARE_KLINE_ADJUST_VALUES:
+        return normalized
+    logger.warning(
+        "Invalid TUSHARE_KLINE_ADJUST=%r; falling back to qfq",
+        value,
+    )
+    return "qfq"
 
 
 def parse_prompt_cache_diagnostics_level(value: Optional[str]) -> str:
@@ -718,6 +735,7 @@ class Config:
 
     # === 数据源 API Token ===
     tushare_token: Optional[str] = None
+    tushare_kline_adjust: str = "qfq"
     tickflow_api_key: Optional[str] = None
     tickflow_kline_adjust: str = "none"
     tickflow_priority: int = 2
@@ -751,11 +769,12 @@ class Config:
     # Unified temperature for all LLM calls (LLM_TEMPERATURE); legacy per-provider temps are fallback only
     llm_temperature: float = 0.7
     # 个股主分析 LLM 调用超时（秒）；0 表示不设置，由底层默认控制
-    litellm_analysis_timeout_seconds: float = 120.0
+    # deepseek-v4 等大模型在高峰时段可能需要较长时间排队和推理
+    litellm_analysis_timeout_seconds: float = 300.0
     # 流式首次数据 chunk 超时（秒）；0 表示不设置，由底层默认控制
     # DeepSeek 在排队期间会发送 SSE keep-alive 注释，不视为数据 chunk，
-    # 因此此值需要足够长以容忍排队时间，推荐 ≥30s
-    litellm_stream_timeout_seconds: float = 30.0
+    # 高峰时段排队可能超过 30s，推荐 ≥60s
+    litellm_stream_timeout_seconds: float = 60.0
 
     # Provider prompt-cache controls. These do not control provider implicit cache.
     llm_prompt_cache_telemetry_enabled: bool = True
@@ -1633,6 +1652,7 @@ class Config:
             feishu_app_secret=os.getenv('FEISHU_APP_SECRET'),
             feishu_folder_token=os.getenv('FEISHU_FOLDER_TOKEN'),
             tushare_token=os.getenv('TUSHARE_TOKEN'),
+            tushare_kline_adjust=normalize_tushare_kline_adjust(os.getenv('TUSHARE_KLINE_ADJUST')),
             tickflow_api_key=os.getenv('TICKFLOW_API_KEY'),
             tickflow_kline_adjust=normalize_tickflow_kline_adjust(os.getenv('TICKFLOW_KLINE_ADJUST')),
             tickflow_priority=parse_env_int(os.getenv('TICKFLOW_PRIORITY'), 2, field_name='TICKFLOW_PRIORITY', minimum=0),
@@ -1661,13 +1681,13 @@ class Config:
             llm_temperature=resolve_unified_llm_temperature(litellm_model),
             litellm_analysis_timeout_seconds=parse_env_float(
                 os.getenv('LITELLM_ANALYSIS_TIMEOUT_SECONDS'),
-                120.0,
+                300.0,
                 field_name='LITELLM_ANALYSIS_TIMEOUT_SECONDS',
                 minimum=0.0,
             ),
             litellm_stream_timeout_seconds=parse_env_float(
                 os.getenv('LITELLM_STREAM_TIMEOUT_SECONDS'),
-                10.0,
+                60.0,
                 field_name='LITELLM_STREAM_TIMEOUT_SECONDS',
                 minimum=0.0,
             ),

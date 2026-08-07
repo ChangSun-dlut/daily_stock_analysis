@@ -64,7 +64,7 @@ _POSTER_TEXT = {
         "market_subtitle": "指数、宽度、主线与风险的收盘复盘", "multi_title": "多市场复盘",
         "multi_subtitle": "按市场分段展示指数、主线与风险边界", "dashboard_subtitle": "多股决策摘要",
         "score": "评分", "confidence": "置信度", "trend": "趋势", "core": "核心结论",
-        "snapshot": "市场快照", "execution": "执行计划", "technical": "技术参考",
+        "capital_flow": "主力资金", "snapshot": "市场快照", "execution": "执行计划", "technical": "技术参考",
         "next_watch": "下一步观察", "positive_catalysts": "利好催化", "risk_alerts": "风险警报",
         "catalysts_risks": "催化与风险", "no_position": "未持仓", "holding": "已持仓",
         "position": "仓位", "entry": "建仓", "risk_control": "风控", "position_advice": "持仓建议",
@@ -81,7 +81,7 @@ _POSTER_TEXT = {
         "market_subtitle": "Closing review of indices, breadth, themes, and risks", "multi_title": "Multi-market Recap",
         "multi_subtitle": "Indices, themes, and risk boundaries by market", "dashboard_subtitle": "Multi-stock Decision Summary",
         "score": "Score", "confidence": "Confidence", "trend": "Trend", "core": "Core Conclusion",
-        "snapshot": "Market Snapshot", "execution": "Execution Plan", "technical": "Technical Reference",
+        "capital_flow": "Main Capital Flow", "snapshot": "Market Snapshot", "execution": "Execution Plan", "technical": "Technical Reference",
         "next_watch": "Next Watch", "positive_catalysts": "Positive Catalysts", "risk_alerts": "Risk Alerts",
         "catalysts_risks": "Catalysts & Risks", "no_position": "No Position", "holding": "Holding",
         "position": "Position", "entry": "Entry", "risk_control": "Risk Control", "position_advice": "Position Advice",
@@ -98,7 +98,7 @@ _POSTER_TEXT = {
         "market_subtitle": "지수, 시장 폭, 주도주와 리스크 마감 리뷰", "multi_title": "다중 시장 리뷰",
         "multi_subtitle": "시장별 지수, 주도주와 리스크 경계", "dashboard_subtitle": "다중 종목 의사결정 요약",
         "score": "점수", "confidence": "신뢰도", "trend": "추세", "core": "핵심 결론",
-        "snapshot": "시세 스냅샷", "execution": "실행 계획", "technical": "기술 참고",
+        "capital_flow": "주력 자금", "snapshot": "시세 스냅샷", "execution": "실행 계획", "technical": "기술 참고",
         "next_watch": "다음 관찰", "positive_catalysts": "긍정 촉매", "risk_alerts": "리스크 경보",
         "catalysts_risks": "촉매와 리스크", "no_position": "미보유", "holding": "보유 중",
         "position": "포지션", "entry": "진입", "risk_control": "리스크 관리", "position_advice": "포지션 제안",
@@ -195,6 +195,7 @@ class StockPoster:
     trend: str = ""
     confidence: str = ""
     conclusion: str = ""
+    capital_flow: str = ""
     snapshot: list[tuple[str, str, str]] = field(default_factory=list)
     sniper: list[tuple[str, str, str]] = field(default_factory=list)
     technical: list[tuple[str, str, str]] = field(default_factory=list)
@@ -1136,6 +1137,7 @@ def _stock_data_from_payload(
         limit=10,
     )
     poster.conclusion = _compact_text(core.get("one_sentence"), limit=54) or poster.conclusion
+    poster.capital_flow = _compact_text(payload.get("capital_flow_summary"), limit=90) or poster.capital_flow
 
     persisted_snapshot = _nested_mapping(payload, "market_snapshot")
     current = _number_text(payload.get("current_price") or price.get("current_price"))
@@ -1803,6 +1805,7 @@ def _stock_body(data: StockPoster, fallback_html: str) -> str:
     action = f'<div class="action-chip {tone}">{_escape(data.action)}</div>' if data.action else ""
     signal_row = f'<div class="signal-row">{action}{score}{trend}</div>' if action or score or trend else ""
     conclusion = _section_html(_poster_text(language, "core"), "◎", f'<div class="conclusion">{_escape(data.conclusion)}</div>') if data.conclusion else ""
+    capital_flow = _section_html(_poster_text(language, "capital_flow"), "⇄", f'<div class="conclusion capital-flow">{_escape(data.capital_flow)}</div>') if data.capital_flow else ""
     snapshot = _section_html(_poster_text(language, "snapshot"), "▥", f'<div class="metric-grid snapshot-grid">{_metric_cards(data.snapshot, language=language)}</div>') if data.snapshot else ""
     sniper = _section_html(_poster_text(language, "execution"), "◎", f'<div class="metric-grid sniper-grid sniper-table">{_metric_cards(data.sniper, "sniper", language=language)}</div>') if data.sniper else ""
     technical = _section_html(_poster_text(language, "technical"), "⌁", f'<div class="metric-grid technical-grid">{_metric_cards(data.technical, language=language)}</div>') if data.technical else ""
@@ -1833,9 +1836,9 @@ def _stock_body(data: StockPoster, fallback_html: str) -> str:
     if data.risk_control:
         position_rows += f'<div class="position-row"><span class="pill negative">{_escape(_poster_text(language, "risk_control"))}</span><p>{_escape(data.risk_control)}</p></div>'
     positions = _section_html(_poster_text(language, "position_advice"), "▣", f'<div class="position-box">{position_rows}</div>') if position_rows else ""
-    structured = any((signal_row, conclusion, snapshot, sniper, technical, watch, insights, positions))
+    structured = any((signal_row, conclusion, capital_flow, snapshot, sniper, technical, watch, insights, positions))
     fallback = f'<section class="report-fallback"><article class="report-content">{fallback_html}</article></section>' if not structured else ""
-    return f"{signal_row}{conclusion}{snapshot}{sniper}{technical}{watch}{insights}{positions}{fallback}"
+    return f"{signal_row}{conclusion}{capital_flow}{snapshot}{sniper}{technical}{watch}{insights}{positions}{fallback}"
 
 
 def _market_body(data: MarketPoster, fallback_html: str, markdown_text: str) -> str:

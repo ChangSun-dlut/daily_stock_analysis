@@ -1248,6 +1248,7 @@ def _compute_shape_features(
     )
     volume_ratio_20d = _volume_ratio_20d(df)
     body_pct = _body_pct(last)
+    upper_shadow_pct = _upper_shadow_pct(last)
     pullback_to_ma20_pct = (
         (last_close / last_ma20 - 1.0) * 100
         if last_ma20 is not None and last_ma20 > 0
@@ -1265,6 +1266,7 @@ def _compute_shape_features(
         "breakout_20d_pct": _round_or_none(breakout_20d_pct),
         "volume_ratio_20d": _round_or_none(volume_ratio_20d),
         "body_pct": _round_or_none(body_pct),
+        "upper_shadow_pct": _round_or_none(upper_shadow_pct),
         "pullback_to_ma20_pct": _round_or_none(pullback_to_ma20_pct),
         "consolidation_days_20d": _consolidation_days(previous),
         "consolidation_days_60d": _consolidation_days(df.iloc[:-1].tail(60)),
@@ -1375,6 +1377,27 @@ def _body_pct(row: pd.Series) -> float | None:
     if pd.isna(open_price) or pd.isna(close_price) or float(open_price) <= 0:
         return None
     return (float(close_price) / float(open_price) - 1.0) * 100
+
+
+def _upper_shadow_pct(row: pd.Series) -> float | None:
+    """上影线占比: (最高价 - max(开盘, 收盘)) / (最高 - 最低) * 100"""
+    open_price = row.get("open")
+    close_price = row.get("close")
+    high = row.get("high")
+    low = row.get("low")
+    if pd.isna(open_price) or pd.isna(close_price) or pd.isna(high) or pd.isna(low):
+        return None
+    o = float(open_price)
+    c = float(close_price)
+    h = float(high)
+    l = float(low)
+    if h <= l or o <= 0:
+        return None
+    total_range = h - l
+    if total_range <= 0:
+        return None
+    upper = h - max(o, c)
+    return (upper / total_range) * 100.0
 
 
 def _round_or_none(value: float | None) -> float | None:
@@ -1509,6 +1532,50 @@ def _fetch_moneyflow_tushare(
     return df.tail(lookback_days).copy()
 
 
+def _fetch_moneyflow_tushare_legacy(
+    code: str,
+    *,
+    lookback_days: int = _MF_LOOKBACK_DAYS,
+) -> pd.DataFrame | None:
+    """Fetch daily moneyflow from Tushare ``moneyflow`` (doc_id=170).
+
+    ``moneyflow`` returns Level2-based net flow (net_mf_amount, net_mf_vol).
+    Compared to ``moneyflow_dc`` (doc_id=349, 5000pts, ~2023-09+) this endpoint:
+
+    * Requires only 2000 points
+    * Covers data from ~2010
+    * Does **not** return ``net_amount_rate`` — strength is unavailable here
+
+    Fields are mapped to ``moneyflow_dc`` convention so the downstream
+    ``_compute_moneyflow_features`` can consume them transparently.
+    """
+    token = _tushare_token()
+    if not token:
+        return None
+
+    import tushare as ts
+
+    pro = ts.pro_api(token)
+    _configure_tushare_client(pro, token=token)
+
+    ts_code = _to_tushare_code(code)
+    start_date = (datetime.now() - timedelta(days=lookback_days * 2 + 10)).strftime("%Y%m%d")
+    end_date = datetime.now().strftime("%Y%m%d")
+
+    df = pro.moneyflow(
+        ts_code=ts_code,
+        start_date=start_date,
+        end_date=end_date,
+        fields="trade_date,ts_code,net_mf_amount",
+    )
+    if df is None or df.empty:
+        return None
+    # Normalise to moneyflow_dc convention
+    df = df.rename(columns={"net_mf_amount": "net_amount"})
+    df = df.sort_values("trade_date")
+    return df.tail(lookback_days).copy()
+
+
 def _fetch_moneyflow_akshare(
     code: str,
     *,
@@ -1551,17 +1618,28 @@ def _fetch_moneyflow(
     lookback_days: int = _MF_LOOKBACK_DAYS,
     timeout: float = _MF_CALL_TIMEOUT_SECONDS,
 ) -> tuple[pd.DataFrame | None, str]:
-    """Fetch moneyflow with fallback: tushare → akshare.
+    """Fetch moneyflow with fallback: moneyflow_dc → moneyflow → akshare → efinance.
 
     Returns ``(DataFrame, source_label)``.
     """
+
+    # 1. moneyflow_dc (doc_id=349, 5000 pts, full metrics + rate)
     try:
         df = _fetch_moneyflow_tushare(code, lookback_days=lookback_days)
     except Exception:
         df = None
     if df is not None and not df.empty:
+        return df, "tushare_dc"
+
+    # 2. moneyflow (doc_id=170, 2000 pts, coverage from ~2010, no rate column)
+    try:
+        df = _fetch_moneyflow_tushare_legacy(code, lookback_days=lookback_days)
+    except Exception:
+        df = None
+    if df is not None and not df.empty:
         return df, "tushare"
 
+    # 3. akshare
     try:
         df = _fetch_moneyflow_akshare(code, lookback_days=lookback_days)
     except Exception:
@@ -1586,13 +1664,11 @@ def _compute_moneyflow_features(
     mf_defaults: dict[str, object] = {
         "mf_net_inflow": None,
         "mf_net_inflow_5d": None,
+        "mf_net_inflow_10d": None,
         "mf_consecutive_days": None,
         "mf_inflow_strength_pct": None,
         "mf_available": False,
     }
-
-    if not _has_tushare_token():
-        return mf_defaults
 
     moneyflow, _src = _fetch_moneyflow(code, lookback_days=lookback_days)
     if moneyflow is None or moneyflow.empty:
@@ -1607,6 +1683,12 @@ def _compute_moneyflow_features(
     # 5日净流入 = sum of last 5 trading days' net_amount (万元)
     recent_5d = net_amounts.tail(5)
     mf_net_inflow_5d = float(recent_5d.sum())
+
+    # 10日净流入 = sum of last 10 trading days' net_amount (万元)
+    recent_10d = net_amounts.tail(10)
+    mf_net_inflow_10d = (
+        float(recent_10d.sum()) if len(recent_10d) >= 5 else None
+    )
 
     # 今日净流入（万元）
     mf_net_inflow = float(recent_5d.iloc[-1]) if len(recent_5d) > 0 else None
@@ -1630,7 +1712,72 @@ def _compute_moneyflow_features(
     return {
         "mf_net_inflow": None if mf_net_inflow is None else round(mf_net_inflow, 2),
         "mf_net_inflow_5d": round(mf_net_inflow_5d, 2),
+        "mf_net_inflow_10d": (
+            round(mf_net_inflow_10d, 2) if mf_net_inflow_10d is not None else None
+        ),
         "mf_consecutive_days": int(mf_consecutive_days),
         "mf_inflow_strength_pct": mf_inflow_strength_pct,
         "mf_available": True,
+    }
+
+
+def _mf_to_float(value: object) -> float | None:
+    """将可能为 None/NaN 的值转为 float，无效时返回 None。"""
+    if value is None:
+        return None
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(parsed):
+        return None
+    return parsed
+
+
+def _mf_wan_to_yuan(value: object) -> object:
+    """将 Tushare moneyflow 的万元单位转为元，保持 None 不变。"""
+    numeric = _mf_to_float(value)
+    if numeric is None:
+        return value
+    return numeric * 10000
+
+
+def build_moneyflow_capital_flow_fallback(code: str) -> dict[str, object] | None:
+    """Use screening-pipeline Tushare moneyflow as a capital_flow fallback.
+
+    When the analyzer's primary capital_flow data source (AkShare / eastmoney)
+    is unavailable, this function bridges the screening pipeline's Tushare
+    ``moneyflow_dc`` data into the ``capital_flow`` block format that the
+    analyzer expects.
+
+    Returns ``None`` when no Tushare token is configured or when
+    ``moneyflow_dc`` returns no data for this stock.
+    """
+    mf = _compute_moneyflow_features(code)
+    if not mf.get("mf_available"):
+        return None
+
+    # _compute_moneyflow_features 返回的 net_amount 单位是万元；
+    # analyzer 的 capital_flow 统一使用元单位，因此这里做单位转换。
+    stock_flow: dict[str, object | None] = {
+        "main_net_inflow": _mf_wan_to_yuan(mf.get("mf_net_inflow")),
+        "inflow_5d": _mf_wan_to_yuan(mf.get("mf_net_inflow_5d")),
+        "inflow_10d": _mf_wan_to_yuan(mf.get("mf_net_inflow_10d")),
+    }
+
+    return {
+        "status": "ok",
+        "coverage": {"status": "ok"},
+        "source_chain": [
+            {
+                "provider": "tushare_moneyflow_fallback",
+                "result": "ok",
+                "duration_ms": 0,
+            }
+        ],
+        "errors": [],
+        "data": {
+            "stock_flow": stock_flow,
+            "sector_rankings": {},
+        },
     }

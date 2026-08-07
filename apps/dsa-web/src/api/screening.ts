@@ -84,6 +84,15 @@ export type ScreeningCandidate = {
     publishedDate?: string | null;
   }>;
   dsaAnalysisSummary?: string;
+  /**
+   * 主力资金（Tushare moneyflow_dc.net_amount，主力 = 大单+特大单口径）
+   * 单位：万元；按 toCamelCase 从后端 snake_case 字段透出
+   */
+  mfNetInflow?: number | null;
+  mfNetInflow5d?: number | null;
+  mfConsecutiveDays?: number | null;
+  mfInflowStrengthPct?: number | null;
+  mfAvailable?: boolean;
   raw: Record<string, unknown>;
 };
 

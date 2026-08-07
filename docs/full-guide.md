@@ -414,6 +414,7 @@ daily_stock_analysis/
 |--------|------|--------|:----:|
 | `TUSHARE_TOKEN` | Tushare Pro Token | - | 可选 |
 | `TUSHARE_HTTP_URL` | Tushare Pro HTTP 接入地址；留空时使用官方端点 `http://api.tushare.pro`，仅在需通过公司内网代理、跨境网络或自建镜像时填 `http://` 或 `https://` 开头的完整地址 | `http://api.tushare.pro` | 可选 |
+| `TUSHARE_KLINE_ADJUST` | Tushare A 股日 K 复权模式：`qfq`（默认，用 `adj_factor` 前复权，除权日价格连续，避免均线/涨跌幅等指标被除权跳空扭曲）或 `none`（Tushare 原始不复权价）。 | `qfq` | 可选 |
 | `TICKFLOW_API_KEY` | TickFlow API Key；可选，用于 A 股日 K、实时行情、股票列表/名称与大盘复盘增强；失败或权限不足时自动回退。 | - | 可选 |
 | `TICKFLOW_PRIORITY` | TickFlow 日 K 数据源优先级；数字越小越早尝试，默认 `2`；未配置 API Key 时不启用；不影响实时行情，实时行情顺序由 `REALTIME_SOURCE_PRIORITY` 控制。 | `2` | 可选 |
 | `TENCENT_PRIORITY` | 腾讯直连 A 股日 K 数据源优先级；数字越小越早尝试，默认 `5`，作为 Efinance、AkShare、Tushare、TickFlow、PyTDX、Baostock 和 YFinance 之后的最终兜底；不影响实时行情。 | `5` | 可选 |
@@ -447,6 +448,7 @@ daily_stock_analysis/
 > - 任何异常走 fail-open，仅记录错误，不影响技术面/新闻/筹码主链路。
 > - 配置 `TICKFLOW_API_KEY` 后，TickFlow 会作为可选 A 股日 K 数据源和大盘复盘增强源实例化；`TICKFLOW_PRIORITY` 只影响日 K/通用数据源回退链。实时行情优先级由 `REALTIME_SOURCE_PRIORITY` 单独控制，只有显式包含 `tickflow` 时才会使用 TickFlow 实时行情。`REALTIME_SOURCE_PRIORITY` 中排在 `tickflow` 前面的数据源会先被尝试。
 > - TickFlow 日 K 默认 `TICKFLOW_KLINE_ADJUST=none`；日线 `volume` 从手统一转为股，`amount` 保持元口径。
+> - Tushare A 股日 K 默认 `TUSHARE_KLINE_ADJUST=qfq`：`daily` 数据按 `adj_factor / 最新 adj_factor` 前复权，与 AkShare/Tencent/Baostock/efinance/hithink 等回退源的 qfq 口径保持一致；`pct_chg`/`pre_close` 沿用 Tushare 原始除权口径涨跌幅。`adj_factor` 拉取失败或缺失时降级为不复权并记录 warning，不影响数据源可用性。
 > - TickFlow 日 K 区间请求会显式传入 `start_time` / `end_time` / `count`；官方 quickstart 明确说明时间范围查询仍受 `count` 限制。若返回非空但行数打满 `count` 且首个返回交易日晚于请求起始交易日，系统会判定为疑似截断，不写入缓存并让 manager 继续回退。
 > - 批量分析时，`prefetch_daily_klines()` 会在逐股 `get_daily_data()` 之前预热进程内缓存，不改变对外调用路径。
 > - TickFlow 能力按套餐权限分层：有限权限套餐仍可使用主指数查询；支持 `CN_Equity_A` 标的池查询的套餐才会启用 TickFlow 市场统计。

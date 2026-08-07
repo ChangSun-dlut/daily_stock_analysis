@@ -172,7 +172,9 @@ class Config:
     llm_min_coverage: float = 0.60
     llm_context_max_chars: int = 4000
     llm_timeout_sec: float = 60.0
-    llm_max_tokens: int = 2048
+    # 默认 4096：为推理模型（如 deepseek-v4-flash）的 reasoning_content 预留空间，
+    # 避免 max_tokens 被思考过程占满导致 content 为空、LLM 排名静默降级为因子排序。
+    llm_max_tokens: int = 4096
 
     # Snapshot data source priority
     snapshot_source_priority: list[str] = field(
@@ -307,7 +309,7 @@ class Config:
             llm_min_coverage=_parse_float_env("LLM_MIN_COVERAGE", 0.60),
             llm_context_max_chars=max(500, int(os.getenv("LLM_CONTEXT_MAX_CHARS", "4000"))),
             llm_timeout_sec=max(1.0, _parse_float_env("LLM_TIMEOUT_SEC", 60.0)),
-            llm_max_tokens=max(1, int(os.getenv("LLM_MAX_TOKENS", "2048"))),
+            llm_max_tokens=max(1, int(os.getenv("LLM_MAX_TOKENS", "4096"))),
             snapshot_source_priority=_resolve_snapshot_source_priority(),
             fallback_snapshot_path=fallback_snapshot_path,
             snapshot_cache_ttl_seconds=max(

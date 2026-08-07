@@ -164,6 +164,8 @@ class TushareFetcher(BaseFetcher):
         self._call_count = 0  # 当前分钟内的调用次数
         self._minute_start: Optional[float] = None  # 当前计数周期开始时间
         self._api: Optional[object] = None  # Tushare API 实例
+        # A 股日 K 复权模式: none / qfq（getattr 兼容被 mock 的 config 对象）
+        self._kline_adjust: str = getattr(get_config(), "tushare_kline_adjust", "qfq")
         self.date_list: Optional[List[str]] = None  # 交易日列表缓存（倒序，最新日期在前）
         self._date_list_end: Optional[str] = None  # 缓存对应的截止日期，用于跨日刷新
         self._pro_dead: bool = False      # Pro rt_k 接口不可用时置 True，跳过后续尝试
@@ -535,6 +537,8 @@ class TushareFetcher(BaseFetcher):
                     start_date=ts_start,
                     end_date=ts_end,
                 )
+                if self._kline_adjust == "qfq" and df is not None and not df.empty:
+                    df = self._apply_forward_adjust(df, ts_code, ts_start, ts_end)
             
             return df
             
@@ -547,6 +551,76 @@ class TushareFetcher(BaseFetcher):
                 raise RateLimitError(f"Tushare 配额超限: {e}") from e
             
             raise DataFetchError(f"Tushare 获取数据失败: {e}") from e
+
+    def _apply_forward_adjust(
+        self,
+        df: pd.DataFrame,
+        ts_code: str,
+        ts_start: str,
+        ts_end: str,
+    ) -> pd.DataFrame:
+        """
+        将 Tushare daily 的不复权数据转换为前复权（qfq）。
+
+        Tushare 的 ``daily`` 接口返回未复权价格，除权除息会造成跳空，
+        导致跨区间的涨跌幅、均线、RSI 等指标失真（且与 AkShare/Tencent
+        等 fallback 源的 qfq 口径不一致）。前复权公式：
+
+            qfq_price = raw_price * adj_factor / adj_factor[最新交易日]
+
+        复权后价格序列在除权日连续，``pct_chg`` / ``pre_close`` 仍沿用
+        Tushare 原始字段（其本身已是除权口径的正确涨跌幅）。
+
+        任何异常（接口失败、因子缺失、非正因子）都降级返回原数据，
+        保证数据源可用性优先于复权精度。
+        """
+        try:
+            adj_df = self._api.adj_factor(
+                ts_code=ts_code,
+                start_date=ts_start,
+                end_date=ts_end,
+            )
+            if (
+                adj_df is None
+                or not isinstance(adj_df, pd.DataFrame)
+                or adj_df.empty
+                or "adj_factor" not in adj_df.columns
+                or "trade_date" not in adj_df.columns
+            ):
+                logger.debug("Tushare adj_factor 返回为空，跳过前复权")
+                return df
+
+            merged = df.merge(
+                adj_df[["trade_date", "adj_factor"]],
+                on="trade_date",
+                how="left",
+            )
+            if merged["adj_factor"].isna().any():
+                logger.warning("Tushare adj_factor 存在缺失交易日，跳过前复权")
+                return df
+
+            # daily 返回倒序（最新交易日在前），必须按 trade_date 取最新一行，
+            # 不能依赖行位置（iloc[-1] 会取到最早交易日）。
+            latest_idx = merged["trade_date"].idxmax()
+            latest_adj = merged.loc[latest_idx, "adj_factor"]
+            if latest_adj is None or latest_adj <= 0:
+                logger.warning("Tushare adj_factor 最新值异常（%r），跳过前复权", latest_adj)
+                return df
+
+            for col in ("open", "high", "low", "close"):
+                if col in merged.columns:
+                    merged[col] = merged[col] * merged["adj_factor"] / latest_adj
+
+            logger.debug(
+                "Tushare 前复权完成: %s, latest_adj=%s, rows=%s",
+                ts_code,
+                latest_adj,
+                len(merged),
+            )
+            return merged
+        except Exception as e:
+            logger.warning("Tushare 前复权失败（降级为不复权）: %s", e)
+            return df
     
     def _normalize_data(self, df: pd.DataFrame, stock_code: str) -> pd.DataFrame:
         """

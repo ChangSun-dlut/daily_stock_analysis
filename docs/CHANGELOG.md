@@ -16,8 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] 飞书交互机器人在 `FEISHU_DOMAIN=lark` 时让 Stream 长连接与消息回复统一使用 Lark 国际版 API 域名，避免 SDK 默认连接飞书国内域名并返回 `Incorrect domain name`（fixes #937）。
 - [修复] `scripts/ci_gate.sh` 的 `offline_test_suite` 给 `pytest -m "not network"` 加 `--timeout=120 -o timeout_method=thread` 与 `-o faulthandler_timeout=300`：单个测试（含其 teardown）超过 2 分钟直接 fail，单个测试（含其 teardown）超过 5 分钟时 dump 全部线程栈到 stderr。配合 `.github/requirements-ci.txt` 新增 `pytest-timeout>=2.3.0` 依赖。issue #2131 报告过 backend-gate 在 AlphaSift hotspot 用例附近间歇性无 traceback 卡住直到被 GitHub Actions 取消，此次修复让任何未来 CI hang 都会留下可定位的失败信息或 post-mortem 栈，而不是静默消亡。同步修正 `.github/workflows/docker-publish.yml` 的 `Install backend gate dependencies` 与 `setup-python cache-dependency-path` 对齐 `ci.yml` 的 backend-gate 依赖安装方式，避免发布流程跑同一个 `./scripts/ci_gate.sh` 时因缺少 `pytest-timeout` 而直接 fail。
 
+- [修复] `scorer._DEFAULT_SCORING_PROFILE` 补充 `bottom_accumulation` 策略使用的 5 个追高/上影线阈值参数（`chase_20d_start_pct`/`chase_20d_max_pct`/`chase_10d_start_pct`/`upper_shadow_threshold_pct`/`upper_shadow_rise_min_pct`），修复因 YAML 中 scoring_profile 未知 key 导致策略加载失败、整条策略无法参与选股的问题
 - [修复] 选股策略栏稳定展示完整中文策略列表，并保留自定义策略 ID 入口
 - [修复] 选股热点详情统一使用中文业务文案，不再显示内部类名、字段名和原始数据源错误
+- [改进] bottom_accumulation 价格稳定化因子改为驼峰曲线（3-8%为理想区，15%+递减，20%+归零），新增追高惩罚因子（20日涨>8%扣分）和长上影线风险因子（>50%影线+近期上涨=出货嫌疑），抑制已脱离底部区的股票得分
 - [改进] 选中热点后先展示榜单已有摘要和核心股，后台再补充完整详情，并将单次热点源等待上限收紧为 8 秒
 - [修复] 刷新热点榜单并保留当前题材时同步绕过详情缓存重拉该题材，避免新榜单继续搭配旧路线与成分股；详情质量可用且字段完整时不再展示底层数据源尝试失败
 - [改进] 热点成分股并行获取东方财富与同花顺数据，并按固定数据源优先级合并；AkShare 调用复用 DSA 的可终止子进程 timeout，同花顺 HTTP 调用设置 connect/read timeout，并以进程级并发槽限制活跃任务、在返回前回收 worker；题材详情可按需复用 DSA 原生搜索服务的数据源优先级、时效过滤、缓存与同请求合并补充安全且带链接的近期消息，真实供应商调用使用限流且可终止回收的子进程，并在本地压缩摘要以避免额外 LLM 等待与降级提示；显式搜索增强不写入热点详情共享缓存或 Web 页面缓存
@@ -35,11 +37,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] 统一等价股票代码的本地日线候选与同源窗口解析；冲突沪深交易所代码不再降级匹配裸码，回测仅接受快照或交易日历确认的起点，并在同一起点中优先完整的单一代码窗口。
 - [新功能] 新增按 individual SkillAgent 自身 signal、版本化 engine 与本地已存同源日线窗口计算并持久化 `skill_opinion_outcomes` 的核心服务。
 - [修复] #1970 关闭认证属于高风险操作，即使携带有效 session cookie 也强制要求再次输入当前管理员密码二次确认；后端 `auth_update_settings` 的 disable 分支统一走 currentPassword 校验，命中 rate limit 时与 enable 路径一致返回 429，前端 `AuthSettingsCard` 在关闭认证时如有缺失当前密码将阻止提交并给出内联提示。
+- [修复] 选股页主力资金文案使用专用 `formatWanAmount` 并防御性剥离已带单位的异常上游值，避免重复渲染“万元”；缓存 key 升级到 v2 以丢弃旧版 localStorage 缓存，切换策略时从服务端拉取最新带主力资金字段的候选
+- [修复] `screening_service._build_candidate` 中 moneyflow 字段优先使用 DSA 在 raw/source 中计算的值，避免 AlphaSift 顶层占位值（`mf_net_inflow_5d=None`、`mf_consecutive_days=0`）遮蔽本地 enrichment；无 Tushare token 时也尝试 akshare fallback
+- [改进] `daily._fetch_moneyflow` fallback 链扩展为 `moneyflow_dc(349) → moneyflow(170) → akshare → efinance`；`moneyflow`（2000 积分、数据覆盖 2010 年起）作为 Tushare 第二数据源，弥补 `moneyflow_dc`（5000 积分、20230911 起）覆盖不足的问题；旧款接口无 `net_amount_rate` 时流入强度自动退化为 None
+
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
+- [修复] Tushare snapshot 源在盘前/开盘初期今日日线数据未发布时自动回退到前一交易日（遍历最近 5 个交易日取首个有数据的），避免全源失效时连最后兜底也因空数据而崩溃。
+- [改进] 自选股分析 capital_flow 缺失时自动使用 Tushare moneyflow_dc 主力资金数据补全（包含当日净流入、5日净流入、10日净流入），避免因 AkShare/东方财富资金流服务不可用导致买入结论降级为"持有观察:资金流数据缺失"。
+- [改进] 分析器 `stabilize_decision_with_structure` 增加 Tushare moneyflow 主力资金流补全双重保险：即便 pipeline 阶段未注入 fallback，后处理阶段仍会用 `result.code` 再次补全，确保有数据时不再降级。
+- [改进] 决策仪表盘 prompt 明确要求 `core_conclusion.one_sentence` 必须包含主力资金流向结论（净流入/净流出/中性），避免核心洞察中遗漏资金面信息。
+- [新功能] 个股分析报告新增"主力资金"独立栏目：后端从 `capital_flow` 生成今日/5日/10日净流入摘要，前端 `ReportOverview` 在核心洞察下方展示该栏目。
+- [新功能] 历史报告 Markdown 和分享海报同步展示"主力资金"摘要：`_generate_single_stock_markdown` 增加资金 section；`src/share_image.py` 个股海报增加主力资金 block。
+- [改进] `build_moneyflow_capital_flow_fallback` 将 Tushare moneyflow 数据从万元统一转换为元，确保主力资金摘要金额显示准确。
+- [修复] `litellm_stream_timeout_seconds` 在 `load_config` 中默认为 10s，但 DeepSeek 高峰排队期间 SSE keep-alive 注释不被 liteLLM 视为数据 chunk，导致 10s 内没收到首个 chunk 便超时；现与类默认值统一为 60s，`litellm_analysis_timeout_seconds` 默认提到 300s 以容忍 deepseek-v4 等大模型排队+推理耗时。
+- [修复] `_consume_litellm_stream` 增加空流早断：当流式连续 15 秒未收到任何有效文本（仅 SSE keep-alive 空 chunk）时提前中止并降级到非流式，避免浪费整个 `stream_timeout` 后再降级导致单只股票等待时间叠加；非流式降级入口新增超时日志与兜底默认 300s 超时。
+- [修复] `StockScreeningPage` 中策略缓存加载逻辑：localStorage 已有旧缓存时会直接 `return` 跳过服务端缓存同步，导致主力资金等新增字段从未被拉取到前端；现改为始终从服务端拉取，仅当服务端时间戳不早于本地时才覆盖 localStorage 并写回。
 - [文档] FAQ 补充 macOS 桌面应用被 Gatekeeper quarantine 阻止启动时的受信任安装包临时放行步骤（refs #2113）。
+- [修复] `screening_service.py` 在 AlphaSift 运行时环境中同步注入 DSA 本地的 `_compute_moneyflow_features`、`_compute_bottom_accumulation_quality_score` 与 `_compute_consolidation_quality_score`，使服务器实际使用仓库内的主力资金特征与评分逻辑，而非 `alphasift` 包内版本。
+- [改进] `bottom_accumulation` 与 `consolidation_breakout` 两策略的主力资金因子均增加净流出扣分：5 日净流入为负时按流出幅度扣减，净流入强度为负时同步扣分，避免资金流出股票仍因其他维度获得虚高评分。
+- [修复] 选股结果卡"主力资金"补齐当日净流入展示：`screening_service` 透出 `mf_net_inflow`（Tushare `moneyflow_dc.net_amount` 主力 = 大单+特大单口径，万元），`StockScreeningPage` 在 5 日净流入前加"当日净流入 X"渲染；`ScreeningCandidate` 类型同步补 `mfNetInflow` 等字段声明。原来 `mf_net_inflow` 在 `screening/daily.py` 已计算但未透出到 API，链路未接通。
+- [修复] `_normalize_candidate` 主动 DSA 自算主力资金兜底：alphasift 选股可能在异步/后台执行，DSA 主进程对 `alphasift.daily._compute_moneyflow_features` 的 setattr 注入无法跨越异步边界生效；此外 alphasift pipeline._df_to_picks 不写 `mf_net_inflow`（当日）字段。因此 `_normalize_candidate` 在透出 mf_* 字段时优先取 alphasift 计算的有限值，缺失或 NaN 时回退到 DSA 自己调 `_compute_moneyflow_features(code)` 计算结果。
+- [修复] 选股全市场快照与回测"无交易数据"连锁失败：
+  - alphasift.snapshot 默认 `TUSHARE_HTTP_URL=http://api.waditu.com`（缺失 `/dataapi` 路径）导致 `trade_cal`/`daily(trade_date)` 返回空 → 快照失败。DSA 在选股期间 setattr patch `alphasift.snapshot._DEFAULT_TUSHARE_HTTP_URL` 为 `http://api.waditu.com/dataapi`（退出恢复，不注入 env，不影响 DSA 自身 TushareFetcher）。
+  - alphasift.evaluate/doctor 在模块顶层 `from alphasift.daily import fetch_daily_history`，DSA 之前的 setattr 只替换 `alphasift.daily` 属性，回测仍走原版默认 `source="akshare"`（东财易断连）。现在同时替换 `alphasift.evaluate.fetch_daily_history` 与 `alphasift.doctor.fetch_daily_history`，回测走 DSA 数据源（Tushare 官方 URL）。
+  - `_build_alphasift_runtime_env` 注入 `TUSHARE_TRADE_DATE`（最近已收盘交易日）：alphasift.snapshot 读到后直接返回、跳过 trade_cal，绕开 URL 缺陷；同时避免盘中/盘前运行（当天 Tushare daily 未生成）取到"今天"导致 daily 为空。
+- [修复] 选股 LLM 排名默认 `LLM_MAX_TOKENS` 从 2048 提到 4096：推理模型（如 `deepseek/deepseek-v4-flash`）会把 max_tokens 全部消耗在 `reasoning_content` 上，导致 `content` 为空（`finish_reason=length` + `response_len=0`）而静默降级为因子排序；提升默认值后给思考与正文留出空间。可用 `LLM_MAX_TOKENS` 环境变量按需覆盖。
+- [修复] Tushare A 股日 K 默认启用前复权（`TUSHARE_KLINE_ADJUST=qfq`）：`daily` 不复权价按 `adj_factor / 最新 adj_factor` 前复权，除权除息（如 300806 斯迪克 7-27 除权）不再造成 `change_60d`/均线/RSI 等指标假跌，并与 AkShare/Tencent/Baostock/efinance/hithink 等回退源的 qfq 口径统一；`adj_factor` 拉取失败或缺失交易日时降级为不复权并记录 warning，不影响数据源可用性。
 - [改进] consolidation_breakout 策略实现 `consolidation_quality` 专项因子评分，综合盘整天数、振幅、波动率、突破幅度、量能扩张、弹簧压缩、均线结构等特征；日线预计算补充 10/20 日涨幅、量能扩张、连续放量、弹簧压缩指标、60/120 日盘整天数；盘整天数评分改为奖励超长盘整，使德生科技这类长平台温和放量突破形态获得更高 screen_score。
 - [改进] bottom_accumulation / consolidation_breakout 选股结果卡片新增主力资金字段展示（5日净流入、连续流入天数、净流入强度），并将对应字段从 alphasift Pick 模型透传至 API 响应与前端类型。
+- [改进] `capital_heat`（主力热度）策略新增 `capital_heat_quality` 因子评分，接入 Tushare moneyflow_dc 主力资金数据：5日净流入为正时加分、净流出时扣分、流入强度高/连续流入天数多时额外奖励，资金流不可用时保持中性。同步修复 bottom_accumulation / consolidation 中 outflow 分母取反导致的流出扣分失效 bug。screening_service 中 AlphaSift 运行时环境同步注入 DSA 的 `_compute_capital_heat_quality_score`。
+- [改进] 个股报告页主力资金数据缺失时展示更明确的空状态文案（"主力资金数据暂不可用" + "数据源未返回该股票的主力资金流"），避免与选股页缓存问题混淆
 
 ## [3.29.0] - 2026-08-02
 

@@ -907,6 +907,7 @@ class HistoryService:
                 current_price=raw_result.get("current_price"),
                 change_pct=raw_result.get("change_pct"),
                 model_used=raw_result.get("model_used"),
+                capital_flow_summary=raw_result.get("capital_flow_summary"),
             )
             guardrail_reason = extract_decision_guardrail_reason(raw_result)
             if guardrail_reason:
@@ -1029,6 +1030,16 @@ class HistoryService:
                 "|---------|---------|",
                 f"| 🆕 **{labels['no_position_label']}** | {pos_advice.get('no_position', self._get_display_operation_advice(result, report_language))} |",
                 f"| 💼 **{labels['has_position_label']}** | {pos_advice.get('has_position', labels['continue_holding'])} |",
+                "",
+            ])
+
+        # ========== 主力资金 ==========
+        capital_flow_summary = getattr(result, "capital_flow_summary", None)
+        if capital_flow_summary:
+            report_lines.extend([
+                f"### 💰 {labels['capital_flow_heading']}",
+                "",
+                f"> {capital_flow_summary}",
                 "",
             ])
 

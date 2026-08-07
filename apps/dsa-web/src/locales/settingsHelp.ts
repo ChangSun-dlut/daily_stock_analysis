@@ -300,6 +300,14 @@ const settingsHelpZhCN: SettingsHelpMap = {
     impact: ['影响基于 TickFlow 日 K 计算的均线、涨跌幅和其他技术指标口径。'],
     notes: ['在没有统一全部数据源复权口径前，建议保持默认 none。'],
   },
+  'settings.data_source.TUSHARE_KLINE_ADJUST': {
+    title: 'Tushare 日 K 复权模式',
+    summary: '控制 Tushare A 股日 K 线的复权口径，默认前复权（qfq）。',
+    usage: '可选 qfq 或 none。默认 qfq。',
+    valueNotes: ['qfq 用 adj_factor 计算前复权价，除权日价格序列连续，均线/RSI/跨区间涨幅不被除权跳空扭曲。'],
+    impact: ['影响基于 Tushare 日 K 计算的价格、均线、涨跌幅等指标；最新价不受影响。'],
+    notes: ['设为 none 可保持 Tushare 原始不复权价，但会与 AkShare/Tencent 等默认前复权的回退源口径不一致。'],
+  },
   'settings.data_source.TICKFLOW_BATCH_DAILY_ENABLED': {
     title: 'TickFlow 批量日 K 预取',
     summary: '控制批量分析时是否先用 TickFlow 批量接口预热日 K 缓存。',
@@ -1497,6 +1505,14 @@ const settingsHelpEnUS: SettingsHelpMap = {
     valueNotes: ['none preserves the existing unadjusted technical-indicator baseline.'],
     impact: ['Affects moving averages, price changes, and other technical indicators calculated from TickFlow daily K-lines.'],
     notes: ['Keep the default none unless you intentionally want adjusted daily K-line inputs.'],
+  },
+  'settings.data_source.TUSHARE_KLINE_ADJUST': {
+    title: 'Tushare K-line Adjustment',
+    summary: 'Controls the adjustment mode for Tushare A-share daily K-lines. The default is forward adjustment (qfq).',
+    usage: 'Allowed values are qfq or none. The default is qfq.',
+    valueNotes: ['qfq computes forward-adjusted prices from adj_factor, keeping the price series continuous across ex-dividend days so moving averages, RSI, and cross-period returns are not distorted by gaps.'],
+    impact: ['Affects prices, moving averages, and price changes derived from Tushare daily K-lines; the latest price is unchanged.'],
+    notes: ['Set to none to keep Tushare raw unadjusted prices, but that mismatches the default qfq baseline used by AkShare/Tencent fallback sources.'],
   },
   'settings.data_source.TICKFLOW_BATCH_DAILY_ENABLED': {
     title: 'TickFlow Batch Daily Prefetch',

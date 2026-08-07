@@ -778,6 +778,28 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         ],
         "warning_codes": ["secret_value"],
     },
+    "TUSHARE_KLINE_ADJUST": {
+        "title": "Tushare K-line Adjust",
+        "description": "Adjustment mode for Tushare A-share daily K-lines. Default qfq keeps the price series forward-adjusted so ex-dividend gaps do not distort indicators, matching the qfq baseline used by AkShare/Tencent fallback sources.",
+        "category": "data_source",
+        "data_type": "string",
+        "ui_control": "select",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "qfq",
+        "options": ["none", "qfq"],
+        "validation": {},
+        "display_order": 11,
+        "help_key": "settings.data_source.TUSHARE_KLINE_ADJUST",
+        "examples": ["TUSHARE_KLINE_ADJUST=qfq"],
+        "docs": [
+            {
+                "label": "完整指南：环境变量完整列表",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#环境变量完整列表",
+            },
+        ],
+    },
     "TICKFLOW_API_KEY": {
         "title": "TickFlow API Key",
         "description": "API key for optional TickFlow A-share daily K-lines, realtime quotes, stock list/name lookup, and market review enhancement. Permission failures fail open to existing providers.",

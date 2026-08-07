@@ -44,11 +44,22 @@ instructions: |
      - 底背离形态为最强信号。
 
   5. **价格企稳**（风险控制）：
-     - 股价已从 60 日低点反弹 ≥ 3%，但不超过 20%。
+     - 股价已从 60 日低点反弹 ≥ 3%，理想区间 3-8%（最接近底部吸筹区）。
+     - 反弹超过 15% 得分递减，超过 20% 得分归零（已脱离底部）。
      - MA5 开始拐头向上（近 10 日 MA5 斜率改善）。
      - 避免追高：已从底部大幅反弹（>20%）的个股不再追入。
 
-  6. **风险确认**（关联理念5：风险排查）：
+  6. **追高风险控制**（新增）：
+     - 20 日涨幅 > 8%：开始扣分，15% 以上显著扣分（已上涨过多）。
+     - 10 日涨幅 > 5%：额外追高风险惩罚（短线急涨）。
+     - 底部筹码峰开始减少 + 股价已大幅反弹 = 主力出货风险。
+
+  7. **K 线形态确认**（新增）：
+     - 长上影线（>50%振幅）配合近期上涨 = 主力拉高出货信号。
+     - 高位长上影叠加缩量或滞涨，减分强化风控。
+     - 通过 `get_daily_history` 分析日 K 实体与影线比例。
+
+  8. **风险确认**（关联理念5：风险排查）：
      - 通过 `search_stock_news` 排除利空消息。
      - 排除 ST 股票。
      - 追涨涨幅 > 6.0% 或换手率 > 15% 需警惕。
@@ -176,8 +187,15 @@ screening:
     bottom_accumulation_signal_min_signals: 3
     bottom_accumulation_mf_inflow_5d_min: 500.0
     bottom_accumulation_mf_inflow_5d_max: 5000.0
+    bottom_accumulation_mf_outflow_5d_min: -500.0
+    bottom_accumulation_mf_outflow_5d_max: -5000.0
     bottom_accumulation_mf_strength_pct_min: 2.0
     bottom_accumulation_mf_strength_pct_max: 10.0
+    bottom_accumulation_chase_20d_start_pct: 8.0
+    bottom_accumulation_chase_20d_max_pct: 20.0
+    bottom_accumulation_chase_10d_start_pct: 5.0
+    bottom_accumulation_upper_shadow_threshold_pct: 50.0
+    bottom_accumulation_upper_shadow_rise_min_pct: 3.0
     momentum_base: 40.0
     momentum_chase_penalty_slope: 10.0
     momentum_chase_start_pct: 3.0

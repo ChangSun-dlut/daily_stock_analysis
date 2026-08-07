@@ -537,6 +537,36 @@ class StockAnalysisPipeline:
                 logger.warning(f"{stock_name}({code}) 基本面聚合失败: {e}")
                 fundamental_context = self.fetcher_manager.build_failed_fundamental_context(code, str(e))
 
+            # 主力资金流 fallback：当 capital_flow 数据源缺失时，使用 Tushare moneyflow 补全
+            if isinstance(fundamental_context, dict):
+                _cf_block = fundamental_context.get("capital_flow")
+                _cf_ok = (
+                    isinstance(_cf_block, dict)
+                    and str(_cf_block.get("status", "")).strip() == "ok"
+                )
+                if not _cf_ok:
+                    try:
+                        from src.services.screening.daily import (
+                            build_moneyflow_capital_flow_fallback,
+                        )
+
+                        _fallback = build_moneyflow_capital_flow_fallback(code)
+                        if _fallback is not None:
+                            fundamental_context["capital_flow"] = _fallback
+                            _old = (
+                                str(_cf_block.get("status", "missing"))
+                                if isinstance(_cf_block, dict)
+                                else "missing"
+                            )
+                            logger.info(
+                                f"{stock_name}({code}) 主力资金流使用 Tushare moneyflow 补全"
+                                f"（原资本流状态: {_old}）"
+                            )
+                    except Exception as _mf_err:
+                        logger.debug(
+                            f"{stock_name}({code}) Tushare moneyflow 补全失败: {_mf_err}"
+                        )
+
             fundamental_context = self._attach_belong_boards_to_fundamental_context(
                 code,
                 fundamental_context,

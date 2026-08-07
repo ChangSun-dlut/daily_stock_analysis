@@ -31,6 +31,30 @@ from src.config import Config, DEFAULT_ALPHASIFT_INSTALL_SPEC, get_configured_ll
 
 logger = logging.getLogger(__name__)
 
+
+def _dsa_moneyflow_features() -> Any:
+    """Lazy import to avoid circular imports and AlphaSift absence at module load."""
+    from src.services.screening.daily import _compute_moneyflow_features
+    return _compute_moneyflow_features
+
+
+def _dsa_bottom_accumulation_scorer() -> Any:
+    """Lazy import to avoid circular imports and AlphaSift absence at module load."""
+    from src.services.screening.scorer import _compute_bottom_accumulation_quality_score
+    return _compute_bottom_accumulation_quality_score
+
+
+def _dsa_consolidation_scorer() -> Any:
+    """Lazy import to avoid circular imports and AlphaSift absence at module load."""
+    from src.services.screening.scorer import _compute_consolidation_quality_score
+    return _compute_consolidation_quality_score
+
+
+def _dsa_capital_heat_scorer() -> Any:
+    """Lazy import to avoid circular imports and AlphaSift absence at module load."""
+    from src.services.screening.scorer import _compute_capital_heat_quality_score
+    return _compute_capital_heat_quality_score
+
 ALPHASIFT_DSA_ADAPTER_MODULE = "alphasift.dsa_adapter"
 ALPHASIFT_EXPECTED_MISSING_MODULES = frozenset({"alphasift", ALPHASIFT_DSA_ADAPTER_MODULE})
 ALLOWED_ALPHASIFT_INSTALL_SPECS = frozenset({DEFAULT_ALPHASIFT_INSTALL_SPEC})
@@ -2035,6 +2059,38 @@ def _alphasift_dsa_daily_history_provider() -> Iterator[None]:
         yield
         return
 
+    # alphasift.evaluate / alphasift.doctor 在模块顶层 `from alphasift.daily import
+    # fetch_daily_history`，函数被绑定到各自命名空间，setattr daily_module 无法影响
+    # 它们。回测（evaluate）走的是顶层绑定引用，必须一并替换才能让回测也使用
+    # DSA 数据源（Tushare 官方 URL），而不是默认 source="akshare"（东财，易断连）。
+    evaluate_module = None
+    doctor_module = None
+    original_evaluate_fetch = None
+    original_doctor_fetch = None
+    try:
+        evaluate_module = importlib.import_module("alphasift.evaluate")
+        original_evaluate_fetch = getattr(evaluate_module, "fetch_daily_history", None)
+    except Exception:
+        pass
+    try:
+        doctor_module = importlib.import_module("alphasift.doctor")
+        original_doctor_fetch = getattr(doctor_module, "fetch_daily_history", None)
+    except Exception:
+        pass
+
+    # alphasift.snapshot._DEFAULT_TUSHARE_HTTP_URL 缺失 /dataapi 路径
+    # （http://api.waditu.com），导致 trade_cal/daily(trade_date) 请求返回空、
+    # 全市场快照失败。setattr 修正为官方数据路径（不影响 DSA 自身 TushareFetcher，
+    # 后者读 TUSHARE_HTTP_URL env，此处不注入 env）。
+    snapshot_module = None
+    original_snapshot_http_url = None
+    try:
+        snapshot_module = importlib.import_module("alphasift.snapshot")
+        original_snapshot_http_url = getattr(snapshot_module, "_DEFAULT_TUSHARE_HTTP_URL", None)
+        setattr(snapshot_module, "_DEFAULT_TUSHARE_HTTP_URL", "http://api.waditu.com/dataapi")
+    except Exception:
+        snapshot_module = None
+
     def fetch_daily_history_with_dsa(
         code: str,
         *,
@@ -2096,12 +2152,62 @@ def _alphasift_dsa_daily_history_provider() -> Iterator[None]:
                 pass
         return result
 
+    # Patch AlphaSift's money-flow feature computation with the local DSA
+    # implementation so that server runtime uses the same source/fallback chain
+    # and field semantics verified in this repository.
+    original_compute_moneyflow = getattr(daily_module, "_compute_moneyflow_features", None)
+    dsa_compute_moneyflow = _dsa_moneyflow_features()
+
+    # Patch bottom-accumulation, consolidation-breakout and capital-heat
+    # scoring so that negative main-force inflow is penalised according to
+    # the local DSA scoring rules.
+    original_bottom_scorer: Any = None
+    original_consolidation_scorer: Any = None
+    original_capital_heat_scorer: Any = None
+    scorer_module: Any = None
+    try:
+        scorer_module = importlib.import_module("alphasift.scorer")
+        original_bottom_scorer = getattr(scorer_module, "_compute_bottom_accumulation_quality_score", None)
+        original_consolidation_scorer = getattr(scorer_module, "_compute_consolidation_quality_score", None)
+        original_capital_heat_scorer = getattr(scorer_module, "_compute_capital_heat_quality_score", None)
+    except Exception:
+        pass
+    dsa_bottom_scorer = _dsa_bottom_accumulation_scorer()
+    dsa_consolidation_scorer = _dsa_consolidation_scorer()
+    dsa_capital_heat_scorer = _dsa_capital_heat_scorer()
+
     with _ALPHASIFT_RUNTIME_ENV_LOCK:
         setattr(daily_module, "fetch_daily_history", fetch_daily_history_with_dsa)
+        if evaluate_module is not None and callable(original_evaluate_fetch):
+            setattr(evaluate_module, "fetch_daily_history", fetch_daily_history_with_dsa)
+        if doctor_module is not None and callable(original_doctor_fetch):
+            setattr(doctor_module, "fetch_daily_history", fetch_daily_history_with_dsa)
+        if callable(original_compute_moneyflow):
+            setattr(daily_module, "_compute_moneyflow_features", dsa_compute_moneyflow)
+        if scorer_module is not None and callable(original_bottom_scorer):
+            setattr(scorer_module, "_compute_bottom_accumulation_quality_score", dsa_bottom_scorer)
+        if scorer_module is not None and callable(original_consolidation_scorer):
+            setattr(scorer_module, "_compute_consolidation_quality_score", dsa_consolidation_scorer)
+        if scorer_module is not None and callable(original_capital_heat_scorer):
+            setattr(scorer_module, "_compute_capital_heat_quality_score", dsa_capital_heat_scorer)
         try:
             yield
         finally:
             setattr(daily_module, "fetch_daily_history", original_fetch)
+            if evaluate_module is not None and callable(original_evaluate_fetch):
+                setattr(evaluate_module, "fetch_daily_history", original_evaluate_fetch)
+            if doctor_module is not None and callable(original_doctor_fetch):
+                setattr(doctor_module, "fetch_daily_history", original_doctor_fetch)
+            if snapshot_module is not None and original_snapshot_http_url is not None:
+                setattr(snapshot_module, "_DEFAULT_TUSHARE_HTTP_URL", original_snapshot_http_url)
+            if callable(original_compute_moneyflow):
+                setattr(daily_module, "_compute_moneyflow_features", original_compute_moneyflow)
+            if scorer_module is not None and callable(original_bottom_scorer):
+                setattr(scorer_module, "_compute_bottom_accumulation_quality_score", original_bottom_scorer)
+            if scorer_module is not None and callable(original_consolidation_scorer):
+                setattr(scorer_module, "_compute_consolidation_quality_score", original_consolidation_scorer)
+            if scorer_module is not None and callable(original_capital_heat_scorer):
+                setattr(scorer_module, "_compute_capital_heat_quality_score", original_capital_heat_scorer)
 
 
 def _resolve_alphasift_snapshot_source_priority(config: Config) -> str:
@@ -2133,6 +2239,36 @@ def _build_alphasift_runtime_env(
         if os.getenv(key) not in (None, ""):
             return
         put(key, value)
+
+    # 指定最近已收盘交易日：alphasift.snapshot._resolve_tushare_trade_date 读到
+    # TUSHARE_TRADE_DATE 后直接返回（不调 trade_cal），从而绕开其默认 HTTP URL 缺失
+    # /dataapi 路径（http://api.waditu.com）导致 trade_cal 返回空、全市场快照失败
+    # （"tushare trade_cal returned no open trading days"）的问题；同时避免盘中/盘前
+    # 运行（当天 Tushare daily 尚未生成）时取到"今天"导致 daily 为空。用前一交易日
+    # 始终有数据。注意：不注入 TUSHARE_HTTP_URL，避免影响 DSA 自身 TushareFetcher。
+    _tushare_trade_date: Optional[str] = None
+    try:
+        import tushare as ts  # noqa: PLC0415
+        from datetime import date as _date, timedelta as _tdelta  # noqa: PLC0415
+
+        _pro = ts.pro_api(
+            _env_text(getattr(config, "tushare_token", None)) or os.getenv("TUSHARE_TOKEN")
+        )
+        _cal = _pro.trade_cal(
+            exchange="SSE",
+            start_date=(_date.today() - _tdelta(days=20)).strftime("%Y%m%d"),
+            end_date=_date.today().strftime("%Y%m%d"),
+            is_open="1",
+            fields="cal_date,is_open",
+        )
+        if _cal is not None and not _cal.empty and "cal_date" in _cal.columns:
+            _dates = sorted((str(d) for d in _cal["cal_date"].tolist()), reverse=True)
+            if _dates:
+                _tushare_trade_date = _dates[1] if len(_dates) > 1 else _dates[0]
+    except Exception:
+        _tushare_trade_date = None
+    if _tushare_trade_date:
+        put_default("TUSHARE_TRADE_DATE", _tushare_trade_date)
 
     litellm_model, fallback_models = _resolve_alphasift_llm_models(config)
     put("LITELLM_MODEL", litellm_model)
@@ -3457,7 +3593,7 @@ def get_dsa_daily_history(stock_code: str, *, lookback_days: int = 120) -> Tuple
     return load_history_df(normalized_code, days=days)
 
 
-def _recalc_dsa_daily_indicators(df: "pd.DataFrame") -> None:
+def _recalc_dsa_daily_indicators(df) -> None:
     """Recalculate technical indicators that may be missing after normalization.
 
     Fills in ``volume_ratio``, ``ma5``, ``ma10``, ``ma20``, and ``pct_chg``
@@ -4027,6 +4163,37 @@ def _normalize_candidate(raw: Any, rank: int) -> Dict[str, Any]:
     source = item.get("raw") if isinstance(item.get("raw"), dict) else item
     dsa_context = item.get("dsa_context") or source.get("dsa_context") or {}
     dsa_news = item.get("dsa_news") or source.get("dsa_news") or _extract_dsa_news_from_context(dsa_context)
+    # DSA 主动自算主力资金兜底：alphasift 选股可能在异步/后台执行，DSA 主进程对
+    # alphasift.daily 模块的 setattr 注入无法跨越异步边界生效（参考 alphasift
+    # pipeline._df_to_picks 只写 5 日/连续/强度/available，不写当日净流入）。
+    # 因此 _normalize_candidate 自己用 code 算一次主力资金，作为缺失字段的兜底。
+    import math
+    _dsa_mf_features: dict = {}
+    _code_raw = item.get("code") or source.get("code") or ""
+    _code_clean = (
+        str(_code_raw).split(".")[0].strip().zfill(6)
+        if str(_code_raw).split(".")[0].strip().isdigit()
+        else ""
+    )
+    if _code_clean:
+        try:
+            from src.services.screening.daily import _compute_moneyflow_features as _dsa_mf_features_fn
+            _dsa_mf_features = _dsa_mf_features_fn(_code_clean) or {}
+        except Exception:
+            _dsa_mf_features = {}
+
+    def _mf_finite(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, float) and math.isnan(value):
+            return False
+        return True
+
+    def _mf_value(key: str) -> Any:
+        v = _first_present(source, item, key)
+        if _mf_finite(v):
+            return v
+        return _dsa_mf_features.get(key) if _mf_finite(_dsa_mf_features.get(key)) else None
     dsa_analysis_summary = (
         item.get("dsa_analysis_summary")
         or source.get("dsa_analysis_summary")
@@ -4062,10 +4229,21 @@ def _normalize_candidate(raw: Any, rank: int) -> Dict[str, Any]:
         "dsa_analysis_summary": dsa_analysis_summary,
         "post_analysis_summaries": item.get("post_analysis_summaries") or source.get("post_analysis_summaries") or {},
         "post_analysis_tags": item.get("post_analysis_tags") or source.get("post_analysis_tags") or [],
-        "mf_net_inflow_5d": _first_present(item, source, "mf_net_inflow_5d"),
-        "mf_consecutive_days": _first_present(item, source, "mf_consecutive_days"),
-        "mf_inflow_strength_pct": _first_present(item, source, "mf_inflow_strength_pct"),
-        "mf_available": _first_present(item, source, "mf_available"),
+        # DSA patch 计算的 moneyflow 特征写入 raw/source；AlphaSift 顶层可能只有占位
+        # 默认值（如 net_inflow_5d=None, consecutive_days=0）。优先使用 AlphaSift
+        # 算出的有限值，缺失或 NaN 时回退到 _dsa_mf_features（DSA 自算）。
+        "mf_net_inflow": _mf_value("mf_net_inflow"),
+        "mf_net_inflow_5d": _mf_value("mf_net_inflow_5d"),
+        "mf_consecutive_days": _mf_value("mf_consecutive_days"),
+        "mf_inflow_strength_pct": _mf_value("mf_inflow_strength_pct"),
+        "mf_available": bool(
+            _mf_value("mf_net_inflow") is not None
+            or _mf_value("mf_net_inflow_5d") is not None
+            or _mf_value("mf_inflow_strength_pct") is not None
+            or _mf_value("mf_consecutive_days") is not None
+            or source.get("mf_available")
+            or item.get("mf_available")
+        ),
         "raw": source,
     }
 

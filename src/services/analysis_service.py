@@ -221,6 +221,7 @@ class AnalysisService:
             },
             "summary": {
                 "analysis_summary": result.analysis_summary,
+                "capital_flow_summary": result.capital_flow_summary or "",
                 "operation_advice": localize_operation_advice(result.operation_advice, report_language),
                 "action": action_fields["action"],
                 "action_label": action_fields["action_label"],

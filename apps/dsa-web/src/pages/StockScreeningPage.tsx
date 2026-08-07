@@ -52,7 +52,7 @@ import { AppPage, Button, InlineAlert } from '../components/common';
 
 const MARKETS = [{ id: 'cn', label: 'A 股' }];
 const SCREEN_TASK_STORAGE_KEY = 'dsa.alphasift.activeScreenTask.v1';
-const SCREEN_CACHE_KEY = 'dsa.alphasift.screenCache.v1';
+const SCREEN_CACHE_KEY = 'dsa.alphasift.screenCache.v2';
 const SCREEN_TASK_POLL_INTERVAL_MS = 2000;
 
 type CachedScreenResult = {
@@ -163,6 +163,27 @@ const formatNumber = (value: unknown, digits = 2) => {
     return '-';
   }
   return Number(value).toFixed(digits);
+};
+
+const formatWanAmount = (value: unknown, digits = 2) => {
+  if (value == null || value === '') {
+    return '-';
+  }
+  // Defensively strip any existing unit suffix that may leak from malformed
+  // upstream payloads so we never render duplicate "万元".
+  const cleaned =
+    typeof value === 'string'
+      ? value
+          .replace(/[\s,]/g, '')
+          .replace(/(?:万|万元|亿|亿元)$/u, '')
+          .trim()
+      : String(value);
+  if (cleaned === '' || Number.isNaN(Number(cleaned))) {
+    return '-';
+  }
+  const num = Number(cleaned);
+  const sign = num > 0 ? '+' : '';
+  return `${sign}${num.toFixed(digits)}万元`;
 };
 
 const formatAmount = (value: unknown) => {
@@ -769,16 +790,19 @@ const StockScreeningPage: React.FC = () => {
     };
   }, [loadHotspots, loadStrategies]);
 
-  // 服务端缓存兜底：当策略切换且无 localStorage 缓存时，从服务端加载当天最后一次选股结果
+  // 服务端缓存同步：每切一次策略从服务端拉取最新存盘缓存并覆盖 localStorage，
+  // 确保零停机部署后前端能拿到新增字段（如主力资金数据），不被本地旧缓存永久遮蔽。
   const serverCacheLoadedStrategyRef = useRef<string | null>(null);
   useEffect(() => {
     if (!available) return;
     if (serverCacheLoadedStrategyRef.current === strategy) return;
     serverCacheLoadedStrategyRef.current = strategy;
 
-    // 如果 localStorage 中已有该策略的缓存数据，优先使用（更快、离线可用）
+    // 如果 localStorage 已有该策略缓存，记录其时间戳用于和远端比对
     const localCache = readScreenCache();
-    if (localCache && localCache.strategy === strategy) return;
+    const localMs = (localCache && localCache.strategy === strategy && localCache.cachedAt)
+      ? new Date(localCache.cachedAt).getTime()
+      : 0;
 
     alphasiftApi
       .getScreenCache(strategy)
@@ -786,18 +810,30 @@ const StockScreeningPage: React.FC = () => {
         if (!cached || !Array.isArray(cached.candidates) || cached.candidates.length === 0) {
           return;
         }
+        const serverCacheAt = (cached.cachedAt as string) ?? null;
+        // 仅当服务端缓存不早于本地缓存时才覆盖，避免旧任务结果覆盖新任务
+        if (serverCacheAt && localMs > 0) {
+          const serverMs = new Date(serverCacheAt).getTime();
+          if (serverMs < localMs) return;
+        }
         const candidates = cached.candidates as unknown as AlphaSiftCandidate[];
         setCandidates(candidates);
         setExpandedCode(candidates[0]?.code ?? null);
-        setScreenCacheTime((cached.cachedAt as string) ?? null);
+        setScreenCacheTime(serverCacheAt);
         if (cached.market) {
           setMarket(String(cached.market));
         }
+        // 同步写回 localStorage，后续刷新可直接命中本地缓存
+        writeScreenCache({
+          strategy,
+          market: (cached.market as string) || '',
+          cachedAt: serverCacheAt || new Date().toISOString(),
+          candidates,
+        });
       })
       .catch(() => {
-        // 服务端缓存不可用时静默降级
+        // 服务端缓存不可用时静默降级，保留 localStorage 或页面状态
       });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [available, strategy]);
 
   useEffect(() => {
@@ -935,8 +971,8 @@ const StockScreeningPage: React.FC = () => {
       });
       setBacktestResult(resp);
       setShowBacktestModal(true);
-    } catch (err: any) {
-      const msg = err?.message || '回测请求失败，请确认后端服务正常';
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '回测请求失败，请确认后端服务正常';
       setBacktestError(msg);
     } finally {
       setBacktestLoading(false);
@@ -954,8 +990,8 @@ const StockScreeningPage: React.FC = () => {
         })),
       });
       setYesterdayResult(yesterdayResp);
-    } catch (err: any) {
-      setYesterdayError(err?.message || '昨日复盘请求失败');
+    } catch (err: unknown) {
+      setYesterdayError(err instanceof Error ? err.message : '昨日复盘请求失败');
     } finally {
       setYesterdayLoading(false);
     }
@@ -1654,7 +1690,9 @@ const StockScreeningPage: React.FC = () => {
                                   <p className="text-xs font-semibold text-secondary-text">主力资金</p>
                                   {item.mfAvailable ? (
                                     <p className="mt-1 text-sm text-foreground">
-                                      5日净流入 {formatNumber(item.mfNetInflow5d)} 万元
+                                      当日净流入 {formatWanAmount(item.mfNetInflow)}
+                                      {' · '}
+                                      5日净流入 {formatWanAmount(item.mfNetInflow5d)}
                                       {' · '}
                                       连续 {item.mfConsecutiveDays ?? 0} 天流入
                                       {item.mfInflowStrengthPct != null ? (
