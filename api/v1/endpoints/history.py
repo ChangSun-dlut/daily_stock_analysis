@@ -22,6 +22,7 @@ from api.v1.schemas.history import (
     HistoryItem,
     DeleteHistoryRequest,
     DeleteHistoryResponse,
+    BatchShareImageRequest,
     NewsIntelItem,
     NewsIntelResponse,
     AnalysisReport,
@@ -59,7 +60,11 @@ from src.analysis_context_pack_overview import (
 )
 from src.market_phase_summary import extract_market_phase_summary
 from src.config import get_config
-from src.md2img import markdown_to_image
+from src.md2img import html_to_image, markdown_to_image
+from src.share_image import (
+    StockPoster,
+    build_batch_share_image_html,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -948,6 +953,137 @@ async def get_history_share_image(
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+def _batch_poster_from_history(
+    record_id: str,
+    service: HistoryService,
+) -> Optional[StockPoster]:
+    """Resolve a history record into a deterministic StockPoster for batch share."""
+    result = service.resolve_and_get_detail(record_id)
+    if result is None:
+        return None
+
+    markdown_content = service.get_markdown_report(record_id)
+    payload = _history_share_image_payload(result)
+    if payload is None:
+        return None
+
+    from src.share_image import _stock_data_from_payload
+
+    return _stock_data_from_payload(
+        payload,
+        markdown_content or "",
+        result.get("created_at") if hasattr(result.get("created_at"), "date") else None,
+    )
+
+
+@router.post(
+    "/share-image/batch",
+    response_class=Response,
+    responses={
+        200: {"description": "PNG 批量分享图片", "content": {"image/png": {}}},
+        400: {"description": "参数无效", "model": ErrorResponse},
+        404: {"description": "部分记录不存在", "model": ErrorResponse},
+        500: {"description": "批量生成失败", "model": ErrorResponse},
+        503: {"description": "图片渲染器不可用", "model": ErrorResponse},
+    },
+    summary="批量生成分享图片",
+    description="将多份历史报告（≥2）合成为单张并排 PNG 分享图，自动下载",
+)
+async def post_batch_share_image(
+    request: BatchShareImageRequest,
+    db_manager: DatabaseManager = Depends(get_database_manager),
+) -> Response:
+    if len(request.record_ids) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_request",
+                "message": "批量分享需要至少 2 条历史报告",
+            },
+        )
+
+    service = HistoryService(db_manager)
+    posters: list = []
+    missing: list = []
+
+    for rid in request.record_ids:
+        try:
+            poster = _batch_poster_from_history(str(rid), service)
+        except MarkdownReportGenerationError as exc:
+            logger.error("Batch share image report generation failed for %s: %s", rid, exc.message)
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "generation_failed",
+                    "message": f"生成分享图片所需报告失败 (record_id={rid}): {exc.message}",
+                },
+            ) from exc
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("Batch share skipped for %s: %s", rid, exc, exc_info=True)
+            missing.append(rid)
+            continue
+        if poster is None:
+            missing.append(rid)
+            continue
+        posters.append(poster)
+
+    if not posters:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "not_found",
+                "message": "所有传入的 record_ids 均未找到可用的报告",
+            },
+        )
+
+    try:
+        html_content = build_batch_share_image_html(
+            posters,
+            cards_per_row=request.cards_per_row,
+        )
+    except Exception as exc:
+        logger.exception("build_batch_share_image_html failed")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "generation_failed",
+                "message": f"批量分享图片生成失败: {exc}",
+            },
+        ) from exc
+
+    image_bytes = await asyncio.to_thread(html_to_image, html_content)
+    if image_bytes is None:
+        config = get_config()
+        engine = getattr(config, "md2img_engine", "wkhtmltoimage")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "share_image_unavailable",
+                "message": (
+                    f"批量分享图片生成失败，请检查 {engine} 转图工具是否已安装并可用"
+                ),
+            },
+        )
+
+    codes = "_".join(
+        f"{p.code}" for p in posters[:3] if getattr(p, "code", None)
+    ) or "batch"
+    if len(posters) > 3:
+        codes = f"{codes}_plus{len(posters) - 3}"
+    filename = f"dsa-batch-share-{codes}-{len(posters)}stocks.png"
+    return Response(
+        content=image_bytes,
+        media_type="image/png",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "X-Batch-Count": str(len(posters)),
+            "X-Batch-Missing": ",".join(str(x) for x in missing),
         },
     )
 

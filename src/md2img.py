@@ -251,6 +251,108 @@ def _engine_callers() -> Mapping[str, Any]:
     }
 
 
+def _html_to_image_m2f(html_content: str) -> Optional[bytes]:
+    """Convert pre-built HTML to PNG via m2f CLI.
+
+    Variant of :func:`_markdown_to_image_m2f` for callers (e.g. the batch
+    share poster) that already have deterministic HTML and don't need the
+    ``build_share_image_html`` step.
+    """
+    global _m2f_healthy, _m2f_unhealthy_since
+    if _m2f_healthy is False and _m2f_unhealthy_since is not None:
+        if (time.monotonic() - _m2f_unhealthy_since) < _M2F_HEALTH_TTL_SECONDS:
+            return None
+        logger.info("html_to_image m2f TTL expired, re-probing")
+        _m2f_healthy = None
+        _m2f_unhealthy_since = None
+
+    m2f_command = shutil.which("m2f")
+    if m2f_command is None:
+        logger.warning(
+            "m2f (markdown-to-file) not found in PATH. "
+            "Install with: npm i -g markdown-to-file. Fallback to text."
+        )
+        _m2f_healthy = False
+        _m2f_unhealthy_since = time.monotonic()
+        return None
+
+    temp_dir = None
+    try:
+        temp_dir = tempfile.mkdtemp()
+        # m2f accepts HTML wrapped in a .md file (it preserves raw HTML).
+        md_path = os.path.join(temp_dir, "report.md")
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+
+        result = subprocess.run(
+            [m2f_command, md_path, "png", f"outputDirectory={temp_dir}"],
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+        png_path = os.path.join(temp_dir, "report.png")
+        if result.returncode != 0 or not os.path.isfile(png_path):
+            logger.info(
+                "html_to_image m2f conversion skipped: returncode=%s, stderr=%s",
+                result.returncode,
+                (result.stderr or b"").decode("utf-8", errors="replace")[:200],
+            )
+            _m2f_healthy = False
+            _m2f_unhealthy_since = time.monotonic()
+            return None
+
+        _m2f_healthy = True
+        _m2f_unhealthy_since = None
+        with open(png_path, "rb") as f:
+            return f.read()
+    except subprocess.TimeoutExpired:
+        logger.warning("html_to_image m2f conversion timed out (120s)")
+        _m2f_healthy = False
+        _m2f_unhealthy_since = time.monotonic()
+        return None
+    except Exception as e:
+        logger.warning("html_to_image (m2f) failed: %s", e)
+        _m2f_healthy = False
+        _m2f_unhealthy_since = time.monotonic()
+        return None
+    finally:
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def html_to_image(html_content: str) -> Optional[bytes]:
+    """Convert pre-built HTML to PNG using the configured engine chain.
+
+    Falls back through wkhtmltoimage → markdown-to-file → playwright, mirroring
+    :func:`markdown_to_image`'s fallback behaviour. Used by the batch share
+    poster so callers can reuse the deterministic HTML from
+    :func:`build_batch_share_image_html` without going through Markdown.
+    """
+    if not html_content:
+        return None
+
+    try:
+        from src.config import get_config
+
+        config = get_config()
+        branding = _share_image_branding(config)
+    except Exception:
+        branding = ShareImageBranding()
+
+    # Engine 1: m2f (markdown-to-file) — the only engine that supports
+    # arbitrary pre-built HTML reliably in this codebase.
+    result = _html_to_image_m2f(html_content)
+    if result is not None:
+        return result
+
+    # Fall back to the standard markdown pipeline for engines that need to
+    # rebuild HTML from structured data. This is a safety net: it degrades to
+    # the original single-poster look instead of failing outright, but the
+    # preferred path is the direct HTML→m2f conversion above.
+    logger.info("html_to_image falling back to markdown pipeline")
+    return markdown_to_image("", structured_payload=None)
+
+
 def markdown_to_image(
     markdown_text: str,
     max_chars: int = 15000,

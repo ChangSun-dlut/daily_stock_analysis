@@ -14,6 +14,11 @@ interface StockBarProps {
   onItemClick: (recordId: number) => void;
   onDeleteStock?: (stockCode: string) => Promise<void> | void;
   isDeleting?: boolean;
+  /**
+   * Bubble the currently selected recordIds up so siblings (e.g. a batch
+   * share-image button rendered elsewhere on the page) can react.
+   */
+  onSelectionChange?: (recordIds: number[]) => void;
   className?: string;
 }
 
@@ -29,6 +34,7 @@ export const StockBar: React.FC<StockBarProps> = ({
   onItemClick,
   onDeleteStock,
   isDeleting = false,
+  onSelectionChange,
   className = '',
 }) => {
   const { t } = useUiLanguage();
@@ -47,6 +53,21 @@ export const StockBar: React.FC<StockBarProps> = ({
       selectAllRef.current.indeterminate = someVisibleSelected;
     }
   }, [someVisibleSelected]);
+
+  // Bubble selected recordIds up so other UI (e.g. the batch share button)
+  // can read them without lifting the selection state to a global store.
+  useEffect(() => {
+    if (!onSelectionChange) return;
+    const recordIds: number[] = [];
+    for (const code of selectedCodes) {
+      if (code === 'MARKET') continue;
+      const item = items.find((it) => it.stockCode === code);
+      if (item && typeof item.id === 'number') {
+        recordIds.push(item.id);
+      }
+    }
+    onSelectionChange(recordIds);
+  }, [selectedCodes, items, onSelectionChange]);
 
   const toggleCode = useCallback((code: string) => {
     setSelectedCodes((prev) => {

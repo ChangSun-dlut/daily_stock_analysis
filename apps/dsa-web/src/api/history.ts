@@ -94,6 +94,20 @@ export const historyApi = {
   },
 
   /**
+   * 批量生成分享图片（≥2 条历史报告）
+   * @param recordIds 分析历史记录主键 ID 列表
+   * @param cardsPerRow 单行卡片数（1–6）
+   */
+  batchShareImage: async (recordIds: number[], cardsPerRow = 3): Promise<Blob> => {
+    const response = await apiClient.post<Blob>(
+      '/api/v1/history/share-image/batch',
+      { record_ids: recordIds, cards_per_row: cardsPerRow },
+      { responseType: 'blob' },
+    );
+    return response.data;
+  },
+
+  /**
    * 获取历史报告运行诊断摘要
    * @param recordId 分析历史记录主键 ID
    */

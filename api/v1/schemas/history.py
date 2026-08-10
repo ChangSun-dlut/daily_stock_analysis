@@ -96,6 +96,22 @@ class DeleteHistoryResponse(BaseModel):
     deleted: int = Field(..., description="实际删除的历史记录数量")
 
 
+class BatchShareImageRequest(BaseModel):
+    """批量分享图片请求"""
+
+    record_ids: List[int] = Field(
+        default_factory=list,
+        description="要合成为分享图片的历史报告 ID 列表（≥2）",
+        min_length=2,
+    )
+    cards_per_row: int = Field(
+        3,
+        ge=1,
+        le=6,
+        description="单行卡片数；超过则自动换行（默认 3）",
+    )
+
+
 class NewsIntelItem(BaseModel):
     """新闻情报条目"""
 

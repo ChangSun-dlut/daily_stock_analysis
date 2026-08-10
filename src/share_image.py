@@ -2204,4 +2204,117 @@ __all__ = [
     "PROJECT_URL",
     "ShareImageBranding",
     "build_share_image_html",
+    "build_batch_share_image_html",
 ]
+
+
+def _batch_card_html(
+    data: StockPoster,
+    language: str,
+    stamp: str,
+    branding: ShareImageBranding,
+) -> str:
+    """Render one card for the batch share poster.
+
+    Mirrors the structure of :func:`build_share_image_html` but emits only
+    the per-card header + hero + body so the batch container can compose
+    multiple cards horizontally.
+    """
+
+    title = data.title
+    subtitle = _poster_text(language, "stock_subtitle")
+    body = _stock_body(data, "")
+    source_line = ""
+    if data.data_source:
+        source_line = (
+            f" 数据源：{data.data_source}。"
+            if language == "zh"
+            else f" {_poster_text(language, 'source')}: {data.data_source}."
+        )
+    hero = (
+        f'<section class="hero">'
+        f'<h1>{_escape(title)}'
+        f'<span class="code">{_escape(data.code)}</span></h1>'
+        f'<p>{_escape(subtitle)}{source_line}</p>'
+        f'</section>'
+    )
+    poster_branding = branding or ShareImageBranding()
+    return (
+        f'<article class="poster stock batch-card">'
+        f'<header class="poster-header">'
+        f'<div class="brand">'
+        f'<span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>'
+        f'<strong>DSA</strong>'
+        f'<em>|</em> {_escape(_poster_text(language, "brand"))}'
+        f'</div>'
+        f'<div class="meta"><span class="date-chip">{_escape(stamp)}</span></div>'
+        f'</header>'
+        f'{hero}{body}'
+        f'</article>'
+    )
+
+
+def build_batch_share_image_html(
+    posters: Sequence[StockPoster],
+    *,
+    generated_on: Optional[date] = None,
+    branding: Optional[ShareImageBranding] = None,
+    cards_per_row: int = 3,
+) -> str:
+    """Build a composite share poster with multiple StockPosters side-by-side.
+
+    Each ``StockPoster`` becomes a ``.batch-card``; cards are arranged using a
+    CSS grid so the layout wraps cleanly when more than ``cards_per_row`` are
+    provided. The container width adapts to ``cards_per_row * 1080px``.
+    """
+
+    if not posters:
+        raise ValueError("posters must not be empty")
+    if cards_per_row < 1:
+        cards_per_row = 1
+
+    generated = generated_on or date.today()
+    # Use the first poster's language as the overall language; individual
+    # cards still pass their own language to ``_stock_body``.
+    language = posters[0].language
+    stamp = generated.isoformat()
+    poster_branding = branding or ShareImageBranding()
+
+    cards = [
+        _batch_card_html(p, p.language or language, stamp, poster_branding)
+        for p in posters
+    ]
+    cards_html = "".join(cards)
+
+    container_width = cards_per_row * 1080 + (cards_per_row - 1) * 24 + 48
+
+    return f"""<!DOCTYPE html>
+<html lang="{'en' if language == 'en' else 'ko' if language == 'ko' else 'zh-CN'}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width={container_width}, initial-scale=1">
+  <title>批量分享 - {len(posters)} 只标的</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    html, body {{ margin: 0; width: {container_width}px; background: #eef4fd; }}
+    body {{ color: #081b40; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Microsoft YaHei", Arial, sans-serif; font-size: 22px; line-height: 1.5; -webkit-font-smoothing: antialiased; }}
+    .batch-container {{ display: grid; grid-template-columns: repeat({cards_per_row}, 1080px); gap: 24px; padding: 38px 24px; background: #eef4fd; }}
+    .batch-card {{ width: 1080px; padding: 38px 34px 24px; border: 1px solid #aebdd4; border-radius: 28px; background: radial-gradient(circle at 92% 6%, rgba(48,123,255,.15), transparent 260px), linear-gradient(180deg,#fff 0%,#fbfdff 78%,#eef4fd 100%); }}
+    .poster-header {{ display: table; width: 100%; margin-bottom: 28px; }}
+    .brand, .meta {{ display: table-cell; vertical-align: middle; }}
+    .brand {{ font-size: 26px; font-weight: 650; }} .brand strong {{ margin: 0 14px 0 13px; font-size: 43px; letter-spacing: -2px; }} .brand em {{ color: #8b9bb3; font-style: normal; }}
+    .brand-mark {{ display: inline-block; width: 39px; height: 40px; vertical-align: middle; white-space: nowrap; }} .brand-mark i {{ display:inline-block; width:8px; margin-right:4px; border-radius:5px 5px 2px 2px; vertical-align:bottom; }} .brand-mark i:nth-child(1){{height:18px;background:#ff3b30}} .brand-mark i:nth-child(2){{height:28px;background:#00a86b}} .brand-mark i:nth-child(3){{height:40px;margin:0;background:#1677ff}}
+    .meta {{ text-align:right; color:#3e506c; font-size:21px; }} .date-chip {{ display:inline-block; padding:10px 17px; border:1px solid #aec4e7; border-radius:16px; background:rgba(255,255,255,.85); }}
+    .hero {{ min-height: 145px; margin-bottom: 24px; padding: 10px 10px 20px; }} .hero h1 {{ margin:0 0 8px; max-width:820px; font-size:68px; line-height:1.15; letter-spacing:-3px; }} .hero .code {{ margin-left:18px; color:#1768e8; font-size:38px; letter-spacing:0; white-space:nowrap; }} .hero p {{ margin:0; max-width:810px; color:#3c4f70; font-size:24px; }}
+    .signal-row {{ display:table; width:100%; margin:0 0 26px; border-spacing:14px 0; table-layout:fixed; }} .signal-row>div {{ display:table-cell; height:88px; padding:14px 20px; border:1px solid #cad8ec; border-radius:16px; vertical-align:middle; background:rgba(255,255,255,.92); }} .signal-row .action-chip {{ width:24%; color:#fff; text-align:center; font-size:38px; font-weight:850; background:#1974ed; box-shadow:0 10px 24px rgba(25,116,237,.22); }} .signal-row .action-chip.positive{{background:linear-gradient(135deg,#118a55,#19b66f)}} .signal-row .action-chip.negative{{background:linear-gradient(135deg,#e63b45,#ff5a52)}} .signal-score span,.signal-trend span{{margin-right:14px;font-weight:750}} .signal-score strong{{color:#0da15d;font-size:41px}} .signal-score.warning strong{{color:#f59e0b}} .signal-score.negative strong{{color:#ed343d}} .signal-score small{{color:#53627b;font-size:20px}} .signal-trend strong{{color:#1768e8;font-size:30px}} .signal-trend>small{{display:block;margin-top:3px;color:#64748b;font-size:15px}} .signal-trend.positive strong{{color:#0a9c58}} .signal-trend.negative strong{{color:#ed343d}}
+    .poster-section {{ margin:0 10px 25px; }} .poster-section h2 {{ margin:0 0 12px; font-size:29px; line-height:1.3; }} .poster-section h2 b {{ display:inline-block; width:34px; color:#176ff2; font-family:Arial,sans-serif; }}
+    .conclusion {{ padding:16px 24px; border:1.5px solid #72a8ff; border-radius:14px; color:#13294e; background:linear-gradient(90deg,#f9fcff,#eff6ff); font-size:25px; font-weight:600; }}
+    .metric-grid {{ display:table; width:100%; border-spacing:12px 0; table-layout:fixed; }} .metric {{ display:table-cell; height:112px; padding:14px 12px; border:1px solid #d0dced; border-radius:16px; text-align:center; vertical-align:middle; background:rgba(255,255,255,.92); }} .metric span {{ display:block; margin-bottom:5px; color:#233653; font-weight:700; }} .metric strong {{ display:block; color:#10254b; font-size:31px; line-height:1.25; overflow-wrap:break-word; word-break:normal; }} .metric.primary strong{{color:#1768e8}} .metric.up strong,.metric.positive strong,.metric.buy strong,.metric.green strong{{color:#0a9c58}} .metric.down strong,.metric.negative strong,.metric.stop strong,.metric.red strong{{color:#ed343d}} .metric.hot strong{{color:#ff4a36}} .metric.secondary strong{{color:#1768e8}} .metric.target strong{{color:#ff8a00}} .sniper-grid .metric{{height:112px}} .sniper-grid .metric strong{{font-size:29px}} .technical-grid .metric strong{{font-size:26px}}
+    .watch-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 12px}} .watch-card{{min-height:78px;padding:12px 16px;border:1px solid #d2deef;border-left:4px solid #1768e8;border-radius:13px;background:linear-gradient(145deg,#f7faff,#fff)}} .watch-card.warning{{border-left-color:#f59e0b}} .watch-card.secondary{{border-left-color:#6d5dfc}} .watch-card span{{display:block;color:#52647f;font-size:16px;font-weight:750}} .watch-card p{{margin:4px 0 0;color:#152a4d;font-size:18px;font-weight:650;line-height:1.35}} .two-column {{ display:table; width:100%; border-spacing:12px 0; table-layout:fixed; }} .insight {{ display:table-cell; width:50%; padding:15px 20px; border:1px solid #d5e1f0; border-radius:15px; background:#fff; vertical-align:top; }} .insight.positive{{background:linear-gradient(145deg,#f1fff7,#fff)}} .insight.negative{{background:linear-gradient(145deg,#fff4f4,#fff)}} .insight h3{{margin:0 0 6px;color:#0a9c58;font-size:23px}} .insight.negative h3{{color:#ed343d}} .insight ul{{font-size:19px}} ul{{margin:4px 0;padding-left:25px}} li{{margin:5px 0}}
+    .position-box {{ overflow:hidden; border:1px solid #d5e1f0; border-radius:15px; background:#fff; }} .position-row {{ display:table; width:100%; padding:10px 18px; border-bottom:1px solid #e5ecf5; }} .position-row:last-child{{border:0}} .position-row .pill,.position-row p{{display:table-cell;vertical-align:middle}} .position-row .pill{{width:92px;padding:5px 10px;border-radius:8px;color:#fff;text-align:center;font-size:18px;font-weight:750;background:#357dea}} .position-row .pill.warning{{background:#f2a20c}} .position-row .pill.positive{{background:#13a365}} .position-row .pill.negative{{background:#eb3e47}} .position-row p{{margin:0;padding-left:16px}}
+  </style>
+</head>
+<body>
+  <main class="batch-container">{cards_html}</main>
+</body>
+</html>"""

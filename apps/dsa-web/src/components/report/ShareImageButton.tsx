@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Image, Loader2, Share2, TriangleAlert } from 'lucide-react';
 import { historyApi } from '../../api/history';
 import type { ReportLanguage } from '../../types/analysis';
+import { downloadBlob } from '../../utils/download';
 import { getReportText, normalizeReportLanguage } from '../../utils/reportLanguage';
 import { Tooltip } from '../common/Tooltip';
 
@@ -22,15 +23,6 @@ interface ShareImageButtonProps {
 const safeFilenamePart = (value: string): string => {
   const normalized = value.trim().replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, '-');
   return normalized.slice(0, 72) || 'report';
-};
-
-const downloadBlob = (blob: Blob, filename: string): void => {
-  const objectUrl = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = objectUrl;
-  anchor.download = filename;
-  anchor.click();
-  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
 };
 
 export const ShareImageButton: React.FC<ShareImageButtonProps> = ({

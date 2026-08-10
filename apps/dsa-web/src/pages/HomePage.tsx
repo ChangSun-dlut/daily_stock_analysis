@@ -1,6 +1,6 @@
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BarChart3, Check, SlidersHorizontal, X } from 'lucide-react';
+import { BarChart3, Check, Layers, SlidersHorizontal, X } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { getParsedApiError, type ParsedApiError } from '../api/error';
 import { analysisApi, DuplicateTaskError } from '../api/analysis';
@@ -27,6 +27,7 @@ import { useDashboardLifecycle, useHomeDashboardState } from '../hooks';
 import { useWatchlist } from '../hooks/useWatchlist';
 import { useUiLanguage } from '../contexts/UiLanguageContext';
 import type { SetupStatusResponse } from '../types/systemConfig';
+import { downloadBlob } from '../utils/download';
 import { normalizeReportLanguage } from '../utils/reportLanguage';
 import type {
   AnalyzeAsyncResponse,
@@ -208,6 +209,8 @@ const HomePage: React.FC = () => {
   const [todayAnalysisLoadFailed, setTodayAnalysisLoadFailed] = useState(false);
   const [todayAnalysisRefreshVersion, setTodayAnalysisRefreshVersion] = useState(0);
   const [isStockBarInitialLoadSettled, setIsStockBarInitialLoadSettled] = useState(false);
+  const [selectedHistoryRecordIds, setSelectedHistoryRecordIds] = useState<number[]>([]);
+  const [isBatchSharing, setIsBatchSharing] = useState(false);
   const duplicateBannerTimer = useRef<number | null>(null);
   const marketReviewPollTimer = useRef<number | null>(null);
   const stockBarLoadStartedRef = useRef(false);
@@ -694,6 +697,25 @@ const HomePage: React.FC = () => {
       setIsDeletingStock(false);
     }
   }, [isDeletingStock, refreshMarketReviewHistory, refreshStockBar, refreshHistory]);
+
+  const handleHistorySelectionChange = useCallback((recordIds: number[]) => {
+    setSelectedHistoryRecordIds(recordIds);
+  }, []);
+
+  const handleBatchShare = useCallback(async () => {
+    if (isBatchSharing) return;
+    if (selectedHistoryRecordIds.length < 2) return;
+    setIsBatchSharing(true);
+    try {
+      const blob = await historyApi.batchShareImage(selectedHistoryRecordIds, 3);
+      const filename = `dsa-batch-share-${selectedHistoryRecordIds.length}stocks.png`;
+      downloadBlob(blob, filename);
+    } catch (err) {
+      console.error('Batch share image failed:', err);
+    } finally {
+      setIsBatchSharing(false);
+    }
+  }, [isBatchSharing, selectedHistoryRecordIds]);
 
   const handleSubmitAnalysis = useCallback(
     (
@@ -1245,6 +1267,7 @@ const HomePage: React.FC = () => {
           onHistoryItemClick={handleHistoryItemClick}
           onDeleteStock={handleDeleteStock}
           isDeleting={isDeletingStock}
+          onHistorySelectionChange={handleHistorySelectionChange}
           className="flex-1 overflow-hidden"
         />
       </div>
@@ -1255,6 +1278,7 @@ const HomePage: React.FC = () => {
       handleAnalyzeWatchlist,
       handleDeleteStock,
       handleHistoryItemClick,
+      handleHistorySelectionChange,
       isBatchAnalyzingWatchlist,
       isDeletingStock,
       isLoadingStockBar,
@@ -1596,6 +1620,22 @@ const HomePage: React.FC = () => {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                     </svg>
                     {t('home.fullReport')}
+                  </Button>
+                  <Button
+                    variant="home-action-report"
+                    size="sm"
+                    disabled={selectedHistoryRecordIds.length < 2 || isBatchSharing}
+                    isLoading={isBatchSharing}
+                    loadingText={t('home.batchShareLoading')}
+                    onClick={() => void handleBatchShare()}
+                  >
+                    <Layers className="h-4 w-4" />
+                    {t('home.batchShare')}
+                    {selectedHistoryRecordIds.length > 0 ? (
+                      <span className="ml-1 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-primary/20 px-1.5 text-[11px] font-semibold">
+                        {selectedHistoryRecordIds.length}
+                      </span>
+                    ) : null}
                   </Button>
                 </div>
                 {isHistoryTrendOpen ? (

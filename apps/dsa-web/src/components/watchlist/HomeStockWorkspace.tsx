@@ -64,6 +64,7 @@ interface HomeStockWorkspaceProps {
   onHistoryItemClick: (recordId: number) => void;
   onDeleteStock?: (stockCode: string) => Promise<void> | void;
   isDeleting?: boolean;
+  onHistorySelectionChange?: (recordIds: number[]) => void;
   className?: string;
 }
 
@@ -221,6 +222,7 @@ export const HomeStockWorkspace: React.FC<HomeStockWorkspaceProps> = ({
   onHistoryItemClick,
   onDeleteStock,
   isDeleting = false,
+  onHistorySelectionChange,
   className = '',
 }) => {
   const { t } = useUiLanguage();
@@ -283,6 +285,7 @@ export const HomeStockWorkspace: React.FC<HomeStockWorkspaceProps> = ({
           onItemClick={onHistoryItemClick}
           onDeleteStock={onDeleteStock}
           isDeleting={isDeleting}
+          onSelectionChange={onHistorySelectionChange}
           className="flex-1 overflow-hidden"
         />
       </div>
