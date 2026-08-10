@@ -176,6 +176,9 @@ export const ShareImageButton: React.FC<ShareImageButtonProps> = ({
     } catch (error) {
       console.error('Generate share image failed:', error);
       setState('error');
+      // Auto-reset so the button doesn't get stuck on "重试" after the user
+      // moves on (matches the existing success-state behaviour).
+      scheduleReset();
     }
   }, [activeRecordId, clearResetTimer, ensureImageUrl, reportTitle, scheduleReset, setState, state]);
 

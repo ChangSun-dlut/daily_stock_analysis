@@ -74,6 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] 选股卡片"5日净流入"恒为空：`camelcase-keys` 把 `mf_net_inflow_5d` 转成 `mfNetInflow5D`（数字段首字母大写），前端模板却读 `item.mfNetInflow5d`，导致字段永远 `undefined`。同步修正类型与渲染逻辑；保留 `mfNetInflow5d` 别名兜底历史缓存
 - [修复] 一键回测对北交所股票（如 920019）始终报"无交易数据"：`_a_stock_ticker` 没有北交所识别分支，会被错误映射为 `.{SZ}`。新增 `8/4/92` 前缀识别为 `.BJ`，同时对 `.BJ` ticker 无 Yahoo Finance 数据的情况给出更明确的错误文案
 - [新功能] 回测 / 昨日复盘新增多源日线 fallback：yfinance 返回空数据时自动切换 `fetch_daily_history`（Tushare→Tencent→Sina→Akshare→Baostock），北交所、免费源受限等情况均可按需降级获取到数据；API 响应新增 `fallback_source` 字段标记降级链路
+- [修复] `markdown_to_image` m2f 引擎一旦失败会在进程内永久缓存为不健康，导致后续分享图请求一律 503：新增 `_M2F_HEALTH_TTL_SECONDS=60s` 超时重置机制，过期后自动重新探测引擎可用性；`.env.example` 推荐 `MD2IMG_ENGINE=markdown-to-file`（wkhtmltoimage 未安装时唯一可用方案）
+- [修复] 分享图失败后 `ShareImageButton` 卡在 error 状态显示"重试"，新增 `scheduleReset()` 让其 2.2s 后自动恢复 idle，避免用户转回其他报告时按钮一直显示为错误状态
 
 ## [3.29.0] - 2026-08-02
 

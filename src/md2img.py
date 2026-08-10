@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -29,7 +30,14 @@ logger = logging.getLogger(__name__)
 # broken engine on every API call.  The bundled Puppeteer browser can crash
 # (e.g. SEGV on macOS ARM) while the subprocess returns exit 0, making the
 # failure silent but reproducible across requests.
+#
+# To avoid locking out the engine for the entire process lifetime after a
+# single transient failure (e.g. CDN unreachable, m2f transient error), we
+# track the time of the last negative verdict and force a re-probe after
+# ``_M2F_HEALTH_TTL_SECONDS``.
 _m2f_healthy: Optional[bool] = None
+_m2f_unhealthy_since: Optional[float] = None
+_M2F_HEALTH_TTL_SECONDS = 60.0
 
 
 def _share_image_branding(config: object) -> ShareImageBranding:
@@ -119,9 +127,15 @@ def _markdown_to_image_m2f(
     branding: Optional[ShareImageBranding] = None,
 ) -> Optional[bytes]:
     """Convert Markdown to PNG via markdown-to-file (m2f) CLI. Better emoji support (Issue #455)."""
-    global _m2f_healthy
-    if _m2f_healthy is False:
-        return None
+    global _m2f_healthy, _m2f_unhealthy_since
+    # Honour the cached negative verdict only within the TTL window; after
+    # that, force a re-probe so transient failures don't lock out the engine.
+    if _m2f_healthy is False and _m2f_unhealthy_since is not None:
+        if (time.monotonic() - _m2f_unhealthy_since) < _M2F_HEALTH_TTL_SECONDS:
+            return None
+        logger.info("markdown_to_image m2f TTL expired, re-probing")
+        _m2f_healthy = None
+        _m2f_unhealthy_since = None
 
     m2f_command = shutil.which("m2f")
     if m2f_command is None:
@@ -162,18 +176,22 @@ def _markdown_to_image_m2f(
                 (result.stderr or b"").decode("utf-8", errors="replace")[:200],
             )
             _m2f_healthy = False
+            _m2f_unhealthy_since = time.monotonic()
             return None
 
         _m2f_healthy = True
+        _m2f_unhealthy_since = None
         with open(png_path, "rb") as f:
             return f.read()
     except subprocess.TimeoutExpired:
         logger.warning("m2f conversion timed out (60s)")
         _m2f_healthy = False
+        _m2f_unhealthy_since = time.monotonic()
         return None
     except Exception as e:
         logger.warning("markdown_to_image (m2f) failed: %s", e)
         _m2f_healthy = False
+        _m2f_unhealthy_since = time.monotonic()
         return None
     finally:
         if temp_dir and os.path.isdir(temp_dir):
