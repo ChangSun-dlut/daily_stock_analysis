@@ -77,6 +77,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] `markdown_to_image` m2f 引擎一旦失败会在进程内永久缓存为不健康，导致后续分享图请求一律 503：新增 `_M2F_HEALTH_TTL_SECONDS=60s` 超时重置机制，过期后自动重新探测引擎可用性；`.env.example` 推荐 `MD2IMG_ENGINE=markdown-to-file`（wkhtmltoimage 未安装时唯一可用方案）
 - [修复] 分享图失败后 `ShareImageButton` 卡在 error 状态显示"重试"，新增 `scheduleReset()` 让其 2.2s 后自动恢复 idle，避免用户转回其他报告时按钮一直显示为错误状态
 - [新功能] 个股报告新增"批量生成分享图"按钮（位于"完整分析报告"右侧）：左侧 StockBar 多选（≥2 只）股票后，后端 `POST /api/v1/history/share-image/batch` 将多份报告合成为单张并排 PNG；前端自动下载。新增 `build_batch_share_image_html` / `html_to_image` 引擎链；共享 `downloadBlob` 工具给单图与批量场景
+- [新功能] 大盘复盘新增「板块资金流」模块：Tushare `moneyflow_ind_dc` 拆分主力 / 中户 / 散户三档单量级净流入，配合 `block_trade` 按行业聚合暗盘（大宗交易）净流入；前端表格按主力净流入绝对值排序展示，红涨绿跌（A股惯例）；附带阅读提示，说明"主力↑/散户↓=吸筹洗盘"、"暗盘与主力同向=机构调仓"等典型场景。配套 `get_sector_money_flow()` 数据源 + `_build_sector_money_flow_block()` Markdown 段
+- [改进] 板块资金流暗盘数据升级——从 lead_stock 单股暗盘改为 lead_stock 整个申万行业的 block_trade 聚合（解决 moneyflow_ind_dc 东财行业~496 vs stock_basic 申万行业~110 分类体系不兼容，仅 7% 名称匹配的问题）；10/10 板块暗盘全部覆盖。新增主力意图识别（吸筹/出货/回流/观望），中英韩三语 i18n
+- [修复] 板块资金流行业选择策略：原按 `|主力净流入|` 排序，结果全是流出板块、看不到涨幅行业。改为**涨幅 top5 + 跌幅 top5** 组合，覆盖涨跌两极，与同页"行业板块"展示保持一致
 
 ## [3.29.0] - 2026-08-02
 

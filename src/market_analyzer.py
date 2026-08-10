@@ -104,6 +104,12 @@ class MarketOverview:
     top_concepts: List[Dict] = field(default_factory=list)    # 涨幅前5概念
     bottom_concepts: List[Dict] = field(default_factory=list) # 跌幅前5概念
 
+    # 板块资金流分析（主力/中户/散户/暗盘）
+    sector_money_flow: List[Dict] = field(default_factory=list)
+
+    # 暗盘（大宗交易）独立热点行业（不依赖主力排名 top10）
+    block_trade_heat: List[Dict] = field(default_factory=list)
+
 
 @dataclass
 class MarketLightReviewResult:
@@ -113,6 +119,60 @@ class MarketLightReviewResult:
     report: str
     market_light_snapshot: Optional[Dict[str, Any]]
     structured_payload: Dict[str, Any] = field(default_factory=dict)
+
+
+def _extract_block_trade_heat(
+    sector_money_flow: list,
+    top_n: int = 5,
+) -> list:
+    """从板块资金流中提取暗盘（block_trade）最活跃的 Top-N 行业."""
+    with_block = [
+        r for r in sector_money_flow
+        if isinstance(r.get("block_net"), (int, float)) and r["block_net"] > 0
+    ]
+    sorted_rows = sorted(with_block, key=lambda r: r["block_net"], reverse=True)
+    result = []
+    for r in sorted_rows[:max(1, int(top_n))]:
+        result.append({
+            "name": r.get("name", ""),
+            "pct_change": r.get("pct_change"),
+            "main_net": r.get("main_net"),
+            "block_net": r["block_net"],
+            "lead_stock": r.get("lead_stock"),
+            "intent": r.get("intent", "neutral"),
+        })
+    return result
+
+
+def _classify_money_flow_intent(row: dict) -> str:
+    """基于主力 / 散户 / 暗盘三项数据推断主力意图.
+
+    返回值（前端可国际化映射）：
+        accumulate  主力吸筹 — 主力净流入 + 散户净流出（经典吸筹）
+        distribute  主力出货 — 主力净流出 + 无暗盘托盘
+        reflow      主力回流 — 主力净流出 + 暗盘正向接盘（机构反向接货）
+        neutral     观望 / 数据不足
+    """
+    try:
+        main = float(row.get("main_net") or 0.0)
+        retail = float(row.get("retail_net") or 0.0)
+        block = float(row.get("block_net") or 0.0)
+    except (TypeError, ValueError):
+        return "neutral"
+
+    if main > 0 and retail < 0:
+        return "accumulate"
+    if main < 0 and block > 0:
+        return "reflow"
+    if main < 0:
+        return "distribute"
+    return "neutral"
+
+
+def _annotate_intent(rows: list) -> None:
+    """就地为每个 row 补 ``intent`` 字段，供前端消费."""
+    for r in rows:
+        r["intent"] = _classify_money_flow_intent(r)
 
 
 class MarketAnalyzer:
@@ -442,6 +502,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         if self.profile.has_sector_rankings:
             self._get_sector_rankings(overview)
             self._get_concept_rankings(overview)
+            self._get_sector_money_flow(overview)
         
         # 4. 获取北向资金（可选）
         # self._get_north_flow(overview)
@@ -568,7 +629,61 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
         except Exception as e:
             logger.warning("[大盘] %s action=get_concept_rankings status=failed error=%s", self._log_context(), e)
-    
+
+    def _get_sector_money_flow(self, overview: MarketOverview) -> None:
+        """板块资金流（主力/中户/散户/暗盘）分析.
+
+        数据源：
+        - ``moneyflow_ind_dc``（东方财富）: 提供行业板块资金净流入，按单量级拆分
+          - net_amount      = 主力净流入（特大+大单）
+          - buy_md_amount   = 中单净流入
+          - buy_sm_amount   = 小单净流入（散户代理指标）
+        - ``block_trade``（Tushare）: 大宗交易（场外/暗盘），按行业聚合
+
+        仅支持 A 股市场；其它 region 会被 fail-open 跳过。
+        """
+        if self.region != "cn":
+            logger.debug("[大盘] sector moneyflow skipped region=%s", self.region)
+            return
+        try:
+            logger.info(
+                "[大盘] %s action=get_sector_money_flow status=start",
+                self._log_context(),
+            )
+
+            # 拉取全量行业数据（用于 block_trade_heat 等下游聚合）
+            all_rows = self.data_manager.get_sector_money_flow(top_n=999)
+            if not all_rows:
+                logger.warning(
+                    "[大盘] %s action=get_sector_money_flow status=empty",
+                    self._log_context(),
+                )
+                return
+
+            # 为每行推断主力意图（吸筹/出货/回流/观望）
+            _annotate_intent(all_rows)
+
+            # 行业板块展示策略：涨幅 top5 + 跌幅 top5
+            from data_provider.tushare_fetcher import TushareFetcher
+            overview.sector_money_flow = TushareFetcher._select_top_gainers_and_losers(
+                all_rows, top_n=10,
+            )
+
+            # 暗盘独立热点（block_trade 按全量行业聚合 Top 5）
+            overview.block_trade_heat = _extract_block_trade_heat(all_rows)
+            logger.info(
+                "[大盘] %s action=get_sector_money_flow status=success sectors=%d block_heat=%d",
+                self._log_context(),
+                len(all_rows),
+                len(overview.block_trade_heat),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[大盘] %s action=get_sector_money_flow status=failed error=%s",
+                self._log_context(),
+                exc,
+            )
+
     # def _get_north_flow(self, overview: MarketOverview):
     #     """获取北向资金流入"""
     #     try:
@@ -806,6 +921,8 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 "top": list(overview.top_sectors or []),
                 "bottom": list(overview.bottom_sectors or []),
             },
+            "sector_money_flow": list(overview.sector_money_flow or []),
+            "block_trade_heat": list(overview.block_trade_heat or []),
             "concepts": {
                 "top": list(overview.top_concepts or []),
                 "bottom": list(overview.bottom_concepts or []),
@@ -901,6 +1018,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         stats_block = self._build_stats_block(overview)
         indices_block = self._build_indices_block(overview)
         sector_block = self._build_sector_block(overview)
+        money_flow_block = self._build_sector_money_flow_block(overview)
         patterns = (
             _ENGLISH_SECTION_PATTERNS
             if self._get_review_language() == "en"
@@ -935,6 +1053,21 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                     else "### 三、板块主线"
                 )
                 review = f"{review.rstrip()}\n\n{fallback_heading}\n{sector_block}\n"
+
+        if money_flow_block:
+            original_review = review
+            review = self._insert_after_section(
+                review,
+                patterns["sector_highlights"],
+                money_flow_block,
+            )
+            if review == original_review and money_flow_block not in review:
+                fallback_heading = (
+                    "### 5. Sector Money Flow"
+                    if self._get_review_language() == "en"
+                    else "### 四、板块资金流"
+                )
+                review = f"{review.rstrip()}\n\n{fallback_heading}\n{money_flow_block}\n"
 
         return review
 
@@ -1172,6 +1305,83 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             append_ranking("#### 行业板块领跌 Top 5", "行业板块", overview.bottom_sectors)
             append_ranking("#### 概念板块领涨 Top 5", "概念板块", overview.top_concepts)
             append_ranking("#### 概念板块领跌 Top 5", "概念板块", overview.bottom_concepts)
+        return "\n".join(lines)
+
+    def _build_sector_money_flow_block(self, overview: MarketOverview) -> str:
+        """板块资金流分析（主力/中户/散户/暗盘）—— Markdown 表格.
+
+        主力 = 特大单 + 大单 净流入（来自 moneyflow_ind_dc.net_amount）
+        中户 = 中单 净流入（buy_md_amount）
+        散户 = 小单 净流入（buy_sm_amount）
+        暗盘 = 大宗交易聚合金额（block_trade），未覆盖时显示 —
+        """
+        rows = overview.sector_money_flow or []
+        if not rows:
+            return ""
+
+        language = self._get_review_language()
+        lines: List[str] = []
+
+        def fmt_money(value: Optional[float]) -> str:
+            if value is None:
+                return "—"
+            yi = value / 1e8  # 元 → 亿
+            sign = "+" if yi > 0 else ""
+            return f"{sign}{yi:.2f}亿"
+
+        if language == "en":
+            header = (
+                "#### Sector Money Flow — Main / Mid / Retail / Dark Pool"
+            )
+            lines.extend([
+                header,
+                "| Sector | Change | Main | Mid | Retail | Dark Pool | Lead |",
+                "|---------|--------|------|-----|--------|-----------|------|",
+            ])
+            for r in rows:
+                lines.append(
+                    "| {name} | {chg} | {main} | {mid} | {retail} | {block} | {lead} |".format(
+                        name=r.get("name", "-"),
+                        chg=self._format_signed_pct(r.get("pct_change")),
+                        main=fmt_money(r.get("main_net")),
+                        mid=fmt_money(r.get("mid_net")),
+                        retail=fmt_money(r.get("retail_net")),
+                        block=fmt_money(r.get("block_net")),
+                        lead=r.get("lead_stock") or "—",
+                    )
+                )
+            lines.append("")
+            lines.append(
+                "> Reading hint: when Main is significantly positive while "
+                "Retail is negative, large funds are taking chips from retail "
+                "despite the price drop — a classic accumulation pattern."
+            )
+        else:
+            header = "#### 板块资金流 —— 主力 / 中户 / 散户 / 暗盘"
+            lines.extend([
+                header,
+                "| 行业板块 | 涨跌幅 | 主力 | 中户 | 散户 | 暗盘 | 领涨股 |",
+                "|---------|--------|------|------|------|------|--------|",
+            ])
+            for r in rows:
+                lines.append(
+                    "| {name} | {chg} | {main} | {mid} | {retail} | {block} | {lead} |".format(
+                        name=r.get("name", "-"),
+                        chg=self._format_signed_pct(r.get("pct_change")),
+                        main=fmt_money(r.get("main_net")),
+                        mid=fmt_money(r.get("mid_net")),
+                        retail=fmt_money(r.get("retail_net")),
+                        block=fmt_money(r.get("block_net")),
+                        lead=r.get("lead_stock") or "—",
+                    )
+                )
+            lines.append("")
+            lines.append(
+                "> 阅读提示：主力净流入显著为正、散户净流入为负时，说明大资金在低位"
+                "吸收散户抛出的筹码；股价往往表现为滞涨或回调，但实际上是主力吸筹。"
+                "暗盘（大宗交易）若与主力同向，则可视为机构调仓的额外信号。"
+            )
+
         return "\n".join(lines)
 
     def _build_news_block(self, news: List) -> str:

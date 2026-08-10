@@ -3736,6 +3736,57 @@ class DataFetcherManager:
             )
             return self._copy_ranking_rows(cached_top), self._copy_ranking_rows(cached_bottom)
 
+    def get_sector_money_flow(
+        self,
+        top_n: int = 10,
+        trade_date: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """板块资金流分析（主力/中户/散户/暗盘净流入），自动切换数据源。
+
+        数据源优先级（按 A股 coverage 由高到低）：
+        1. Tushare ``moneyflow_ind_dc``（含 buy_elg/lg/md/sm_amount 四档拆分）
+        2. Akshare（概念资金流降级）
+
+        Returns:
+            按主力净流入绝对值排序的列表，每条形如::
+
+                {
+                    'name': '电子',
+                    'ts_code': 'BK1201.DC',
+                    'pct_change': 3.15,
+                    'main_net': 26.7e8,       # 主力净流入（特大+大单，元）
+                    'mid_net': -12.0e8,       # 中户净流入（元）
+                    'retail_net': -14.9e8,    # 散户净流入（=小单，元）
+                    'block_net': 5.0e8,        # 暗盘/大宗交易净流入（元），可能为 None
+                    'lead_stock': '兆易创新',
+                    'source': 'tushare_dc',
+                }
+        """
+        last_error = ""
+        for fetcher in self._fetchers:
+            fetcher_name = getattr(fetcher, "name", fetcher.__class__.__name__)
+            try:
+                impl = getattr(fetcher, "get_sector_money_flow", None)
+                if impl is None:
+                    continue
+                rows = impl(top_n=top_n, trade_date=trade_date)
+                if rows:
+                    logger.info(
+                        "[%s] 获取板块资金流成功 rows=%d", fetcher_name, len(rows),
+                    )
+                    return [dict(r) if isinstance(r, dict) else r for r in rows]
+                last_error = f"{fetcher_name}返回空结果"
+            except Exception as e:
+                error_type, error_reason = summarize_exception(e)
+                last_error = f"{fetcher_name} ({error_type}) {error_reason}"
+                logger.warning(
+                    "[%s] 获取板块资金流失败: %s", fetcher_name, error_reason,
+                )
+
+        if last_error:
+            logger.warning("[板块资金流] 所有数据源均失败，最终错误: %s", last_error)
+        return []
+
     def get_hot_stocks(self, n: int = 10) -> List[Dict[str, Any]]:
         """获取市场人气股榜（自动切换数据源）。"""
         last_error = ""

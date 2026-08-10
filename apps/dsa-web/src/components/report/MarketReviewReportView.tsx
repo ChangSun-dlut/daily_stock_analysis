@@ -48,6 +48,8 @@ type StructuredMarketData = {
   indices: NonNullable<MarketReviewPayload['indices']>;
   sectors?: MarketReviewPayload['sectors'];
   concepts?: MarketReviewPayload['concepts'];
+  sector_money_flow?: MarketReviewPayload['sector_money_flow'];
+  block_trade_heat?: MarketReviewPayload['block_trade_heat'];
 };
 
 const isMarketReviewPayload = (value: unknown): value is MarketReviewPayload =>
@@ -174,7 +176,13 @@ const hasRankingRows = (rankings?: MarketReviewPayload['sectors']): boolean =>
   Boolean(rankings?.top?.length || rankings?.bottom?.length);
 
 const hasStructuredMarketData = (payload?: MarketReviewPayload | null): boolean =>
-  Boolean(payload?.breadth || payload?.indices?.length || hasRankingRows(payload?.sectors) || hasRankingRows(payload?.concepts));
+  Boolean(
+    payload?.breadth ||
+      payload?.indices?.length ||
+      hasRankingRows(payload?.sectors) ||
+      hasRankingRows(payload?.concepts) ||
+      (payload?.sector_money_flow?.length ?? 0) > 0,
+  );
 
 const getStructuredMarketData = (payload?: MarketReviewPayload | null): StructuredMarketData[] => {
   if (!payload) {
@@ -191,6 +199,7 @@ const getStructuredMarketData = (payload?: MarketReviewPayload | null): Structur
         indices: marketPayload.indices || [],
         sectors: marketPayload.sectors,
         concepts: marketPayload.concepts,
+        sector_money_flow: marketPayload.sector_money_flow,
       }));
   }
 
@@ -205,6 +214,8 @@ const getStructuredMarketData = (payload?: MarketReviewPayload | null): Structur
     indices: payload.indices || [],
     sectors: payload.sectors,
     concepts: payload.concepts,
+    sector_money_flow: payload.sector_money_flow,
+    block_trade_heat: payload.block_trade_heat,
   }];
 };
 
@@ -279,6 +290,23 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
   conceptBoards: string;
   leading: string;
   lagging: string;
+  sectorMoneyFlow: string;
+  sectorMain: string;
+  sectorMain5d: string;
+  sectorMid: string;
+  sectorRetail: string;
+  sectorBlock: string;
+  sectorLead: string;
+  sectorMoneyFlowHint: string;
+  sectorMoneyFlowEmpty: string;
+  sectorIntent: string;
+  sectorIntentAccumulate: string;
+  sectorIntentDistribute: string;
+  sectorIntentReflow: string;
+  sectorIntentNeutral: string;
+  sectorIntentAccumulateDesc: string;
+  sectorIntentDistributeDesc: string;
+  sectorIntentReflowDesc: string;
 }> = {
   zh: {
     reviewSummary: '复盘摘要',
@@ -302,6 +330,24 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
     conceptBoards: '概念板块',
     leading: '领涨',
     lagging: '领跌',
+    sectorMoneyFlow: '板块资金流（主力 / 中户 / 散户 / 暗盘）',
+    sectorMain: '主力',
+    sectorMain5d: '5日主力',
+    sectorMid: '中户',
+    sectorRetail: '散户',
+    sectorBlock: '暗盘',
+    sectorLead: '领涨股',
+    sectorMoneyFlowHint:
+      '阅读提示：主力净流入显著为正、散户净流入为负时，说明大资金在低位吸收散户筹码；股价可能滞涨或回调，但实际是主力吸筹。暗盘（大宗交易）若与主力同向，可视为机构调仓的额外信号。',
+    sectorMoneyFlowEmpty: '板块资金流数据暂不可用',
+    sectorIntent: '主力意图',
+    sectorIntentAccumulate: '主力吸筹',
+    sectorIntentDistribute: '主力出货',
+    sectorIntentReflow: '主力回流',
+    sectorIntentNeutral: '观望',
+    sectorIntentAccumulateDesc: '主力流入 + 散户流出，经典吸筹信号',
+    sectorIntentDistributeDesc: '主力流出，无暗盘托盘',
+    sectorIntentReflowDesc: '主力流出，但暗盘正向接盘（机构反向接货）',
   },
   en: {
     reviewSummary: 'Review Summary',
@@ -325,6 +371,24 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
     conceptBoards: 'Concept Themes',
     leading: 'Leading',
     lagging: 'Lagging',
+    sectorMoneyFlow: 'Sector Money Flow (Main / Mid / Retail / Dark Pool)',
+    sectorMain: 'Main',
+    sectorMain5d: '5D Main',
+    sectorMid: 'Mid',
+    sectorRetail: 'Retail',
+    sectorBlock: 'Dark Pool',
+    sectorLead: 'Lead Stock',
+    sectorMoneyFlowHint:
+      'Reading hint: when Main is strongly positive while Retail is negative, large funds are absorbing retail chips; price may stagnate, but this is classic accumulation. Block trades moving with Main reinforce the institutional positioning thesis.',
+    sectorMoneyFlowEmpty: 'Sector money flow data is currently unavailable',
+    sectorIntent: 'Main Intent',
+    sectorIntentAccumulate: 'Accumulation',
+    sectorIntentDistribute: 'Distribution',
+    sectorIntentReflow: 'Reflow',
+    sectorIntentNeutral: 'Neutral',
+    sectorIntentAccumulateDesc: 'Main inflow + retail outflow = classic accumulation',
+    sectorIntentDistributeDesc: 'Main outflow with no dark-pool support',
+    sectorIntentReflowDesc: 'Main outflow but dark pool absorbing (institutional re-entry)',
   },
   ko: {
     reviewSummary: '리뷰 요약',
@@ -348,6 +412,24 @@ const MARKET_REVIEW_TEXT: Record<ReportLanguage, {
     conceptBoards: '테마 섹터',
     leading: '강세',
     lagging: '약세',
+    sectorMoneyFlow: '섹터 자금 흐름 (주력 / 중간 / 개인 / 다크풀)',
+    sectorMain: '주력',
+    sectorMain5d: '5일 주력',
+    sectorMid: '중간',
+    sectorRetail: '개인',
+    sectorBlock: '다크풀',
+    sectorLead: '선두 종목',
+    sectorMoneyFlowHint:
+      '주력 자금 유입이 강한 양수이고 개인 자금 유입이 음수일 때, 대형 기관이 저점에서 개인 물량을 흡수하고 있음을 의미합니다. 가격이 정체되거나 하락해도 실제로는 주력 매집 단계입니다.',
+    sectorMoneyFlowEmpty: '섹터 자금 흐름 데이터를 사용할 수 없습니다',
+    sectorIntent: '주력 의도',
+    sectorIntentAccumulate: '매집',
+    sectorIntentDistribute: '분배',
+    sectorIntentReflow: '재유입',
+    sectorIntentNeutral: '관망',
+    sectorIntentAccumulateDesc: '주력 유입 + 개인 유출 = 전형적인 매집',
+    sectorIntentDistributeDesc: '주력 유출, 다크풀 지지 없음',
+    sectorIntentReflowDesc: '주력 유출이지만 다크풀 흡수 (기관 재진입)',
   },
 };
 
@@ -358,6 +440,163 @@ const formatRankingChange = (value: unknown): string => {
   }
   const sign = numeric > 0 ? '+' : '';
   return `${sign}${numeric.toFixed(2)}%`;
+};
+
+const formatYiMoney = (yuanValue: unknown): string => {
+  const numeric = coerceFiniteNumber(yuanValue);
+  if (numeric === null) {
+    return '-';
+  }
+  const yi = numeric / 1e8;
+  const sign = yi > 0 ? '+' : yi < 0 ? '' : '';
+  return `${sign}${yi.toFixed(2)}亿`;
+};
+
+const toneForMoney = (value: unknown): 'up' | 'down' | 'neutral' => {
+  const numeric = coerceFiniteNumber(value);
+  if (numeric === null || numeric === 0) return 'neutral';
+  return numeric > 0 ? 'up' : 'down';
+};
+
+type MoneyText = {
+  sectorMoneyFlow: string;
+  sectorMain: string;
+  sectorMain5d: string;
+  sectorMid: string;
+  sectorRetail: string;
+  sectorBlock: string;
+  sectorLead: string;
+  sectorMoneyFlowHint: string;
+  sectorMoneyFlowEmpty: string;
+  sectorIntent: string;
+  sectorIntentAccumulate: string;
+  sectorIntentDistribute: string;
+  sectorIntentReflow: string;
+  sectorIntentNeutral: string;
+  sectorIntentAccumulateDesc: string;
+  sectorIntentDistributeDesc: string;
+  sectorIntentReflowDesc: string;
+};
+
+const renderSectorMoneyFlowSection = (
+  rows: NonNullable<MarketReviewPayload['sector_money_flow']>,
+  text: MoneyText,
+  blockTradeHeat?: MarketReviewPayload['block_trade_heat'],
+) => {
+  if (!rows.length) return null;
+  return (
+    <div className="rounded-lg border border-subtle p-3">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <p className="label-uppercase">{text.sectorMoneyFlow}</p>
+        <span className="text-xs text-secondary-text">{rows.length}</span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-sm">
+          <thead className="text-left text-xs uppercase text-muted-text">
+            <tr>
+              <th className="px-2 py-2">板块</th>
+              <th className="px-2 py-2">{text.sectorLead}</th>
+              <th className="px-2 py-2 text-right">{text.sectorMain}</th>
+              <th className="px-2 py-2 text-right">{text.sectorMain5d}</th>
+              <th className="px-2 py-2 text-right">{text.sectorMid}</th>
+              <th className="px-2 py-2 text-right">{text.sectorRetail}</th>
+              <th className="px-2 py-2 text-right">{text.sectorBlock}</th>
+              <th className="px-2 py-2 text-center">{text.sectorIntent}</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-subtle">
+            {rows.slice(0, 10).map((row, index) => (
+              <tr key={`${row.name}-${index}`}>
+                <td className="px-2 py-2 font-medium text-foreground">
+                  <div className="flex flex-col">
+                    <span>{row.name || '-'}</span>
+                    <span className="text-xs text-secondary-text">
+                      {formatRankingChange(row.pct_change)}
+                    </span>
+                  </div>
+                </td>
+                <td className="px-2 py-2 text-secondary-text">{row.lead_stock || '-'}</td>
+                <MoneyCell value={row.main_net} tone={toneForMoney(row.main_net)} />
+                <MoneyCell value={row.main_net_5d} tone={toneForMoney(row.main_net_5d)} />
+                <MoneyCell value={row.mid_net} tone={toneForMoney(row.mid_net)} />
+                <MoneyCell value={row.retail_net} tone={toneForMoney(row.retail_net)} />
+                <MoneyCell value={row.block_net} tone={toneForMoney(row.block_net)} />
+                <IntentCell intent={row.intent} text={text} />
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-3 text-xs leading-relaxed text-secondary-text">{text.sectorMoneyFlowHint}</p>
+      {blockTradeHeat && blockTradeHeat.length > 0
+        ? renderBlockTradeHeatSection(blockTradeHeat, text)
+        : null}
+    </div>
+  );
+};
+
+const IntentCell: React.FC<{ intent?: string; text: MoneyText }> = ({ intent, text }) => {
+  const meta = (() => {
+    switch (intent) {
+      case 'accumulate':
+        return { label: text.sectorIntentAccumulate, className: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300', desc: text.sectorIntentAccumulateDesc };
+      case 'distribute':
+        return { label: text.sectorIntentDistribute, className: 'bg-red-500/15 text-red-600 dark:text-red-300', desc: text.sectorIntentDistributeDesc };
+      case 'reflow':
+        return { label: text.sectorIntentReflow, className: 'bg-amber-500/15 text-amber-600 dark:text-amber-300', desc: text.sectorIntentReflowDesc };
+      case 'neutral':
+      default:
+        return { label: text.sectorIntentNeutral, className: 'bg-secondary/30 text-secondary-text', desc: '' };
+    }
+  })();
+  return (
+    <td className="px-2 py-2 text-center">
+      <span
+        className={`inline-block max-w-full rounded px-1.5 py-0.5 text-xs font-medium ${meta.className}`}
+        title={meta.desc}
+      >
+        {meta.label}
+      </span>
+    </td>
+  );
+};
+
+const renderBlockTradeHeatSection = (
+  trades: NonNullable<MarketReviewPayload['block_trade_heat']>,
+  text: MoneyText,
+) => {
+  if (!trades.length) return null;
+  return (
+    <div className="mt-3 rounded border border-secondary px-3 py-2">
+      <p className="mb-2 text-xs font-semibold text-accent">
+        {text.sectorBlock}热点（暗盘最活跃的行业）
+      </p>
+      <div className="space-y-1.5">
+        {trades.map((t, i) => (
+          <div key={i} className="flex items-center justify-between text-xs">
+            <span className="font-medium min-w-[80px]">{t.name}</span>
+            <span className="text-muted-text">{formatRankingChange(t.pct_change)}</span>
+            <span className="text-[#34d399] dark:text-[#6ee7b7]">{formatYiMoney(t.block_net)}</span>
+            <span className="text-secondary-text truncate ml-2">{t.lead_stock || ''}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const MoneyCell: React.FC<{ value: unknown; tone: 'up' | 'down' | 'neutral' }> = ({ value, tone }) => {
+  const toneClass =
+    tone === 'up'
+      ? 'text-[#f87171] dark:text-[#fca5a5]'
+      : tone === 'down'
+        ? 'text-[#34d399] dark:text-[#6ee7b7]'
+        : 'text-secondary-text';
+  return (
+    <td className={`px-2 py-2 text-right font-mono tabular-nums ${toneClass}`}>
+      {formatYiMoney(value)}
+    </td>
+  );
 };
 
 export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
@@ -702,6 +941,9 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
                     </div>
                   );
                 })()}
+                {marketData.sector_money_flow && marketData.sector_money_flow.length > 0
+                  ? renderSectorMoneyFlowSection(marketData.sector_money_flow, marketReviewText, marketData.block_trade_heat)
+                  : null}
               </div>
             ))}
           </div>

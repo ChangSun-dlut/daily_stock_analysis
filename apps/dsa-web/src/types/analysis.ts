@@ -287,10 +287,28 @@ export interface MarketReviewPayload {
   indices?: MarketReviewIndex[];
   sectors?: SectorRankings;
   concepts?: SectorRankings;
+  sector_money_flow?: SectorMoneyFlowRow[];
+  block_trade_heat?: Array<{ name: string; pct_change?: number | string | null; main_net?: number | string | null; block_net?: number | string | null; lead_stock?: string | null }>;
   news?: Array<Record<string, unknown>>;
   sections?: MarketReviewPayloadSection[];
   markets?: Record<string, MarketReviewPayload>;
   markdownReport?: string;
+}
+
+export interface SectorMoneyFlowRow {
+  name: string;
+  ts_code?: string;
+  content_type?: string;
+  pct_change?: number | string | null;
+  main_net?: number | string | null;
+  main_net_5d?: number | string | null;
+  mid_net?: number | string | null;
+  retail_net?: number | string | null;
+  block_net?: number | string | null;
+  block_net_source?: 'industry' | 'lead_stock' | string;
+  lead_stock?: string | null;
+  source?: string;
+  intent?: 'accumulate' | 'distribute' | 'reflow' | 'neutral' | string;
 }
 
 export type AnalysisContextPackBlockStatus =

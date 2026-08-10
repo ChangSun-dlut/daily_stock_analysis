@@ -18,7 +18,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 import markdown2
 

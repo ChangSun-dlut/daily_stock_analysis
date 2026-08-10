@@ -133,6 +133,16 @@ class _TushareHttpClient:
         return caller
 
 
+def _safe_pct_change(value: Any) -> float:
+    """Safe float coercion for Tushare pct_change (returns 0.0 on failure)."""
+    try:
+        if value is None:
+            return 0.0
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class TushareFetcher(BaseFetcher):
     """
     Tushare Pro 数据源实现
@@ -1259,10 +1269,347 @@ class TushareFetcher(BaseFetcher):
         
         # 获取为空或者接口调用失败，返回 None
         return None
-    
-    
 
-    
+    def get_sector_money_flow(
+        self,
+        top_n: int = 10,
+        trade_date: Optional[str] = None,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """板块资金流（主力/中户/散户/暗盘）分析.
+
+        数据源：
+        - ``moneyflow_ind_dc``（东方财富，含 buy_elg/lg/md/sm_amount 拆分）
+        - ``block_trade``（大宗交易，按行业聚合，并按 lead_stock 补全）
+
+        返回按 ``main_net`` 绝对值排序的前 ``top_n`` 个板块。
+        缺失暗盘/大宗交易数据时，``block_net`` 设为 ``None``，前端会显示 "—"。
+        """
+        try:
+            start_date = trade_date or self.get_trade_time(early_time="00:00", late_time="15:30")
+            if not start_date:
+                logger.warning("[Tushare] 无法确定板块资金流日期")
+                return None
+
+            logger.info("[Tushare] 获取板块资金流（%s）...", start_date)
+            df = self._call_api_with_rate_limit("moneyflow_ind_dc", trade_date=start_date)
+            if df is None or df.empty:
+                logger.info("[Tushare] moneyflow_ind_dc 返回空，跳过板块资金流")
+                return None
+
+            # 仅看"行业"content_type，排除"概念/其他"
+            if "content_type" in df.columns:
+                df = df[df["content_type"].astype(str) == "行业"].copy()
+                if df.empty:
+                    logger.info("[Tushare] moneyflow_ind_dc 行业分类为空")
+                    return None
+
+            # 把 buy_*_amount 的字符串列归一化（单位：元，Tushare 默认单位）
+            money_cols = [
+                "net_amount", "buy_elg_amount", "buy_lg_amount",
+                "buy_md_amount", "buy_sm_amount",
+            ]
+            for col in money_cols:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+                else:
+                    df[col] = 0.0
+
+            rows: List[Dict[str, Any]] = []
+            for _, row in df.iterrows():
+                name = str(row.get("name", "")).strip()
+                if not name:
+                    continue
+                # 主力净流入：特大单 + 大单，moneyflow_ind_dc 的 net_amount 已经
+                # 等于特大单 + 大单的净流入，但为防御起见仍按字段名直接读取。
+                main_net = float(row.get("net_amount", 0.0))
+                rows.append(
+                    {
+                        "name": name,
+                        "ts_code": str(row.get("ts_code", "")).strip(),
+                        "content_type": "行业",
+                        "pct_change": _safe_pct_change(row.get("pct_change")),
+                        "main_net": main_net,
+                        "mid_net": float(row.get("buy_md_amount", 0.0)),
+                        "retail_net": float(row.get("buy_sm_amount", 0.0)),
+                        "block_net": None,  # 第二步由 block_trade 填充
+                        "lead_stock": str(row.get("buy_sm_amount_stock", "")).strip() or None,
+                        "source": "tushare_dc",
+                    }
+                )
+
+            # 注入暗盘（大宗交易）按行业聚合
+            self._merge_block_trade_into_sector_money_flow(rows, trade_date=start_date)
+
+            # 第二轮：按 lead_stock 名称补全（覆盖 stock_basic.industry 严格匹配
+            # 漏掉的"同一 lead_stock 跨多板块"场景）
+            self._supplement_block_net_by_lead_stock(rows, trade_date=start_date)
+
+            # 五日主力净流入
+            self._merge_5d_main_net(rows, trade_date=start_date)
+
+            # 行业板块展示策略：涨幅 top_n/2 + 跌幅 top_n/2，覆盖涨跌两极
+            # top_n >= 999 表示请求全量（用于 block_trade_heat 等下游）
+            if int(top_n) >= 999:
+                return rows
+            return self._select_top_gainers_and_losers(rows, top_n=max(1, int(top_n)))
+        except Exception as exc:
+            logger.warning("[Tushare] 获取板块资金流失败: %s", exc)
+            return None
+
+    def _merge_block_trade_into_sector_money_flow(
+        self,
+        rows: List[Dict[str, Any]],
+        trade_date: str,
+    ) -> None:
+        """把 Tushare 大宗交易按行业聚合后回写到 ``rows`` 的 ``block_net`` 字段.
+
+        依赖 ``stock_basic`` 拉取每只股票所属 industry（行业板块名）；
+        单只股票缺失 industry 时该笔大宗交易会被跳过。
+        """
+        if not rows:
+            return
+        try:
+            block_df = self._call_api_with_rate_limit("block_trade", trade_date=trade_date)
+            if block_df is None or block_df.empty:
+                logger.info("[Tushare] block_trade 返回空，无暗盘数据")
+                return
+            if "amount" not in block_df.columns:
+                return
+            block_df["amount"] = pd.to_numeric(block_df["amount"], errors="coerce").fillna(0.0)
+            ts_codes = sorted({str(c) for c in block_df.get("ts_code", []) if c})
+            if not ts_codes:
+                return
+
+            industry_map = self._load_industry_map(ts_codes)
+            if not industry_map:
+                logger.info("[Tushare] 未能建立 stock_code->industry 映射，跳过暗盘聚合")
+                return
+
+            agg: Dict[str, float] = {}
+            for _, b in block_df.iterrows():
+                ind = industry_map.get(str(b["ts_code"]))
+                if not ind:
+                    continue
+                agg[ind] = agg.get(ind, 0.0) + float(b["amount"])
+
+            for row in rows:
+                ind = row.get("name")
+                if ind in agg:
+                    # Tushare block_trade.amount 单位：万元 → 元
+                    row["block_net"] = agg[ind] * 1e4
+        except Exception as exc:
+            logger.debug("[Tushare] 暗盘聚合失败，跳过: %s", exc)
+
+    def _supplement_block_net_by_lead_stock(
+        self,
+        rows: List[Dict[str, Any]],
+        trade_date: str,
+    ) -> None:
+        """按 lead_stock 所在的申万行业补全暗盘数据。
+
+        ``_merge_block_trade_into_sector_money_flow`` 按 stock_basic.industry
+        严格匹配板块名，但 moneyflow_ind_dc（东财 ~496 个细分行业）与
+        stock_basic.industry（申万 ~110 个中类）名称体系不兼容，仅约 7% 能
+        直接匹配。该方法退而求其次：以 lead_stock 为锚，找出它所属的**申万行业
+        全量** block_trade 总额，作为该东财板块的暗盘近似值。
+
+        lead_stock 通常是板块内主力资金活跃度最高的股票，其申万行业可以作为
+        "该板块最近的标的池"的代理。
+        """
+        if not rows:
+            return
+        try:
+            bt_df = self._call_api_with_rate_limit("block_trade", trade_date=trade_date)
+            if bt_df is None or bt_df.empty:
+                return
+            bt_df = bt_df.copy()
+            bt_df["amount"] = pd.to_numeric(bt_df["amount"], errors="coerce").fillna(0.0)
+            ts_codes = sorted({str(c) for c in bt_df["ts_code"] if c})
+
+            # 申万行业暗盘聚合（一次性算全部行业）
+            bs_map = self._load_basic_industry_map(ts_codes)
+            if not bs_map:
+                return
+            ind_blocks: Dict[str, float] = {}
+            for _, b in bt_df.iterrows():
+                ind = bs_map.get(str(b["ts_code"]))
+                if ind:
+                    ind_blocks[ind] = ind_blocks.get(ind, 0.0) + float(b["amount"]) * 1e4
+
+            # ts_code → 申万行业（仅用于 lead_stock 反查）
+            name_to_ind: Dict[str, str] = {}
+            try:
+                basic = self._call_api_with_rate_limit("stock_basic", list_status="L")
+                if basic is not None and not basic.empty:
+                    basic["ts_code"] = basic["ts_code"].astype(str)
+                    for _, r in basic.iterrows():
+                        nm = str(r.get("name", "")).strip()
+                        ind = str(r.get("industry", "")).strip()
+                        if nm and ind:
+                            name_to_ind[nm] = ind
+            except Exception:
+                pass
+
+            for row in rows:
+                lead = (row.get("lead_stock") or "").strip()
+                if not lead:
+                    continue
+                existing = row.get("block_net")
+                if isinstance(existing, (int, float)) and existing > 0:
+                    continue
+                sw_ind = name_to_ind.get(lead)
+                if not sw_ind:
+                    continue
+                if sw_ind in ind_blocks and ind_blocks[sw_ind] > 0:
+                    val = ind_blocks[sw_ind]
+                if val > 0:
+                    row["block_net"] = val
+                    row["block_net_source"] = "lead_industry"
+        except Exception as exc:
+            logger.debug("[Tushare] lead_stock 申万行业暗盘补全失败: %s", exc)
+
+    def _load_basic_name_map(self, ts_codes: List[str]) -> Dict[str, str]:
+        """ts_code → 股票名称（仅名称），供 lead_stock 反查用。"""
+        cache = getattr(self, "_basic_name_cache", None)
+        now = time.time()
+        if cache and cache.get("ts_codes") == set(ts_codes) and now - cache.get("fetched_at", 0) < 300:
+            return cache.get("map", {})
+
+        mapping: Dict[str, str] = {}
+        try:
+            df = self._call_api_with_rate_limit("stock_basic", list_status="L")
+            if df is not None and not df.empty:
+                df["ts_code"] = df["ts_code"].astype(str)
+                target = set(ts_codes)
+                for _, row in df.iterrows():
+                    ts = str(row["ts_code"])
+                    nm = str(row.get("name", "")).strip()
+                    if ts in target and nm:
+                        mapping[ts] = nm
+        except Exception as exc:
+            logger.debug("[Tushare] 加载 stock_basic 名称失败: %s", exc)
+
+        self._basic_name_cache = {
+            "ts_codes": set(ts_codes),
+            "fetched_at": now,
+            "map": mapping,
+        }
+        return mapping
+
+    def _load_basic_industry_map(
+        self, ts_codes: List[str]
+    ) -> Dict[str, str]:
+        """ts_code → stock_basic.industry（申万行业名），用于暗盘聚合."""
+        cache = getattr(self, "_basic_ind_cache", None)
+        now = time.time()
+        if cache and cache.get("ts_codes") == set(ts_codes) and now - cache.get("fetched_at", 0) < 300:
+            return cache.get("map", {})
+
+        mapping: Dict[str, str] = {}
+        try:
+            df = self._call_api_with_rate_limit("stock_basic", list_status="L")
+            if df is not None and not df.empty:
+                df["ts_code"] = df["ts_code"].astype(str)
+                target = set(ts_codes)
+                for _, row in df.iterrows():
+                    ts = str(row["ts_code"])
+                    if ts in target:
+                        ind = str(row.get("industry", "")).strip()
+                        if ind:
+                            mapping[ts] = ind
+        except Exception as exc:
+            logger.debug("[Tushare] 加载 stock_basic industry 失败: %s", exc)
+
+        self._basic_ind_cache = {
+            "ts_codes": set(ts_codes),
+            "fetched_at": now,
+            "map": mapping,
+        }
+        return mapping
+
+    @staticmethod
+    def _select_top_gainers_and_losers(rows: list, top_n: int = 10) -> list:
+        """行业板块展示策略：涨幅 top_n/2 + 跌幅 top_n/2.
+
+        无论大盘涨还是跌，板块资金流表格都会同时覆盖最强和最弱的两极，
+        与行业板块"领涨/领跌"展示保持一致。
+        """
+        valid = [r for r in rows if isinstance(r.get("pct_change"), (int, float))]
+        top_up = sorted(valid, key=lambda r: r["pct_change"], reverse=True)[: top_n // 2]
+        top_down = sorted(valid, key=lambda r: r["pct_change"])[: top_n - top_n // 2]
+        return top_up + top_down
+
+    def _merge_5d_main_net(
+        self,
+        rows: list,
+        trade_date: str,
+    ) -> None:
+        """为每行注入 ``main_net_5d``（最近 5 交易日主力净流入之和，元）。
+
+        从 ``moneyflow_ind_dc`` 拉取 60 天数据，按板块名聚合最近 5 日。
+        """
+        if not rows:
+            return
+        try:
+            import datetime
+
+            end_dt = datetime.datetime.strptime(trade_date, "%Y%m%d")
+            start_dt = end_dt - datetime.timedelta(days=60)
+            df_all = self._call_api_with_rate_limit(
+                "moneyflow_ind_dc",
+                start_date=start_dt.strftime("%Y%m%d"),
+                end_date=end_dt.strftime("%Y%m%d"),
+            )
+            if df_all is None or df_all.empty:
+                return
+            if "content_type" in df_all.columns:
+                df_all = df_all[df_all["content_type"].astype(str) == "行业"].copy()
+            if df_all.empty:
+                return
+
+            df_all["net_amount"] = pd.to_numeric(df_all["net_amount"], errors="coerce").fillna(0.0)
+            dates = sorted({str(d) for d in df_all["trade_date"].unique()})
+            last5 = dates[-5:]
+            df5 = df_all[df_all["trade_date"].astype(str).isin(last5)]
+
+            agg = df5.groupby("name")["net_amount"].sum().to_dict()
+            for row in rows:
+                name = row.get("name", "")
+                if name and name in agg:
+                    row["main_net_5d"] = agg[name]
+        except Exception as exc:
+            logger.debug("[Tushare] 5日主力净流入聚合失败: %s", exc)
+
+    def _load_industry_map(self, ts_codes: List[str]) -> Dict[str, str]:
+        """拉取 ``ts_code -> industry`` 映射（行业板块名）。
+
+        使用 5 分钟缓存，避免重复拉 ``stock_basic``。
+        """
+        cache = getattr(self, "_industry_map_cache", None)
+        now = time.time()
+        if cache and cache.get("ts_codes") == set(ts_codes) and now - cache.get("fetched_at", 0) < 300:
+            return cache.get("map", {})
+
+        mapping: Dict[str, str] = {}
+        try:
+            df = self._call_api_with_rate_limit("stock_basic", list_status="L")
+            if df is not None and not df.empty and "industry" in df.columns:
+                df["ts_code"] = df["ts_code"].astype(str)
+                mapping = {
+                    str(row["ts_code"]): str(row["industry"]).strip()
+                    for _, row in df.iterrows()
+                    if str(row.get("industry", "")).strip()
+                }
+        except Exception as exc:
+            logger.debug("[Tushare] 加载 stock_basic 失败: %s", exc)
+
+        self._industry_map_cache = {
+            "ts_codes": set(ts_codes),
+            "fetched_at": now,
+            "map": mapping,
+        }
+        return mapping
+
     def get_chip_distribution(self, stock_code: str) -> Optional[ChipDistribution]:
         """
         获取筹码分布数据
