@@ -148,29 +148,50 @@ def _markdown_to_image_m2f(
 
     temp_dir = None
     try:
-        temp_dir = tempfile.mkdtemp()
-        md_path = os.path.join(temp_dir, "report.md")
-        with open(md_path, "w", encoding="utf-8") as f:
-            # m2f keeps raw HTML in Markdown input, allowing both engines to
-            # share the same deterministic poster layout and embedded QR codes.
-            f.write(
-                build_share_image_html(
-                    markdown_text,
-                    structured_payload=structured_payload,
-                    branding=branding,
+        # m2f's bundled puppeteer-core Chromium can crash on first cold-start
+        # (especially macOS ARM).  Retry up to 2 extra times before giving up.
+        for attempt in range(3):
+            temp_dir = tempfile.mkdtemp()
+            md_path = os.path.join(temp_dir, "report.md")
+            with open(md_path, "w", encoding="utf-8") as f:
+                f.write(
+                    build_share_image_html(
+                        markdown_text,
+                        structured_payload=structured_payload,
+                        branding=branding,
+                    )
                 )
-            )
 
-        result = subprocess.run(
-            [m2f_command, md_path, "png", f"outputDirectory={temp_dir}"],
-            capture_output=True,
-            timeout=60,
-            check=False,
-        )
-        png_path = os.path.join(temp_dir, "report.png")
-        if result.returncode != 0 or not os.path.isfile(png_path):
+            result = subprocess.run(
+                [m2f_command, md_path, "png", f"outputDirectory={temp_dir}"],
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+            png_path = os.path.join(temp_dir, "report.png")
+            if result.returncode == 0 and os.path.isfile(png_path):
+                _m2f_healthy = True
+                _m2f_unhealthy_since = None
+                with open(png_path, "rb") as f:
+                    data = f.read()
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return data
+
+            if attempt < 2:
+                stderr_tail = (result.stderr or b"").decode("utf-8", errors="replace")[:200]
+                logger.info(
+                    "m2f attempt %d/3 failed (rc=%d, stderr=%s), retrying...",
+                    attempt + 1,
+                    result.returncode,
+                    stderr_tail,
+                )
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                time.sleep(2)  # give puppeteer's Chromium a chance to settle
+                continue
+
+            # 3 attempts all failed — mark unhealthy
             logger.info(
-                "m2f conversion skipped (engine unavailable, will fallback): "
+                "m2f conversion skipped (3 attempts exhausted): "
                 "returncode=%s, stderr=%s",
                 result.returncode,
                 (result.stderr or b"").decode("utf-8", errors="replace")[:200],
@@ -178,13 +199,8 @@ def _markdown_to_image_m2f(
             _m2f_healthy = False
             _m2f_unhealthy_since = time.monotonic()
             return None
-
-        _m2f_healthy = True
-        _m2f_unhealthy_since = None
-        with open(png_path, "rb") as f:
-            return f.read()
     except subprocess.TimeoutExpired:
-        logger.warning("m2f conversion timed out (60s)")
+        logger.warning("m2f conversion timed out (60s×3)")
         _m2f_healthy = False
         _m2f_unhealthy_since = time.monotonic()
         return None
@@ -193,12 +209,6 @@ def _markdown_to_image_m2f(
         _m2f_healthy = False
         _m2f_unhealthy_since = time.monotonic()
         return None
-    finally:
-        if temp_dir and os.path.isdir(temp_dir):
-            try:
-                shutil.rmtree(temp_dir)
-            except OSError as e:
-                logger.debug("Failed to remove temp dir %s: %s", temp_dir, e)
 
 
 def _markdown_to_image_wkhtml(

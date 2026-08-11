@@ -1460,8 +1460,8 @@ class TushareFetcher(BaseFetcher):
                 sw_ind = name_to_ind.get(lead)
                 if not sw_ind:
                     continue
-                if sw_ind in ind_blocks and ind_blocks[sw_ind] > 0:
-                    val = ind_blocks[sw_ind]
+                # FIX: 直接取默认值 0，避免上一轮未赋值导致 NameError
+                val = ind_blocks.get(sw_ind, 0.0)
                 if val > 0:
                     row["block_net"] = val
                     row["block_net_source"] = "lead_industry"
