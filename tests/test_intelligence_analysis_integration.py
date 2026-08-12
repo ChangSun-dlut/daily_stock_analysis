@@ -10,11 +10,27 @@ import unittest
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
+import pytest
+
 from src.config import Config, get_config
 from src.core.pipeline import StockAnalysisPipeline
 from src.market_analyzer import MarketAnalyzer, MarketIndex, MarketOverview
 from src.repositories.intelligence_repo import IntelligenceRepository
 from src.storage import DatabaseManager
+
+
+@pytest.fixture(autouse=True)
+def _isolate_real_env(monkeypatch, tmp_path):
+    """Prevent get_config() from loading real .env and leaking keys
+    (e.g. LITELLM_FALLBACK_MODELS) into os.environ, polluting later tests."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("STOCK_LIST=600519,000001\n", encoding="utf-8")
+    monkeypatch.setenv("ENV_FILE", str(env_file))
+    Config.reset_instance()
+    DatabaseManager.reset_instance()
+    yield
+    DatabaseManager.reset_instance()
+    Config.reset_instance()
 
 
 class PersistedIntelligenceAnalysisIntegrationTestCase(unittest.TestCase):

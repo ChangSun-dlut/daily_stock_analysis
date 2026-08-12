@@ -22,7 +22,11 @@ import time
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from src.share_image import ShareImageBranding, build_share_image_html
+from src.share_image import (
+    ShareImageBranding,
+    build_share_image_html,
+    share_image_branding_from_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +45,7 @@ _M2F_HEALTH_TTL_SECONDS = 60.0
 
 
 def _share_image_branding(config: object) -> ShareImageBranding:
-    return ShareImageBranding(
-        xiaohongshu_url=str(getattr(config, "share_image_xiaohongshu_url", None) or ""),
-        xiaohongshu_handle=str(getattr(config, "share_image_xiaohongshu_handle", None) or ""),
-        xiaohongshu_id=str(getattr(config, "share_image_xiaohongshu_id", None) or ""),
-        xiaohongshu_qr_path=str(getattr(config, "share_image_xiaohongshu_qr_path", None) or ""),
-    )
+    return share_image_branding_from_config(config)
 
 
 def _resolve_playwright_command() -> Optional[str]:

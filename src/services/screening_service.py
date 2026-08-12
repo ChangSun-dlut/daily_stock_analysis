@@ -27,7 +27,14 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field
 
 from src.auth import COOKIE_NAME, is_auth_enabled, refresh_auth_state, verify_session
-from src.config import Config, DEFAULT_ALPHASIFT_INSTALL_SPEC, get_configured_llm_models
+from src.config import Config, DEFAULT_ALPHASIFT_INSTALL_SPEC, get_configured_llm_models, normalize_llm_channel_api_surface
+from src.services.screening import REFERENCE_PROJECT, REFERENCE_REVISION, __version__ as SCREENING_VERSION
+from src.services.screening import hotspot as screening_hotspot
+from src.services.screening.config import Config as ScreeningPipelineConfig
+from src.services.screening.pipeline import screen as run_screening_pipeline
+from src.services.screening.source_guard import parse_source_timeout_seconds
+from src.services.screening.strategy import list_strategies as load_screening_strategies
+from src.storage import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
@@ -2285,6 +2292,7 @@ def _build_alphasift_runtime_env(
             prefix = channel["name"].upper()
             put(f"LLM_{prefix}_ENABLED", "true")
             put(f"LLM_{prefix}_PROTOCOL", channel.get("protocol"))
+            put(f"LLM_{prefix}_API_SURFACE", channel.get("api_surface"))
             put(f"LLM_{prefix}_BASE_URL", channel.get("base_url"))
             put(f"LLM_{prefix}_API_KEYS", ",".join(channel.get("api_keys") or []))
             put(f"LLM_{prefix}_MODELS", ",".join(channel.get("models") or []))
@@ -3501,6 +3509,7 @@ def _normalize_dsa_llm_channels(config: Config) -> List[Dict[str, Any]]:
         channel = {
             "name": name,
             "protocol": _env_text(raw.get("protocol")),
+            "api_surface": normalize_llm_channel_api_surface(raw.get("api_surface")),
             "base_url": _env_text(raw.get("base_url")),
             "api_keys": api_keys,
             "models": models,

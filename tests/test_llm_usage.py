@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import OperationalError
 
@@ -39,12 +40,27 @@ from src.llm.usage import (
     _reset_usage_hmac_secret_cache_for_tests,
 )
 from src.llm.provider_cache import filter_prompt_cache_telemetry
+from src.config import Config
 from src.storage import (
     DatabaseManager,
     LLMUsage,
     persist_llm_usage,
     _LLM_USAGE_TELEMETRY_COLUMN_SQL,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_real_env(monkeypatch, tmp_path):
+    """Prevent DatabaseManager/get_config() from leaking real .env keys
+    (e.g. LITELLM_FALLBACK_MODELS) into os.environ, polluting later tests."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("STOCK_LIST=600519,000001\n", encoding="utf-8")
+    monkeypatch.setenv("ENV_FILE", str(env_file))
+    Config.reset_instance()
+    DatabaseManager.reset_instance()
+    yield
+    DatabaseManager.reset_instance()
+    Config.reset_instance()
 
 
 def _fresh_db() -> DatabaseManager:

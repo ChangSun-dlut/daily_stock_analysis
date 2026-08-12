@@ -80,6 +80,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] 大盘复盘新增「板块资金流」模块：Tushare `moneyflow_ind_dc` 拆分主力 / 中户 / 散户三档单量级净流入，配合 `block_trade` 按行业聚合暗盘（大宗交易）净流入；前端表格按主力净流入绝对值排序展示，红涨绿跌（A股惯例）；附带阅读提示，说明"主力↑/散户↓=吸筹洗盘"、"暗盘与主力同向=机构调仓"等典型场景。配套 `get_sector_money_flow()` 数据源 + `_build_sector_money_flow_block()` Markdown 段
 - [改进] 板块资金流暗盘数据升级——从 lead_stock 单股暗盘改为 lead_stock 整个申万行业的 block_trade 聚合（解决 moneyflow_ind_dc 东财行业~496 vs stock_basic 申万行业~110 分类体系不兼容，仅 7% 名称匹配的问题）；10/10 板块暗盘全部覆盖。新增主力意图识别（吸筹/出货/回流/观望），中英韩三语 i18n
 - [修复] 板块资金流行业选择策略：原按 `|主力净流入|` 排序，结果全是流出板块、看不到涨幅行业。改为**涨幅 top5 + 跌幅 top5** 组合，覆盖涨跌两极，与同页"行业板块"展示保持一致
+<!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
+<!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
+- [改进] AIHubMix 注册与引流链接统一使用 inferera.com，改善中国大陆网络直连体验。
+
+## [3.30.0] - 2026-08-09
+
+### 发布亮点
+
+- feat: LLM 渠道新增显式 Chat Completions / Responses API Surface，统一连接测试、分析、选股、图片识别与状态诊断的协议路由。
+- feat: Agent Chat 按会话持久化 Skill 选择，刷新和切换会话后可恢复，并完整保留省略、显式空列表与非空选择三态。
+- feat: Electron 桌面端恢复历史报告、市场复盘和完整报告分享图；未配置自定义品牌时，统一使用随包二维码与默认“小红书@霸天土小豆”账号文案。
+- feat: 新增单条分析目标解析契约，收紧交易所后缀、指数别名及美股代码的规范化边界。
+- fix: 修复移动端侧栏滚动、自选股详情状态、长通知标题分片及 Lark 国际域名等用户可见稳定性问题。
+- improve: 后端 CI 按测试文件分成三个 runner 并行执行，并收紧 Web 共享资产与跨层契约的门禁范围。
+
+### 新功能
+
+- LLM 渠道支持显式选择 Chat Completions 或 Responses API Surface，兼容 Responses-only 模型，并让连接测试、主分析、选股、图片识别和状态诊断复用统一路由契约。
+- Agent Chat 将 Skill 选择按会话持久化，刷新或切换会话后恢复；历史会话继续保留运行时默认，非法 Skill 请求不会误清空已有选择。
+- Electron 桌面端复用安装包自带 Chromium，为历史个股报告、市场复盘和完整报告生成 PNG 分享图；Web 与桌面端统一使用随包分发的小红书二维码。
+- `STOCK_LIST` 新增 `parse_analysis_target()` 单条目解析契约，并对外暴露可注入的指数注册表及解析结果类型。
+
+### 改进
+
+- 优化首页侧栏任务面板和自选股工作区，支持折叠任务摘要、自选股直接打开最新详情，并压缩头部操作以释放列表空间。
+- 后端 CI 按完整测试文件拆分为三个 runner 并行执行，由统一 `backend-gate` 汇总结果；继续保留稳定的离线测试语义并降低全局状态竞态风险。
+
+### 修复
+
+- 固定分享图小红书二维码下方的账号文案格式为“小红书@昵称”，未配置自定义昵称时默认显示“小红书@霸天土小豆”；不再渲染数字 ID，历史 ID 配置不会改变分享图模板。
+- 修复首页移动端历史、自选和今日列表无法稳定纵向触摸滚动的问题，同时保持桌面端卡片裁剪行为。
+- 长通知包含一级 Markdown 标题时按对应标题边界正确分片，避免错误递归耗尽长度预算并中断发送。
+- 收敛自选股详情与今日状态语义：刷新和查询期间不再开放过期报告，失败时不会将旧历史误标为今日分析，并限制逐股票 fallback 并发及取消失效批次。
+- 收敛 Responses 渠道的协议、provider、route alias 与 wire-model 契约，拒绝协议不匹配、同名 alias 混用 Surface 及非法历史配置。
+- 飞书交互机器人在 `FEISHU_DOMAIN=lark` 时让 Stream 长连接和消息回复统一使用 Lark 国际版 API 域名，避免连接国内域名后返回 `Incorrect domain name`。
+- 显式交易所后缀、畸形混合 alias、dotted-prefix 及外盘半显式后缀的非法输入不再静默改写或降级为错误市场。
+- `us` 前缀保持大小写不敏感，但 ticker base 必须满足规范的大写美股代码形态；非法小写、标点或数字输入直接返回 `unsupported`。
+- 带 `.US` 后缀的规范美股代码不再因前两字符碰撞 `sh`、`hk`、`bj` 或 `us` 前缀而被错误拆分。
+
+### 测试
+
+- 非 Web 改动默认执行完整后端门禁；纯 Web、共享 public 资产、渠道模板和设置帮助的过滤语义补充回归测试，Docker 构建继续按实际输入过滤。
+
+### 文档
+
+- FAQ 补充 macOS 桌面应用被 Gatekeeper quarantine 阻止启动时，对受信任安装包进行临时放行的步骤。
 
 ## [3.29.0] - 2026-08-02
 
@@ -175,6 +221,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### 文档
 
 - 修复文档中的失效相对链接。
+- [修复] #2026 外股代码映射到中文显示名时英文新闻相关性判定漏判：新增同源 STOCK_ENGLISH_NAME_MAP 单一真源、canonicalize_foreign_stock_code 规范化入口与 _foreign_english_query_terms 别名解析，使 AAPL/00700/BABA 等 ticker 即使 stock_name 为中文也能在查询构建、相关性打分与多维度情报路径上复用 canonical 英文名，并补齐 .US/.HK suffix / HK 前缀全形式的归类与回归用例；同时在 _score_news_relevance 对 alias 展开 term 做去重，避免 legal alias 展开短名与显式 short alias 重复计分。
+- [新功能] Tushare 数据源支持通过 `TUSHARE_HTTP_URL` 环境变量自定义接入地址，便于网络无法直达 `api.tushare.pro` 时切换自建网关或第三方兼容镜像；留空保持官方默认地址不变（fixes #1985）
+- [文档] `.env.example` 与 `.github/workflows/00-daily-analysis.yml` 同步映射 `TUSHARE_HTTP_URL`，避免出现"配置项有但 workflow 漏映射"的半修状态
+- [修复] #2051 PR Review 的特权 `pull_request_target` 流程不再检出 fork PR head：敏感文件、标签、报告与 AI 审查统一通过 GitHub API 将 PR 元数据和 diff 作为数据读取，只执行主分支可信脚本；Python 语法、Flake8、确定性检查和离线测试继续由无 secrets 的 `pull_request` CI / `backend-gate` 执行，兼容 `actions/checkout` 新增的 fork checkout 安全保护。
+- [修复] 修复 Windows 上 mimetypes 冷启动时读取注册表导致的进程卡死
 
 ## [3.27.0] - 2026-07-19
 
@@ -2201,7 +2252,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
-[Unreleased]: https://github.com/ZhuLinsen/daily_stock_analysis/compare/v3.29.0...HEAD
+[Unreleased]: https://github.com/ZhuLinsen/daily_stock_analysis/compare/v3.30.0...HEAD
+[3.30.0]: https://github.com/ZhuLinsen/daily_stock_analysis/compare/v3.29.0...v3.30.0
 [3.29.0]: https://github.com/ZhuLinsen/daily_stock_analysis/compare/v3.28.0...v3.29.0
 [3.28.0]: https://github.com/ZhuLinsen/daily_stock_analysis/compare/v3.27.0...v3.28.0
 [3.27.0]: https://github.com/ZhuLinsen/daily_stock_analysis/compare/v3.26.1...v3.27.0

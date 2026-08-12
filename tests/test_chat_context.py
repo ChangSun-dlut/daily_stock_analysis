@@ -5,6 +5,8 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.agent.chat_context import (  # noqa: E402
@@ -19,6 +21,20 @@ from src.agent.llm_adapter import LLMToolAdapter  # noqa: E402
 from src.config import Config  # noqa: E402
 from src.llm.usage import normalize_litellm_usage  # noqa: E402
 from src.storage import DatabaseManager  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolate_real_env(monkeypatch, tmp_path):
+    """Prevent DatabaseManager/get_config() from leaking real .env keys
+    (e.g. LITELLM_FALLBACK_MODELS) into os.environ, polluting later tests."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("STOCK_LIST=600519,000001\n", encoding="utf-8")
+    monkeypatch.setenv("ENV_FILE", str(env_file))
+    Config.reset_instance()
+    DatabaseManager.reset_instance()
+    yield
+    DatabaseManager.reset_instance()
+    Config.reset_instance()
 
 
 def _reset_db() -> DatabaseManager:

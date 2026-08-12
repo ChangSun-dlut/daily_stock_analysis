@@ -715,6 +715,34 @@ def test_market_share_image_preserves_report_color_scheme_from_index_markers():
     assert 'class="metric red"><span>上涨</span>' in html
 
 
+def test_generic_share_image_wraps_long_preformatted_lines_and_urls_in_fallback():
+    html = build_share_image_html(
+        """# 完整报告
+
+## 原始链接
+
+https://example.com/this-is-a-very-long-url-with-no-natural-breakpoints/abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ
+
+## 调试片段
+
+```text
+TRACEBACK_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz_TRACEBACK_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz
+```
+""",
+        generated_on=date(2026, 8, 1),
+    )
+
+    assert 'class="poster dashboard"' in html
+    assert '<section class="report-fallback">' in html
+    assert "<pre>" in html
+    assert "<code>" in html
+    assert ".report-content{overflow-wrap:anywhere}" in html
+    assert ".report-content h1,.report-content h2,.report-content h3{color:#153d78;overflow-wrap:anywhere;word-break:break-word}" in html
+    assert ".report-content p,.report-content li,.report-content th,.report-content td,.report-content blockquote,.report-content a{overflow-wrap:anywhere;word-break:break-word}" in html
+    assert ".report-content pre{max-width:100%;" in html
+    assert "white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word" in html
+
+
 def test_real_single_stock_shape_uses_h2_title_score_and_sniper_contract():
     html = build_share_image_html(
         """## 🟢 贵州茅台 (600519)

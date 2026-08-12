@@ -9,6 +9,7 @@ from datetime import date
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 from sqlalchemy import and_, create_engine as sqlalchemy_create_engine, select
 from sqlalchemy.sql import func
 
@@ -17,6 +18,20 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from src.config import Config
 from src.storage import Base, CURRENT_SCHEMA_VERSION, DatabaseManager, DatabaseSchemaMigration, StockDaily
+
+
+@pytest.fixture(autouse=True)
+def _isolate_real_env(monkeypatch, tmp_path):
+    """Prevent DatabaseManager/get_config() from leaking real .env keys
+    (e.g. LITELLM_FALLBACK_MODELS) into os.environ, polluting later tests."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("STOCK_LIST=600519,000001\n", encoding="utf-8")
+    monkeypatch.setenv("ENV_FILE", str(env_file))
+    Config.reset_instance()
+    DatabaseManager.reset_instance()
+    yield
+    DatabaseManager.reset_instance()
+    Config.reset_instance()
 
 class TestStorage(unittest.TestCase):
 
@@ -599,6 +614,71 @@ class TestStorage(unittest.TestCase):
         self.assertIsInstance(message_id, int)
         self.assertGreater(message_id, 0)
 
+        DatabaseManager.reset_instance()
+
+    def test_conversation_user_turn_persists_and_updates_session_skills(self):
+        DatabaseManager.reset_instance()
+        db = DatabaseManager(db_url="sqlite:///:memory:")
+
+        first_id = db.save_conversation_user_turn(
+            "skill-session",
+            "first question",
+            ["technical", "risk"],
+        )
+        second_id = db.save_conversation_user_turn(
+            "skill-session",
+            "use general analysis",
+            [],
+        )
+
+        self.assertGreater(first_id, 0)
+        self.assertGreater(second_id, first_id)
+        self.assertEqual(
+            [message["content"] for message in db.get_conversation_messages("skill-session")],
+            ["first question", "use general analysis"],
+        )
+        self.assertEqual(
+            db.get_conversation_session_selected_skill_ids("skill-session"),
+            [],
+        )
+
+        deleted = db.delete_conversation_session("skill-session")
+
+        self.assertEqual(deleted, 2)
+        self.assertIsNone(
+            db.get_conversation_session_selected_skill_ids("skill-session")
+        )
+        DatabaseManager.reset_instance()
+
+    def test_conversation_user_turn_without_skill_update_keeps_session_state(self):
+        DatabaseManager.reset_instance()
+        db = DatabaseManager(db_url="sqlite:///:memory:")
+
+        db.save_conversation_user_turn("skill-session", "first", ["technical"])
+        db.save_conversation_user_turn("skill-session", "follow up")
+
+        self.assertEqual(
+            db.get_conversation_session_selected_skill_ids("skill-session"),
+            ["technical"],
+        )
+        DatabaseManager.reset_instance()
+
+    def test_conversation_user_turn_rolls_back_message_when_state_write_fails(self):
+        DatabaseManager.reset_instance()
+        db = DatabaseManager(db_url="sqlite:///:memory:")
+
+        with patch("src.storage.sqlite_insert", side_effect=RuntimeError("state write failed")):
+            with self.assertRaisesRegex(RuntimeError, "state write failed"):
+                db.save_conversation_user_turn(
+                    "skill-session",
+                    "not accepted",
+                    ["technical"],
+                )
+
+        self.assertEqual(db.get_conversation_messages("skill-session"), [])
+        self.assertIsNone(
+            db.get_conversation_session_selected_skill_ids("skill-session")
+        )
         DatabaseManager.reset_instance()
 
     def test_provider_turn_round_trip_preserves_protocol_fields_and_flags(self):

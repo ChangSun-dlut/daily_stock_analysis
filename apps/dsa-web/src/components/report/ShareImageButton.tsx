@@ -8,7 +8,9 @@ import { getReportText, normalizeReportLanguage } from '../../utils/reportLangua
 import { Tooltip } from '../common/Tooltip';
 
 type DesktopWindow = Window & {
-  dsaDesktop?: unknown;
+  dsaDesktop?: {
+    renderShareImage?: (recordId: number) => Promise<ArrayBuffer>;
+  };
 };
 
 type ShareState = 'idle' | 'loading' | 'ready' | 'success' | 'error';
@@ -31,8 +33,9 @@ export const ShareImageButton: React.FC<ShareImageButtonProps> = ({
   reportLanguage = 'zh',
   className = '',
 }) => {
-  const isDesktopRuntime = typeof window !== 'undefined' && Boolean((window as DesktopWindow).dsaDesktop);
-  const activeRecordId = isDesktopRuntime ? undefined : recordId;
+  const desktopRuntime = typeof window !== 'undefined' ? (window as DesktopWindow).dsaDesktop : undefined;
+  const renderDesktopShareImage = desktopRuntime?.renderShareImage;
+  const activeRecordId = desktopRuntime && !renderDesktopShareImage ? undefined : recordId;
   const text = getReportText(normalizeReportLanguage(reportLanguage));
   const [stateSnapshot, setStateSnapshot] = useState<{
     recordId?: number;
@@ -116,7 +119,12 @@ export const ShareImageButton: React.FC<ShareImageButtonProps> = ({
       loadTokenRef.current = loadToken;
       setState('loading');
       try {
-        blob = await historyApi.getShareImage(activeRecordId);
+        if (renderDesktopShareImage) {
+          const pngBytes = await renderDesktopShareImage(activeRecordId);
+          blob = new Blob([pngBytes], { type: 'image/png' });
+        } else {
+          blob = await historyApi.getShareImage(activeRecordId);
+        }
       } catch (error) {
         if (loadTokenRef.current !== loadToken) return;
         console.error('Generate share image failed:', error);
@@ -172,7 +180,7 @@ export const ShareImageButton: React.FC<ShareImageButtonProps> = ({
       // moves on (matches the existing success-state behaviour).
       scheduleReset();
     }
-  }, [activeRecordId, clearResetTimer, ensureImageUrl, reportTitle, scheduleReset, setState, state]);
+  }, [activeRecordId, clearResetTimer, ensureImageUrl, renderDesktopShareImage, reportTitle, scheduleReset, setState, state]);
 
   if (activeRecordId === undefined) return null;
 
