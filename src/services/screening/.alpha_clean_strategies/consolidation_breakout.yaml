@@ -1,0 +1,167 @@
+category: trend
+description: 横盘整理后量能温和回升，捕捉蓄势末期信号。consolidation_quality 专项因子主导评分，行业分层采样避免单一行业垄断。
+display_name: 横盘突破
+name: consolidation_breakout
+screening:
+  enabled: true
+  factor_weights:
+    activity: 0.12
+    consolidation_quality: 0.62
+    liquidity: 0.0
+    momentum: 0.1
+    stability: 0.08
+    theme_heat: 0.08
+    value: 0.0
+  hard_filters:
+    amount_min: -999
+    body_pct_min: -999
+    breakout_20d_pct_max: 9999
+    breakout_20d_pct_min: -999
+    change_60d_max: 9999
+    change_60d_min: -999
+    change_20d_max: 10.0
+    change_20d_min: -999
+    change_pct_max: 9999
+    change_pct_min: -999
+    consolidation_days_20d_min: 6
+    exclude_st: true
+    macd_status_whitelist:
+    - bullish
+    - neutral
+    - bearish
+    price_max: 9999
+    price_min: -999
+    range_20d_pct_max: 25.0
+    require_price_above_ma20: false
+    signal_score_min: -999
+    turnover_rate_min: -999
+    volatility_20d_pct_max: 45.0
+    volume_ratio_20d_min: -999
+  market_scope:
+  - cn
+  max_output: 10
+  portfolio_profile:
+    buckets:
+      AI算力:
+      - AI算力
+      - 算力
+      - 数据中心
+      - 服务器
+      - 光模块
+      周期:
+      - 钢铁
+      - 煤炭
+      - 有色
+      - 化工
+      新能源:
+      - 新能源
+      - 光伏
+      - 锂电
+      - 电池
+      - 储能
+      机器人:
+      - 机器人
+      - 减速器
+      - 执行器
+      - 伺服
+      金融:
+      - 券商
+      - 银行
+      - 保险
+      消费:
+      - 白酒
+      - 食品
+      - 免税
+      - 零售
+      - 家电
+    concentration_penalty: 5.0
+    max_same_bucket: 1
+  ranking_hints: '优先关注：
+
+    1. 横盘整理时间足够长（至少 8 个交易日窄幅震荡），横盘越久突破越可靠。60 天以上额外加分，120 天以上高权重加分
+
+    2. 量能较前一周温和回升，量比 0.8-2.5 为佳，不过度放量
+
+    3. 股价在箱体上沿附近，具备突破潜力
+
+    4. 波动率较低的回踩确认信号，假突破概率更低
+
+    5. 大盘蓝筹低换手与中小盘微跌触底均可覆盖
+
+    '
+  risk_profile:
+    abnormal_volume_ratio: 5.0
+    chase_change_pct: 9.3
+    high_turnover_rate: 15.0
+    weak_signal_score: 40.0
+  scorecard_profile:
+    capital_confirmed_bonus: 2.0
+    hot_money_activity_min: 96.0
+    hot_money_penalty: 1.3
+    volume_spike_ratio: 8.0
+  scoring_profile:
+    activity_high_turnover_rate: 14.0
+    activity_high_volume_ratio: 5.0
+    activity_ideal_turnover_rate: 1.5
+    activity_ideal_volume_ratio: 2.0
+    consolidation_quality_base: 50.0
+    consolidation_quality_breakout_bonus_slope: 0.8
+    consolidation_quality_breakout_threshold_pct: 30.0
+    consolidation_quality_days_ideal: 10.0
+    consolidation_quality_days_slope: 4.0
+    consolidation_quality_range_ideal_max: 15.0
+    consolidation_quality_range_ideal_min: 2.0
+    consolidation_quality_range_penalty_slope: 1.5
+    consolidation_quality_volatility_ideal: 25.0
+    consolidation_quality_volatility_penalty_slope: 0.6
+    consolidation_quality_volume_ratio_ideal: 0.7
+    consolidation_quality_volume_ratio_penalty_slope: 15.0
+    consolidation_quality_overhead_threshold_pct: -15.0
+    consolidation_quality_overhead_penalty_slope: 0.5
+    consolidation_quality_near_high_threshold_pct: -5.0
+    consolidation_quality_near_high_penalty: 25.0
+    consolidation_quality_momentum_20d_threshold_pct: 5.0
+    consolidation_quality_momentum_20d_penalty_slope: 6.0
+    consolidation_quality_momentum_10d_threshold_pct: 3.0
+    consolidation_quality_momentum_10d_penalty_slope: 8.0
+    consolidation_quality_volume_expand_threshold: 1.0
+    consolidation_quality_volume_expand_bonus: 12.0
+    consolidation_quality_volume_spike_threshold: 1.5
+    consolidation_quality_volume_spike_bonus_slope: 45.0
+    consolidation_quality_consecutive_spike_2d_bonus: 8.0
+    consolidation_quality_consecutive_spike_3d_bonus: 15.0
+    consolidation_quality_coiled_spring_contraction_min: 15.0
+    consolidation_quality_coiled_spring_ramp_min: 1.15
+    consolidation_quality_coiled_spring_ramp_max: 3.5
+    consolidation_quality_coiled_spring_bonus: 20.0
+    consolidation_quality_surge_pullback_penalty_slope: 1.0
+    consolidation_quality_long_bonus_60d: 8.0
+    consolidation_quality_long_bonus_120d: 15.0
+    momentum_chase_penalty_slope: 10.0
+    momentum_chase_start_pct: 3.0
+    stability_hot_change_pct: 8.5
+    consolidation_mf_inflow_5d_min: 300.0
+    consolidation_mf_inflow_5d_max: 3000.0
+  shape_window: 40
+  stratified_sampling:
+    enabled: true
+    industry_col: industry
+    max_per_group_share: 0.35
+    min_per_group: 5
+  tech_weight: 0.4
+style:
+  capital_profile: high_liquidity
+  execution_style: breakout
+  holding_period: short_term
+  market_regime:
+  - sideways
+  - risk_on
+  - trend
+  risk_profile: aggressive
+  ui_badge: 突破
+tags:
+- breakout
+- consolidation
+- concentration
+- low_volatility
+version: '1.8'

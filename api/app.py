@@ -234,6 +234,24 @@ def _load_runtime_scheduler_args() -> dict:
     return parsed
 
 
+def _on_startup_warmup_m2f() -> None:
+    """Pre-warm m2f Chromium on server boot to avoid cold-start failures."""
+    try:
+        import threading
+        t = threading.Thread(target=_warmup_m2f_thread_target, daemon=True)
+        t.start()
+    except Exception:
+        pass
+
+
+def _warmup_m2f_thread_target() -> None:
+    try:
+        from src.md2img import warmup_m2f
+        warmup_m2f()
+    except Exception:
+        pass
+
+
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
     """Initialize and release shared services for the app lifecycle."""
@@ -289,6 +307,7 @@ async def app_lifespan(app: FastAPI):
         runtime_scheduler=app.state.runtime_scheduler_service,
     )
     _schedule_stock_index_background_refresh(app, "startup")
+    _on_startup_warmup_m2f()
     try:
         yield
     finally:

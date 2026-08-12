@@ -1,0 +1,146 @@
+name: golden_pit
+display_name: 黄金坑
+description: 参考百花医药 & 一鸣食品的标准黄金坑模式：起涨试探 → 回落均线下缩量 → 坑底启动反弹。侧重 reversal 回撤锚定 + 横盘质量
+  + 资金关注度，硬过滤仅 snapshot 级避免 daily NaN 误杀。
+version: '1.0'
+category: trend
+tags:
+- pullback
+- breakout
+- trend_continuation
+- golden_pit
+style:
+  risk_profile: aggressive
+  holding_period: short_term
+  execution_style: pullback_buy
+  market_regime:
+  - trending_up
+  - range_bound
+  capital_profile: medium_liquidity
+  ui_badge: 黄金坑
+screening:
+  enabled: true
+  market_scope:
+  - cn
+  hard_filters:
+    exclude_st: true
+    price_min: 3
+    price_max: 999
+    amount_min: 50000000
+    market_cap_min: 2000000000
+    change_pct_min: -0.6
+    change_pct_max: 4.8
+    turnover_rate_min: 0.3
+    require_ma_bullish: null
+    require_price_above_ma20: null
+    bottom_accumulation_bypass: null
+    signal_score_min: null
+    macd_status_whitelist: null
+    rsi_status_whitelist: null
+    change_60d_min: null
+    change_60d_max: null
+    change_20d_min: null
+    change_20d_max: null
+    breakout_20d_pct_min: null
+    breakout_20d_pct_max: null
+    range_20d_pct_max: null
+    volume_ratio_20d_min: null
+    body_pct_min: null
+    pullback_to_ma20_pct_min: null
+    pullback_to_ma20_pct_max: null
+    consolidation_days_20d_min: null
+    volatility_20d_pct_min: null
+    max_drawdown_20d_pct_min: null
+    max_drawdown_20d_pct_max: null
+    atr_20_pct_min: null
+  tech_weight: 0.6
+  factor_weights:
+    reversal: 0.45
+    stability: 0.22
+    consolidation_quality: 0.12
+    theme_heat: 0.13
+    capital_heat_quality: 0.08
+  scoring_profile:
+    reversal_ideal_change_pct: -18.0
+    reversal_distance_penalty_slope: 8.0
+    reversal_collapse_start_pct: -30.0
+    reversal_collapse_penalty_slope: 3.0
+    reversal_chase_start_pct: -3.0
+    reversal_chase_penalty_slope: 12.0
+    stability_hot_change_pct: 5.0
+    stability_high_volume_ratio: 5.0
+    stability_high_turnover_rate: 15.0
+    activity_ideal_volume_ratio: 1.5
+    activity_ideal_turnover_rate: 5.0
+  risk_profile:
+    chase_change_pct: 7.0
+    chase_points: 5.0
+    breakdown_change_pct: -8.0
+    breakdown_points: 6.0
+    abnormal_volume_ratio: 5.5
+    abnormal_volume_ratio_points: 2.5
+    high_turnover_rate: 18.0
+    high_turnover_points: 2.0
+    macd_bearish_points: 5.0
+    rsi_overbought_points: 3.0
+    bad_daily_quality_flag_points: 6.0
+  portfolio_profile:
+    max_same_bucket: 2
+    concentration_penalty: 3.5
+    buckets:
+      消费:
+      - 食品
+      - 白酒
+      - 零售
+      - 消费
+      - 家电
+      AI算力:
+      - AI算力
+      - 算力
+      - 数据中心
+      - 服务器
+      - 光模块
+      - 半导体
+      新能源:
+      - 新能源
+      - 光伏
+      - 锂电
+      - 电池
+      - 储能
+      - 风电
+      周期:
+      - 钢铁
+      - 煤炭
+      - 有色
+      - 化工
+      - 黄金
+      - 钨
+      - 钴
+      医药:
+      - 医药
+      - 创新药
+      - 医疗器械
+      - 生物制药
+      - 化学制药
+      制造:
+      - 高端制造
+      - 汽车
+      - 汽车零部件
+      - 机械
+      - 智能制造
+  ranking_hints: '优先关注：
+
+    1. 最近 5 日出现缩量横盘 / 缩量小阴小阳十字星后再次放量上行的标的
+
+    2. 60 日内有过 4-12% 的中期回撤，并且价格守在 MA20 上方
+
+    3. 当日实体占比较高（body_pct_min: 0.5），最好是阳线带量
+
+    4. 关注板块主题热度，与 AI/消费/新能源/医药等热门主题的契合度可加权
+
+    5. 切忌追高：当日涨幅 ≥ 7% 或 60 日累计已 ≥ 50% 的应降低权重
+
+    6. 注意连续涨停/一字板的不可参与标的（hard_filters 已过滤出部分）
+
+    '
+  max_output: 5

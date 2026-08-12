@@ -44,6 +44,63 @@ _m2f_unhealthy_since: Optional[float] = None
 _M2F_HEALTH_TTL_SECONDS = 60.0
 
 
+def warmup_m2f() -> None:
+    """Pre-warm m2f's bundled puppeteer Chromium on server startup.
+
+    On macOS ARM the first launch of puppeteer-core Chromium almost always
+    exits with rc=0 without producing a file (silent crash).  Running a
+    trivial one-shot conversion once at boot absorbs this cold-start failure
+    so that subsequent real requests succeed on the first attempt.
+    """
+    global _m2f_healthy, _m2f_unhealthy_since
+
+    m2f_bin = shutil.which("m2f")
+    if m2f_bin is None:
+        return
+
+    # Restore "unknown" health so the warm-up call is not blocked by a
+    # stale negative TTL leftover from a previous process incarnation.
+    _m2f_healthy = None
+    _m2f_unhealthy_since = None
+
+    temp_dir = None
+    try:
+        temp_dir = tempfile.mkdtemp(prefix="m2f_warmup_")
+        md_path = os.path.join(temp_dir, "warmup.md")
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write("# warmup\n")
+
+        for attempt in range(3):
+            result = subprocess.run(
+                [m2f_bin, md_path, "png", f"outputDirectory={temp_dir}"],
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+            png_path = os.path.join(temp_dir, "warmup.png")
+            if result.returncode == 0 and os.path.isfile(png_path):
+                _m2f_healthy = True
+                _m2f_unhealthy_since = None
+                logger.info("m2f warmup succeeded (attempt %d)", attempt + 1)
+                return
+            if attempt < 2:
+                logger.debug("m2f warmup attempt %d/3 (cold-start), retrying…", attempt + 1)
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                temp_dir = tempfile.mkdtemp(prefix="m2f_warmup_")
+                md_path = os.path.join(temp_dir, "warmup.md")
+                with open(md_path, "w", encoding="utf-8") as f:
+                    f.write("# warmup\n")
+                time.sleep(1)
+                continue
+            logger.warning("m2f warmup failed after 3 attempts (m2f may be unavailable)")
+
+    except Exception as exc:
+        logger.debug("m2f warmup skipped (%s)", exc)
+    finally:
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def _share_image_branding(config: object) -> ShareImageBranding:
     return share_image_branding_from_config(config)
 

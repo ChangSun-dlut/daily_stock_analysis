@@ -1,0 +1,145 @@
+name: bottom_accumulation
+display_name: 底部吸筹反转
+description: 深度回调后出现底部吸筹信号，捕捉机构资金介入的反转机会。bottom_accumulation_quality 因子主导评分，放宽传统横盘过滤器约束。
+category: trend
+screening:
+  enabled: true
+  factor_weights:
+    activity: 0.1
+    bottom_accumulation_quality: 0.65
+    consolidation_quality: 0.1
+    liquidity: 0.0
+    momentum: 0.05
+    stability: 0.1
+    theme_heat: 0.0
+    value: 0.0
+  hard_filters:
+    amount_min: -999
+    body_pct_min: -999
+    bottom_accumulation_bypass: true
+    breakout_20d_pct_max: 9999
+    breakout_20d_pct_min: -999
+    change_60d_max: -15.0
+    change_60d_min: -60.0
+    change_20d_max: 20.0
+    change_20d_min: -999
+    change_pct_max: 6.0
+    change_pct_min: -999
+    consolidation_days_20d_min: -999
+    exclude_st: true
+    macd_status_whitelist:
+    - bullish
+    - neutral
+    - bearish
+    price_max: 9999
+    price_min: -999
+    range_20d_pct_max: 9999
+    require_price_above_ma20: false
+    signal_score_min: -999
+    turnover_rate_min: -999
+    volatility_20d_pct_max: 9999
+    volume_ratio_20d_min: -999
+  market_scope:
+  - cn
+  max_output: 10
+  portfolio_profile:
+    buckets:
+      周期:
+      - 钢铁
+      - 煤炭
+      - 有色
+      - 化工
+      新能源:
+      - 新能源
+      - 光伏
+      - 锂电
+      - 电池
+      - 储能
+      消费:
+      - 白酒
+      - 食品
+      - 免税
+      - 零售
+      - 家电
+      科技:
+      - 半导体
+      - 芯片
+      - 电子
+      - 软件
+      金融:
+      - 券商
+      - 银行
+      - 保险
+      医药:
+      - 医药
+      - 医疗
+      - 中药
+      汽车:
+      - 汽车
+      - 汽配
+      - 智能化
+    concentration_penalty: 5.0
+    max_same_bucket: 2
+  ranking_hints: '优先关注：
+
+    1. 60 日跌幅在 15-40% 区间，深度回调但未崩盘
+
+    2. 底部量能温和放大，5 日均量较 20 日均量扩张 30% 以上
+
+    3. RSI 从超卖区域（<35 确认）回升 5 点以上，情绪修复信号
+
+    4. MACD 零轴下方金叉，底部技术结构确认
+
+    5. 股价从 60 日低点小幅反弹（3-10%），尚未大幅拉升
+
+    '
+  risk_profile:
+    abnormal_volume_ratio: 5.0
+    chase_change_pct: 6.0
+    high_turnover_rate: 15.0
+    weak_signal_score: 30.0
+  scorecard_profile:
+    capital_confirmed_bonus: 2.0
+    hot_money_activity_min: 96.0
+    hot_money_penalty: 1.3
+    volume_spike_ratio: 8.0
+  scoring_profile:
+    bottom_accumulation_decline_sweet_min: 15.0
+    bottom_accumulation_decline_sweet_max: 40.0
+    bottom_accumulation_decline_too_deep_max: 60.0
+    bottom_accumulation_rsi_oversold_threshold: 35.0
+    bottom_accumulation_rsi_recovery_min: 5.0
+    bottom_accumulation_volume_expand_min: 1.3
+    bottom_accumulation_price_vs_60d_low_min: 3.0
+    bottom_accumulation_ma5_turn_up_min: 1.0
+    bottom_accumulation_signal_min_signals: 3
+    bottom_accumulation_mf_inflow_5d_min: 500.0
+    bottom_accumulation_mf_inflow_5d_max: 5000.0
+    bottom_accumulation_mf_strength_pct_min: 2.0
+    bottom_accumulation_mf_strength_pct_max: 10.0
+    momentum_base: 40.0
+    momentum_chase_penalty_slope: 10.0
+    momentum_chase_start_pct: 3.0
+    stability_hot_change_pct: 8.5
+  shape_window: 60
+  stratified_sampling:
+    enabled: true
+    industry_col: industry
+    max_per_group_share: 0.4
+    min_per_group: 3
+  tech_weight: 0.4
+style:
+  capital_profile: high_liquidity
+  execution_style: reversal
+  holding_period: short_term
+  market_regime:
+  - trending_down
+  - sideways
+  risk_profile: aggressive
+  ui_badge: 底部反转
+tags:
+- bottom_accumulation
+- reversal
+- oversold
+- volume
+version: '1.0'

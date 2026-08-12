@@ -1770,8 +1770,170 @@ def _prepare_alphasift_runtime_env() -> None:
         return
 
     package_strategies_dir = Path(spec.origin).resolve().parent / "strategies"
+    dsa_strategies_dir = Path(__file__).resolve().parent / "screening" / "strategies"
+
+    # 1. Sync DSA-owned custom strategies (e.g. 黄金坑) into alphasift's bundled
+    # strategies dir so they appear in the screener UI alongside the packaged
+    # strategies. DSA 是 single source of truth (`src/services/screening/strategies/`).
+    if dsa_strategies_dir.is_dir() and package_strategies_dir.is_dir():
+        try:
+            from shutil import copy2
+            for yaml_file in dsa_strategies_dir.glob("*.yaml"):
+                dest = package_strategies_dir / yaml_file.name
+                if not dest.exists() or yaml_file.stat().st_mtime_ns > dest.stat().st_mtime_ns:
+                    copy2(yaml_file, dest)
+        except Exception as exc:
+            logger.warning("DSA strategy sync to alphasift failed: %s", exc)
+
+    # 2. alphasift 0.2.0 的 strict loader 拒绝 DSA strategies 里 AI-agent
+    #   enrichment 字段 (analysis_skills / aliases / instructions / ...).
+    #   alphasift 包自己 shipped 的 13 份 yaml 有 7 份会因此拒绝加载，但
+    #   之前并没有异常是因为 alphasift 内部的 _STRATEGY_DIR_CACHE 持有
+    #   pre-strict 版本的结果。新增 / 修改任何一个 strategy 都会让 cache
+    #   失效，原本 OK 的也会突然被筛掉。Build 一份 schema-allowed-only 的
+    #   副本并指向 alphasift，源 yaml 保持原样（agent 字段不丢）。
+    cleaned_dir = dsa_strategies_dir.parent / ".alpha_clean_strategies"
+    if _build_alphasift_clean_strategies_dir(
+        dsa_strategies_dir,
+        cleaned_dir,
+        alphasift_bundled_dir=package_strategies_dir,
+    ):
+        os.environ["STRATEGIES_DIR"] = str(cleaned_dir)
+        return
+
     if package_strategies_dir.is_dir():
         os.environ["STRATEGIES_DIR"] = str(package_strategies_dir)
+
+
+def _build_alphasift_clean_strategies_dir(
+    dsa_dir: Path,
+    dst_dir: Path,
+    alphasift_bundled_dir: Path | None = None,
+) -> bool:
+    """Mirror strategy YAMLs into ``dst_dir`` with only alphasift's
+    schema-allowed keys at every nested level, so the strict screening loader
+    can ingest every file.
+
+    Source priority:
+      1. DSA-owned files in ``dsa_dir`` (single source of truth).
+      2. alphasift-bundled extras not yet mirrored into DSA (e.g.
+         ``consolidation_breakout.yaml``).
+
+    Returns True on success.
+    """
+    if not dsa_dir.is_dir():
+        return False
+
+    try:
+        import yaml  # PyYAML
+        import alphasift.strategy as _as
+    except ImportError:
+        return False
+
+    top_keys = getattr(_as, "_TOP_LEVEL_KEYS", None)
+    if not top_keys:
+        return False
+
+    # Build the allow-list for every nested level alphasift validates.
+    nested_levels: dict[str, set[str]] = {
+        "screening": getattr(_as, "_SCREENING_KEYS", set()),
+        "hard_filters": getattr(_as, "_HARD_FILTER_KEYS", set()),
+        "scoring_profile": getattr(_as, "_SCORING_PROFILE_KEYS", set()),
+        "risk_profile": getattr(_as, "_RISK_PROFILE_KEYS", set()),
+        "portfolio_profile": getattr(_as, "_PORTFOLIO_PROFILE_KEYS", set()),
+        "scorecard_profile": getattr(_as, "_SCORECARD_PROFILE_KEYS", set()),
+        "event_profile": getattr(_as, "_EVENT_PROFILE_KEYS", set()),
+        "style": getattr(_as, "_STYLE_KEYS", set()),
+    }
+
+    try:
+        dst_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+
+    def _write_cleaned(yaml_file: Path, dst_file: Path) -> None:
+        """Parse → scrub → write cleaned YAML. Skips on parse error."""
+        try:
+            raw = yaml.safe_load(yaml_file.read_text(encoding="utf-8")) or {}
+        except Exception:
+            return
+        if not isinstance(raw, dict):
+            return
+        cleaned = _scrub_unknown_keys(raw, top_keys, nested_levels, depth=0)
+        try:
+            dst_file.write_text(
+                yaml.safe_dump(cleaned, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+        except OSError:
+            return
+
+    # Pass 1: DSA-owned files (highest priority)
+    dsa_names = {p.name for p in dsa_dir.glob("*.yaml")}
+    for yaml_file in dsa_dir.glob("*.yaml"):
+        dst_file = dst_dir / yaml_file.name
+        # Always re-scrub if any source updated.
+        if (
+            dst_file.exists()
+            and dst_file.stat().st_mtime_ns >= yaml_file.stat().st_mtime_ns
+        ):
+            continue
+        _write_cleaned(yaml_file, dst_file)
+
+    # Pass 2: bundled alphasift strategies not yet owned by DSA
+    if alphasift_bundled_dir and alphasift_bundled_dir.is_dir():
+        for yaml_file in alphasift_bundled_dir.glob("*.yaml"):
+            if yaml_file.name in dsa_names:
+                continue  # DSA wins
+            dst_file = dst_dir / yaml_file.name
+            if (
+                dst_file.exists()
+                and dst_file.stat().st_mtime_ns >= yaml_file.stat().st_mtime_ns
+            ):
+                continue
+            _write_cleaned(yaml_file, dst_file)
+
+    # Align dir mtime with newest source mtime so alphasift's signature cache
+    # invalidates in lockstep with our rebuilds.
+    try:
+        newest = max(
+            (p.stat().st_mtime for p in dst_dir.glob("*.yaml")),
+            default=dst_dir.stat().st_mtime,
+        )
+        os.utime(dst_dir, (newest, newest))
+    except OSError:
+        pass
+
+    return True
+
+
+def _scrub_unknown_keys(
+    node: object,
+    allowed: set[str],
+    nested_levels: dict[str, set[str]],
+    *,
+    depth: int,
+) -> object:
+    """Recursively strip keys that aren't in ``allowed`` and descend into the
+    known nested sections to scrub them at their respective allow-lists."""
+    if depth > 4 or not isinstance(node, dict):
+        return node
+
+    out = {}
+    for key, value in node.items():
+        if not isinstance(key, str):
+            continue
+        if key not in allowed:
+            continue
+        if isinstance(value, dict) and key in nested_levels and nested_levels[key]:
+            value = _scrub_unknown_keys(
+                value,
+                nested_levels[key],
+                nested_levels,
+                depth=depth + 1,
+            )
+        out[key] = value
+    return out
 
 
 def _get_dsa_adapter() -> Any:

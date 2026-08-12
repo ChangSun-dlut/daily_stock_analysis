@@ -1,0 +1,135 @@
+# 黄金坑策略 / Golden Pit Strategy
+# 参考案例：
+#   一鸣食品(605388.SH) 2026-07-22 → 2026-08-11（横盘后拉升 → 坑 → 再启动）
+#   百花医药(600721.SH) 2026-07-10 → 2026-08-04（起涨试探 → 回落均线下缩量 → 坑底反弹 → 启动）
+#
+# 模式定义（百花优先，更典型）:
+#   Phase 1 · 起涨试探（2-5 交易日）:
+#       中阳/实体阳线，带量，确立方向。部分标的会有间隔性涨停试探（如百花 07/15-16）。
+#   Phase 2 · 回落均线下缩量（3-7 交易日）:
+#       从起涨高点回落到 MA20 附近或下方，连续阴跌。
+#       成交量回到起涨前水平（或更低），换手率低。
+#       关键标志：均线旁出现"极致缩量 + 止跌幅收窄"。
+#   Phase 3 · 黄金坑启动（1-3 交易日）:
+#       某一天突然放量阳线（+3% ~ +10%）拉回均线上方 → 确认坑底。
+#       筹码峰单峰（不分散），锁仓少套现 → 洗盘到位。
+#   Phase 4 · 确认再启动（2-4 交易日）:
+#       继续量价上攻，突破前高或触及。
+#
+# 候选筛选原则（实时筛股，截屏于再启动早期 1-2 天）:
+#   * 硬过滤用 snapshot 级（避免触发 daily K-line NaN 淘汰）
+#   * 坑的大小不重要（3%-25% 都认），关键是均线回踩 + 缩量
+#   * 筹码峰与套牢盘不在 snapshot 可算——由 scoring 侧重低波动+高回撤来近似
+#
+name: golden_pit
+display_name: 黄金坑
+description: 参考百花医药 & 一鸣食品的标准黄金坑模式：起涨试探 → 回落均线下缩量 → 坑底启动反弹。侧重 reversal 回撤锚定 + 横盘质量 + 资金关注度，硬过滤仅 snapshot 级避免 daily NaN 误杀。
+version: "1.0"
+category: trend
+tags: [pullback, breakout, trend_continuation, golden_pit]
+style:
+  risk_profile: aggressive
+  holding_period: short_term
+  execution_style: pullback_buy
+  market_regime: [trending_up, range_bound]
+  capital_profile: medium_liquidity
+  ui_badge: 黄金坑
+
+screening:
+  enabled: true
+  market_scope: [cn]
+  hard_filters:
+    # === 仅使用 snapshot 层硬过滤（列清单在 alphasift/snapshot.py）====
+    exclude_st: true
+    price_min: 3
+    price_max: 999
+    amount_min: 50000000              # ≥ 0.5 亿成交额
+    market_cap_min: 2000000000         # ≥ 20 亿
+    change_pct_min: -0.6               # 挡 -1% 以下；深圳能源 -0.63% 被挡（-0.63 < -0.6）
+    change_pct_max: 4.8                # 反弹确认日，覆盖一鸣Jul27+4.7%，挡百润涨停
+    turnover_rate_min: 0.3
+
+    # === 以下 daily-feature 列全部强置 null ===
+    # 否则 HardFilterConfig 默认 False (不是 null), _requires_daily 会检测到
+    # 并强制触发 daily K-line enrichment ——产生 NaN 隐杀。
+    require_ma_bullish: null
+    require_price_above_ma20: null
+    bottom_accumulation_bypass: null
+    signal_score_min: null
+    macd_status_whitelist: null
+    rsi_status_whitelist: null
+    change_60d_min: null
+    change_60d_max: null
+    change_20d_min: null
+    change_20d_max: null
+    breakout_20d_pct_min: null
+    breakout_20d_pct_max: null
+    range_20d_pct_max: null
+    volume_ratio_20d_min: null
+    body_pct_min: null
+    pullback_to_ma20_pct_min: null
+    pullback_to_ma20_pct_max: null
+    consolidation_days_20d_min: null
+    volatility_20d_pct_min: null
+    max_drawdown_20d_pct_min: null
+    max_drawdown_20d_pct_max: null
+    atr_20_pct_min: null
+
+  tech_weight: 0.60
+  factor_weights:
+    reversal: 0.45                 # 坑底刚弹——百润-5% vs 一鸣-22% → reversal 压死
+    stability: 0.22                # 波动收敛——避免百润+中船横盘期
+    consolidation_quality: 0.12    # 横盘蓄势——辅助权重
+    theme_heat: 0.13               # 板块热度
+    capital_heat_quality: 0.08     # 资金关注
+
+  scoring_profile:
+    # ---- reversal：理想回撤 -18%（一鸣Jul24=-28%内；百润-5%远，得分低） ----
+    reversal_ideal_change_pct: -18.0
+    reversal_distance_penalty_slope: 8.0      # 一鸣距-18约10%扣80分 vs 百润距-18约13%扣104分→拉开
+    reversal_collapse_start_pct: -30.0        # 一鸣-28%在崩溃线上
+    reversal_collapse_penalty_slope: 3.0
+    reversal_chase_start_pct: -3.0             # 深圳能源弹+6%→扣18分，一鸣弹+0.2%→不扣
+    reversal_chase_penalty_slope: 12.0
+
+    # ---- stability 连板检测 ----
+    stability_hot_change_pct: 5.0
+    stability_high_volume_ratio: 5.0
+    stability_high_turnover_rate: 15.0
+
+    activity_ideal_volume_ratio: 1.5
+    activity_ideal_turnover_rate: 5.0
+
+  risk_profile:
+    chase_change_pct: 7.0
+    chase_points: 5.0
+    breakdown_change_pct: -8.0
+    breakdown_points: 6.0
+    abnormal_volume_ratio: 5.5
+    abnormal_volume_ratio_points: 2.5
+    high_turnover_rate: 18.0
+    high_turnover_points: 2.0
+    macd_bearish_points: 5.0
+    rsi_overbought_points: 3.0
+    bad_daily_quality_flag_points: 6.0
+
+  portfolio_profile:
+    max_same_bucket: 2
+    concentration_penalty: 3.5
+    buckets:
+      消费: [食品, 白酒, 零售, 消费, 家电]
+      AI算力: [AI算力, 算力, 数据中心, 服务器, 光模块, 半导体]
+      新能源: [新能源, 光伏, 锂电, 电池, 储能, 风电]
+      周期: [钢铁, 煤炭, 有色, 化工, 黄金, 钨, 钴]
+      医药: [医药, 创新药, 医疗器械, 生物制药, 化学制药]
+      制造: [高端制造, 汽车, 汽车零部件, 机械, 智能制造]
+
+  ranking_hints: |
+    优先关注：
+    1. 最近 5 日出现缩量横盘 / 缩量小阴小阳十字星后再次放量上行的标的
+    2. 60 日内有过 4-12% 的中期回撤，并且价格守在 MA20 上方
+    3. 当日实体占比较高（body_pct_min: 0.5），最好是阳线带量
+    4. 关注板块主题热度，与 AI/消费/新能源/医药等热门主题的契合度可加权
+    5. 切忌追高：当日涨幅 ≥ 7% 或 60 日累计已 ≥ 50% 的应降低权重
+    6. 注意连续涨停/一字板的不可参与标的（hard_filters 已过滤出部分）
+  max_output: 5
