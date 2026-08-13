@@ -664,10 +664,10 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             # 为每行推断主力意图（吸筹/出货/回流/观望）
             _annotate_intent(all_rows)
 
-            # 行业板块展示策略：涨幅 top5 + 跌幅 top5
+            # 行业板块展示策略：涨幅 top10 + 跌幅 top10
             from data_provider.tushare_fetcher import TushareFetcher
             overview.sector_money_flow = TushareFetcher._select_top_gainers_and_losers(
-                all_rows, top_n=10,
+                all_rows, top_n=20,
             )
 
             # 暗盘独立热点（block_trade 按全量行业聚合 Top 5）
