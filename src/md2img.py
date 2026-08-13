@@ -43,6 +43,42 @@ _m2f_healthy: Optional[bool] = None
 _m2f_unhealthy_since: Optional[float] = None
 _M2F_HEALTH_TTL_SECONDS = 60.0
 
+# m2f (markdown-to-file) ships with puppeteer-core 2.1.1 whose bundled
+# Chromium is 80.0.3987.0 (Feb 2020).  On Apple Silicon that binary runs
+# under Rosetta 2 and crashes intermittently (silent rc=0 with no PNG).
+# m2f supports an `executablePath=` CLI flag, so we prefer a locally
+# installed, up-to-date Chrome/Chromium/Edge when available.
+_SYSTEM_CHROME_CANDIDATES = (
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/microsoft-edge",
+)
+
+
+def _find_system_chrome() -> Optional[str]:
+    """Return a usable Chrome/Chromium/Edge executable path, or None."""
+    for candidate in _SYSTEM_CHROME_CANDIDATES:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _m2f_cmd(m2f_bin: str, md_path: str, temp_dir: str) -> list:
+    """Build the m2f CLI argv, preferring a modern system Chrome when present.
+
+    Falls back to m2f's bundled Chromium 80 when no system browser is found.
+    """
+    cmd = [m2f_bin, md_path, "png", f"outputDirectory={temp_dir}"]
+    chrome = _find_system_chrome()
+    if chrome:
+        cmd.append(f"executablePath={chrome}")
+    return cmd
+
 
 def warmup_m2f() -> None:
     """Pre-warm m2f's bundled puppeteer Chromium on server startup.
@@ -72,7 +108,7 @@ def warmup_m2f() -> None:
 
         for attempt in range(3):
             result = subprocess.run(
-                [m2f_bin, md_path, "png", f"outputDirectory={temp_dir}"],
+                _m2f_cmd(m2f_bin, md_path, temp_dir),
                 capture_output=True,
                 timeout=30,
                 check=False,
@@ -219,7 +255,7 @@ def _markdown_to_image_m2f(
                 )
 
             result = subprocess.run(
-                [m2f_command, md_path, "png", f"outputDirectory={temp_dir}"],
+                _m2f_cmd(m2f_command, md_path, temp_dir),
                 capture_output=True,
                 timeout=60,
                 check=False,
@@ -351,7 +387,7 @@ def _html_to_image_m2f(html_content: str) -> Optional[bytes]:
             f.write(html_content)
 
         result = subprocess.run(
-            [m2f_command, md_path, "png", f"outputDirectory={temp_dir}"],
+            _m2f_cmd(m2f_command, md_path, temp_dir),
             capture_output=True,
             timeout=120,
             check=False,
@@ -407,16 +443,27 @@ def html_to_image(html_content: str) -> Optional[bytes]:
 
     # Engine 1: m2f (markdown-to-file) — the only engine that supports
     # arbitrary pre-built HTML reliably in this codebase.
-    result = _html_to_image_m2f(html_content)
-    if result is not None:
-        return result
+    # Retry up to 2 more times with short sleeps so a transient cold-start
+    # crash on macOS ARM doesn't propagate as a 503 to the frontend.
+    last_err: Optional[str] = None
+    for attempt in range(3):
+        result = _html_to_image_m2f(html_content)
+        if result is not None:
+            return result
+        last_err = "m2f cold-start failed"
+        # If the failure looks like a transient cold start (server uptime is
+        # short and no warmup has been recorded yet), warm up before retrying.
+        if _m2f_healthy in (None, False) and attempt == 0:
+            warmup_m2f()
+        if attempt < 2:
+            time.sleep(2)
 
-    # Fall back to the standard markdown pipeline for engines that need to
-    # rebuild HTML from structured data. This is a safety net: it degrades to
-    # the original single-poster look instead of failing outright, but the
-    # preferred path is the direct HTML→m2f conversion above.
-    logger.info("html_to_image falling back to markdown pipeline")
-    return markdown_to_image("", structured_payload=None)
+    logger.warning(
+        "html_to_image giving up on m2f after 3 attempts (%s); "
+        "batch share image will fall back to wkhtmltoimage next time",
+        last_err,
+    )
+    return None
 
 
 def markdown_to_image(
