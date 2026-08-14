@@ -33,13 +33,13 @@ screening:
     price_max: 220
   tech_weight: 0.45
   factor_weights:
-    momentum: 0.28
+    momentum: 0.24
     value: 0.15
     liquidity: 0.18
     activity: 0.15
     stability: 0.12
     reversal: 0.04
-    theme_heat: 0.06
+    theme_heat: 0.1
     size: 0.02
   scoring_profile:
     momentum_chase_start_pct: 5.0

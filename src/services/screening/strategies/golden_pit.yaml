@@ -59,7 +59,7 @@ screening:
     macd_status_whitelist: null
     rsi_status_whitelist: null
     change_60d_min: null
-    change_60d_max: null
+    change_60d_max: 35.0              # 温和：排除60日涨超35%的极端票，同时触发 daily enrichment 填充 change_60d
     change_20d_min: null
     change_20d_max: null
     breakout_20d_pct_min: null
@@ -77,23 +77,33 @@ screening:
 
   tech_weight: 0.60
   factor_weights:
-    reversal: 0.45                 # 坑底刚弹——百润-5% vs 一鸣-22% → reversal 压死
-    stability: 0.22                # 波动收敛——避免百润+中船横盘期
-    consolidation_quality: 0.12    # 横盘蓄势——辅助权重
-    theme_heat: 0.13               # 板块热度
+    stability: 0.30                # 波动收敛=筹码集中：河钢8/10+4%、8/11-2.35%大起大落→低分；长源缩量企稳→高分
+    momentum: 0.20                 # 含 change_60d：惩罚"已涨太多"的河钢(+25%)
+    reversal: 0.18                 # 企稳确认（当日 change 接近 0 得高分）
+    consolidation_quality: 0.14    # 横盘蓄势
+    theme_heat: 0.10               # 板块热度
     capital_heat_quality: 0.08     # 资金关注
 
   scoring_profile:
-    # ---- reversal：理想回撤 -18%（一鸣Jul24=-28%内；百润-5%远，得分低） ----
-    reversal_ideal_change_pct: -18.0
-    reversal_distance_penalty_slope: 8.0      # 一鸣距-18约10%扣80分 vs 百润距-18约13%扣104分→拉开
-    reversal_collapse_start_pct: -30.0        # 一鸣-28%在崩溃线上
-    reversal_collapse_penalty_slope: 3.0
-    reversal_chase_start_pct: -3.0             # 深圳能源弹+6%→扣18分，一鸣弹+0.2%→不扣
-    reversal_chase_penalty_slope: 12.0
+    # ---- reversal：理想当日 0%（黄金坑企稳日收平），偏离扣分 ----
+    reversal_ideal_change_pct: 0.0
+    reversal_distance_penalty_slope: 6.0
+    reversal_collapse_start_pct: -5.0         # 当日跌超5%视为崩溃
+    reversal_collapse_penalty_slope: 8.0
+    reversal_chase_start_pct: 3.0             # 当日涨超3%开始追涨惩罚
+    reversal_chase_penalty_slope: 10.0
 
-    # ---- stability 连板检测 ----
-    stability_hot_change_pct: 5.0
+    # ---- momentum：60日涨太多惩罚（河钢距低+25%）----
+    momentum_60d_overheat_pct: 20.0           # 60日涨超20%开始扣分
+    momentum_60d_overheat_penalty_slope: 2.5
+    momentum_60d_breakdown_pct: -25.0
+    momentum_60d_breakdown_penalty_slope: 1.5
+    momentum_chase_start_pct: 3.0
+    momentum_chase_penalty_slope: 8.0
+
+    # ---- stability 波动检测（河钢8/10+4%、8/11-2.35% → 降级）----
+    stability_hot_change_pct: 4.0
+    stability_hot_change_penalty_slope: 8.0
     stability_high_volume_ratio: 5.0
     stability_high_turnover_rate: 15.0
 

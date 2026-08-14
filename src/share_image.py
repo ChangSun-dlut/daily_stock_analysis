@@ -1931,7 +1931,85 @@ def _stock_body(data: StockPoster, fallback_html: str) -> str:
     return f"{signal_row}{conclusion}{capital_flow}{snapshot}{sniper}{technical}{watch}{insights}{positions}{fallback}"
 
 
-def _market_body(data: MarketPoster, fallback_html: str, markdown_text: str) -> str:
+def _market_payload_section_blocks(
+    payload: Optional[Mapping[str, Any]],
+    language: str,
+) -> str:
+    """Render the 7 page-visible market review subcategories from ``payload.sections``.
+
+    The web page (``MarketReviewReportView``) draws each subcategory from
+    ``payload.sections[]``.  Sharing the same source keeps the share image aligned
+    with what the user sees on the page and avoids dropping categories that the
+    structured ``MarketPoster`` extraction could not find (e.g. when LLM prose is
+    verbose but lacks tables the parser recognises).
+    """
+
+    if not isinstance(payload, Mapping):
+        return ""
+
+    sections = payload.get("sections")
+    if not isinstance(sections, list):
+        return ""
+
+    parent_title = _plain(str(payload.get("title") or "")).strip().lower()
+    blocks: list[str] = []
+    seen_ids: set[str] = set()
+    for index, section in enumerate(sections):
+        if not isinstance(section, Mapping):
+            continue
+        section_title = _clean_value(section.get("title"), limit=60)
+        section_markdown = str(section.get("markdown") or "").strip()
+        if not section_markdown:
+            continue
+        if (
+            section_title
+            and parent_title
+            and _plain(section_title).strip().lower() == parent_title
+        ):
+            # Skip sections that mirror the top-level title to avoid duplicating the hero.
+            continue
+        display_title = section_title or _poster_text(language, "overview")
+        section_id = str(section.get("key") or f"section-{index}")
+        if section_id in seen_ids:
+            continue
+        seen_ids.add(section_id)
+        rendered_markdown = _render_market_section_markdown(section_markdown)
+        blocks.append(
+            _section_html(
+                display_title,
+                "§",
+                f'<div class="report-content">{rendered_markdown}</div>',
+                "market-payload-section",
+            )
+        )
+    return "".join(blocks)
+
+
+def _render_market_section_markdown(markdown_text: str) -> str:
+    """Render a market review section fragment to HTML.
+
+    Strips nested leading ``###`` headings (the page shows titles separately)
+    and collapses the fenced code/table directives the markdown parser
+    already understands.
+    """
+
+    cleaned_lines: list[str] = []
+    for raw_line in (markdown_text or "").splitlines():
+        if re.match(r"^\s*#{1,3}\s+", raw_line):
+            continue
+        cleaned_lines.append(raw_line)
+    cleaned = "\n".join(cleaned_lines).strip()
+    if not cleaned:
+        return ""
+    return _render_markdown_fragment(cleaned)
+
+
+def _market_body(
+    data: MarketPoster,
+    fallback_html: str,
+    markdown_text: str,
+    payload: Optional[Mapping[str, Any]] = None,
+) -> str:
     language = data.language
     signal = ""
     if data.score:
@@ -2008,9 +2086,14 @@ def _market_body(data: MarketPoster, fallback_html: str, markdown_text: str) -> 
     plan = _section_html(_poster_text(language, "strategy"), "✓", _list_html(data.plan), "strategy-strip") if data.plan else ""
     risks = _section_html(_poster_text(language, "risks"), "!", _list_html(data.risks), "risk-strip") if data.risks else ""
     structured = any((signal, indices, breadth, dimensions, sector_dual, detail_dual, catalysts, plan, risks))
-    keep_fallback = not structured or _should_keep_market_fallback(markdown_text, data)
+    payload_sections = _market_payload_section_blocks(payload, data.language)
+    has_payload_sections = bool(payload_sections)
+    keep_fallback = (
+        not structured
+        or _should_keep_market_fallback(markdown_text, data)
+    ) and not has_payload_sections
     fallback = f'<section class="report-fallback"><article class="report-content">{fallback_html}</article></section>' if keep_fallback else ""
-    return f"{signal}{indices}{breadth}{dimensions}{sector_dual}{detail_dual}{catalysts}{plan}{risks}{fallback}"
+    return f"{signal}{indices}{breadth}{dimensions}{sector_dual}{detail_dual}{catalysts}{plan}{risks}{payload_sections}{fallback}"
 
 
 def _generic_body(report_html: str) -> str:
@@ -2058,7 +2141,7 @@ def _multi_market_body(
         title = data.title or segment.title
         blocks.append(
             f'<section class="poster-section market-region-title"><h2><b>◎</b>{_escape(title)}</h2></section>'
-            f"{_market_body(data, fallback_html, segment.markdown)}"
+            f"{_market_body(data, fallback_html, segment.markdown, payload=payload)}"
         )
     return "".join(blocks)
 
@@ -2146,7 +2229,7 @@ def build_share_image_html(
             title = data.title
             language = data.language
             subtitle = data.summary or _poster_text(language, "market_subtitle")
-            content = _market_body(data, fallback_html, markdown_text)
+            content = _market_body(data, fallback_html, markdown_text, payload=structured_payload)
     elif report_kind == "stock":
         data = (
             _stock_data_from_payload(structured_payload, markdown_text, generated)

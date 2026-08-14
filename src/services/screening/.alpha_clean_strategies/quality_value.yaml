@@ -39,10 +39,11 @@ screening:
     value: 0.32
     stability: 0.24
     liquidity: 0.18
-    momentum: 0.08
-    activity: 0.08
+    momentum: 0.0
+    activity: 0.06
     reversal: 0.04
     size: 0.06
+    theme_heat: 0.1
   scoring_profile:
     momentum_chase_start_pct: 3.0
     momentum_chase_penalty_slope: 16.0

@@ -1903,3 +1903,70 @@ def test_share_image_strips_raw_html_from_markdown_body():
     assert "不应出现在海报里" not in html
     assert "extra tag" not in html
     assert "趋势偏多" in html
+
+
+def test_market_review_share_renders_all_seven_payload_subcategories():
+    """The page shows 7 subcategories (盘面总览/指数结构/板块主线/资金与情绪/消息催化/明日交易计划/风险提示).
+    The share image must surface the same set when the structured payload ships all of them,
+    even when the structured MarketPoster parser fails to extract a specific category.
+    """
+
+    payload = {
+        "version": 1,
+        "kind": "market_review",
+        "region": "cn",
+        "language": "zh",
+        "title": "A股市场复盘",
+        "date": "2026-08-14",
+        "color_scheme": "green_up",
+        "sections": [
+            {"key": "overview", "title": "盘面总览", "markdown": "盘面震荡回落，沪指收 3,820.45 **跌 0.32%**。"},
+            {"key": "index", "title": "指数结构", "markdown": "- 上证指数: 3,820.45 (-0.32%)\n- 深证成指: 12,860.12 (-0.55%)"},
+            {"key": "sectors", "title": "板块主线", "markdown": "领涨通信设备 / 贵金属。"},
+            {"key": "funds_sentiment", "title": "资金与情绪", "markdown": "北向净流出 32.5 亿；赚钱效应回落。"},
+            {"key": "news_catalysts", "title": "消息催化", "markdown": "- 工信部发布 6G 关键技术试验公告"},
+            {"key": "strategy_plan", "title": "明日交易计划", "markdown": "- 结论：均衡\n- 仓位区间：50-65%"},
+            {"key": "risk_alerts", "title": "风险提示", "markdown": "- 海外流动性预期反复\n- **建议仅供参考，不构成投资建议**"},
+        ],
+    }
+    # Markdown omits the structured tables the parser normally keys on, so the
+    # legacy MarketPoster path would render almost nothing.
+    markdown = "# A股市场复盘\n\n## 七、风险提示\n\n海外流动性预期反复。\n"
+
+    html = build_share_image_html(
+        markdown,
+        generated_on=date(2026, 8, 14),
+        structured_payload=payload,
+    )
+
+    expected_titles = [
+        "盘面总览",
+        "指数结构",
+        "板块主线",
+        "资金与情绪",
+        "消息催化",
+        "明日交易计划",
+        "风险提示",
+    ]
+    for title in expected_titles:
+        assert title in html, f"missing subcategory {title!r} in share image"
+    # Each rendered section should be wrapped in a dedicated poster-section block.
+    assert html.count("market-payload-section") == len(expected_titles)
+    # Fallback markdown render must be skipped because payload.sections already
+    # covers every visible subcategory (avoids duplicating hero prose).
+    assert '<section class="report-fallback"' not in html
+
+
+def test_market_review_share_falls_back_to_markdown_when_no_payload_sections():
+    """Without structured sections, share image still falls back to the full markdown."""
+
+    html = build_share_image_html(
+        "# A股市场复盘\n\n## 一、盘面总览\n\n盘面震荡回落...\n\n"
+        "## 二、指数结构\n\n- 上证指数: 3,820.45 (-0.32%)\n\n"
+        "## 七、风险提示\n\n海外流动性预期反复。\n",
+        generated_on=date(2026, 8, 14),
+    )
+
+    assert "盘面总览" in html
+    assert "指数结构" in html
+    assert "风险提示" in html

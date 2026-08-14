@@ -35,10 +35,11 @@ screening:
   tech_weight: 0.45
   factor_weights:
     reversal: 0.4
-    stability: 0.2
+    stability: 0.16
     liquidity: 0.18
     value: 0.16
-    activity: 0.06
+    activity: 0.0
+    theme_heat: 0.1
   scoring_profile:
     reversal_ideal_change_pct: -3.5
     reversal_collapse_start_pct: -7.0

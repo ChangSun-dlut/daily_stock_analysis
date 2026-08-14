@@ -220,7 +220,7 @@ const getCandidateReason = (item: AlphaSiftCandidate) => {
 };
 
 const getSignal = (item: AlphaSiftCandidate) => {
-  const rawSignal = item.raw.action ?? item.raw.signal ?? item.raw.recommendation;
+  const rawSignal = item.raw?.action ?? item.raw?.signal ?? item.raw?.recommendation;
   return typeof rawSignal === 'string' && rawSignal.trim() ? rawSignal : '观察';
 };
 

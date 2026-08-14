@@ -34,12 +34,13 @@ screening:
     atr_20_pct_max: 6.5
   tech_weight: 0.5
   factor_weights:
-    momentum: 0.32
+    momentum: 0.22
     stability: 0.22
     activity: 0.18
     liquidity: 0.15
     value: 0.08
     reversal: 0.05
+    theme_heat: 0.1
   scoring_profile:
     momentum_60d_overheat_pct: 35.0
     momentum_chase_start_pct: 5.0

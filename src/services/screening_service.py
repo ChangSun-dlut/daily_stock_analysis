@@ -1257,6 +1257,9 @@ class AlphaSiftService:
         daily_enrich_max_candidates: int | None = None,
         explain_filters: bool = False,
     ) -> Dict[str, Any]:
+        # 黄金坑走专用形态识别器，绕过 AlphaSift 通用因子评分
+        if strategy == "golden_pit":
+            return _screen_golden_pit_specialized(self.config, max_results)
         _ensure_alphasift_enabled(self.config)
         _ensure_alphasift_available_for_use()
         _ensure_supported_market(market)
@@ -3423,6 +3426,310 @@ class DsaEastMoneyHotspotProvider:
                 "hot_stock_score": _safe_float(row.get("hot_stock_score")) or 0.0,
             })
         return records
+
+
+def _screen_golden_pit_specialized(config: Config, max_results: int) -> Dict[str, Any]:
+    """黄金坑专用选股路径。
+
+    绕过 AlphaSift 通用因子评分，直接用专用形态识别器
+    ``src/services/screening/golden_pit.detect_golden_pit`` 对候选日线做
+    「底部横盘 → 拉升 → 黄金坑缩量回踩 → 温和反弹企稳」识别。
+    """
+    import uuid
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    import pandas as pd
+
+    from src.services.screening.golden_pit import detect_golden_pit
+    from src.services.screening.snapshot import fetch_snapshot_with_fallback
+    from src.services.history_loader import load_history_df
+
+    run_id = uuid.uuid4().hex[:12]
+    empty_result = {
+        "enabled": True,
+        "candidates": [],
+        "candidate_count": 0,
+        "run_id": run_id,
+        "strategy": "golden_pit",
+        "market": "cn",
+        "snapshot_count": 0,
+        "snapshot_source": "",
+        "after_filter_count": 0,
+        "llm_ranked": False,
+        "dsa_enrichment": {},
+        "warnings": [],
+        "source_errors": [],
+    }
+
+    # 1. 获取全市场快照
+    try:
+        snapshot = fetch_snapshot_with_fallback(
+            sources=["sina", "efinance", "tushare", "akshare_em", "em_datacenter"],
+            market="cn",
+        )
+    except Exception as exc:
+        logger.warning("黄金坑 snapshot 获取失败: %s", exc)
+        empty_result["source_errors"] = [f"snapshot 获取失败: {exc}"]
+        return empty_result
+
+    if snapshot is None or snapshot.empty:
+        empty_result["source_errors"] = ["snapshot 为空"]
+        return empty_result
+
+    snapshot_count = len(snapshot)
+    df = snapshot.copy()
+
+    # 2. 初筛（snapshot 级宽松过滤，缩小候选池）
+    def _col(candidates):
+        for c in candidates:
+            if c in df.columns:
+                return c
+        return None
+
+    code_col = _col(["code", "代码", "symbol"])
+    name_col = _col(["name", "名称", "stock_name"])
+    price_col = _col(["price", "最新价", "现价"])
+    change_col = _col(["change_pct", "涨跌幅", "pct_chg"])
+    amount_col = _col(["amount", "成交额", "成交金额"])
+    mcap_col = _col(["total_mv", "circ_mv", "总市值", "流通市值"])
+    turnover_col = _col(["turnover_rate", "换手率"])
+
+    if not code_col or not price_col:
+        empty_result["source_errors"] = ["snapshot 缺少 code/price 列"]
+        return empty_result
+
+    df = df.copy()
+    for col in (price_col, amount_col, mcap_col, change_col, turnover_col):
+        if col:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # 初筛（snapshot 免费列，收窄到 200-400 只，减少拉日线的 API 消耗）
+    if price_col:
+        df = df[(df[price_col] >= 3) & (df[price_col] <= 150)]      # 价格 3-150
+    if mcap_col:
+        df = df[(df[mcap_col] >= 2000000000) & (df[mcap_col] <= 15000000000)]  # 20-150 亿中小盘
+    if amount_col:
+        df = df[(df[amount_col] >= 100000000) & (df[amount_col] <= 1000000000)]  # 1-10 亿成交额
+    if turnover_col:
+        df = df[(df[turnover_col] >= 0.5) & (df[turnover_col] <= 5.0)]  # 换手 0.5-5%
+    if change_col:
+        df = df[(df[change_col] >= -1.0) & (df[change_col] <= 4.0)]  # 企稳/小反弹
+    if name_col:
+        df = df[~df[name_col].astype(str).str.contains("ST", na=False, case=False)]
+
+    after_filter_count = len(df)
+    logger.info("黄金坑 snapshot 初筛: %d -> %d", snapshot_count, after_filter_count)
+
+    # 板块热度：批量获取初筛候选行业，按行业聚合当日涨跌幅（主线板块加权）
+    industry_map: Dict[str, str] = {}
+    industry_heat: Dict[str, float] = {}
+    if not df.empty and change_col:
+        try:
+            _cand_list = [
+                {"code": str(r[code_col]), "name": str(r.get(name_col, ""))}
+                for _, r in df.iterrows()
+            ]
+            industry_map = _batch_fetch_industry(_cand_list)
+            _pct_by_industry: Dict[str, list] = {}
+            for _, r in df.iterrows():
+                raw_code = str(r[code_col])
+                norm_code = raw_code.split(".")[0]
+                ind = industry_map.get(norm_code)
+                pct = r.get(change_col)
+                if ind and pd.notna(pct):
+                    _pct_by_industry.setdefault(ind, []).append(float(pct))
+            for ind, pcts in _pct_by_industry.items():
+                if pcts:
+                    industry_heat[ind] = sum(pcts) / len(pcts)
+        except Exception as exc:
+            logger.warning("黄金坑板块热度聚合失败: %s", exc)
+
+    if df.empty:
+        empty_result["snapshot_count"] = snapshot_count
+        empty_result["snapshot_source"] = "snapshot"
+        empty_result["after_filter_count"] = 0
+        empty_result["warnings"] = ["初筛后无候选"]
+        return empty_result
+
+    # 3. 并发拉日线 + 黄金坑识别
+    from src.services.screening.golden_pit import adjust_score_with_context
+    from src.services.screening.daily import _compute_moneyflow_features
+
+    # 单例 fetcher manager，避免每次候选重复初始化（Tushare re-init 约 2s）
+    _chip_manager = None
+
+    def _get_chip_manager():
+        nonlocal _chip_manager
+        if _chip_manager is None:
+            from data_provider import DataFetcherManager
+            _chip_manager = DataFetcherManager()
+        return _chip_manager
+
+    def _detect_one(row):
+        code = str(row[code_col]).strip()
+        name = str(row.get(name_col, "")).strip() if name_col else ""
+        price = row.get(price_col)
+        change_pct = row.get(change_col) if change_col else None
+        try:
+            hist_df, _ = load_history_df(code, days=120)
+            sig = detect_golden_pit(hist_df)
+        except Exception as exc:
+            logger.debug("黄金坑识别 %s 失败: %s", code, exc)
+            return None
+        if not sig or not sig.matched:
+            return None
+
+        # 只在形态匹配候选上拉主力资金流 + 筹码分布（控制 API 消耗）
+        moneyflow = {}
+        chip = {}
+        try:
+            moneyflow = _compute_moneyflow_features(code) or {}
+        except Exception:
+            pass
+        try:
+            chip_obj = _get_chip_manager().get_chip_distribution(code)
+            if chip_obj is not None:
+                chip = chip_obj.to_dict() if hasattr(chip_obj, "to_dict") else dict(chip_obj)
+        except Exception:
+            pass
+
+        norm_code = code.split(".")[0]
+        industry = industry_map.get(norm_code, "")
+        board_heat_pct = industry_heat.get(industry) if industry else None
+
+        final_score = adjust_score_with_context(sig.score, moneyflow, chip, board_heat_pct)
+
+        return {
+            "code": code,
+            "name": name,
+            "price": price,
+            "change_pct": change_pct,
+            "score": round(final_score, 1),
+            "screen_score": round(final_score, 1),
+            "golden_pit_phase": sig.phase,
+            "golden_pit_drawdown": round(sig.pit_drawdown_pct, 1),
+            "golden_pit_bounce": round(sig.bounce_from_pit_pct, 1),
+            "golden_pit_volume_ratio": round(sig.pit_volume_ratio, 2),
+            "industry": industry,
+            "board_heat_pct": round(board_heat_pct, 2) if board_heat_pct is not None else None,
+            "mf_net_inflow_5d": moneyflow.get("mf_net_inflow_5d"),
+            "mf_consecutive_days": moneyflow.get("mf_consecutive_days"),
+            "chip_concentration_90": chip.get("concentration_90") if chip else None,
+            "chip_profit_ratio": chip.get("profit_ratio") if chip else None,
+            "reason": (
+                f"黄金坑形态：拉升 {sig.rally_gain_pct:.0f}% 后回撤 "
+                f"{sig.pit_drawdown_pct:.0f}%（缩量比 {sig.pit_volume_ratio:.2f}），"
+                f"当前距坑底 +{sig.bounce_from_pit_pct:.0f}% 企稳"
+            ),
+        }
+
+    results = []
+    rows = [row for _, row in df.iterrows()]
+    max_workers = min(16, len(rows))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_detect_one, row): i for i, row in enumerate(rows)}
+        for fut in as_completed(futures):
+            try:
+                item = fut.result(timeout=30)
+            except Exception:
+                continue
+            if item:
+                results.append(item)
+
+    # 4. 按黄金坑分数排序
+    results.sort(key=lambda x: x["score"], reverse=True)
+    top = results[:max_results]
+
+    # 5. 构造候选（对齐通用 candidate 结构）
+    _phase_action = {
+        "pit_bottom": "低吸",
+        "relaunch": "低吸",
+        "extended": "观察",
+    }
+    candidates = []
+    for rank, item in enumerate(top, start=1):
+        action = _phase_action.get(item.get("golden_pit_phase", ""), "观察")
+        raw = {
+            "code": item["code"],
+            "name": item["name"],
+            "action": action,
+            "signal": "黄金坑",
+            "price": item["price"],
+            "change_pct": item["change_pct"],
+            "golden_pit_phase": item.get("golden_pit_phase"),
+            "golden_pit_drawdown": item.get("golden_pit_drawdown"),
+            "golden_pit_bounce": item.get("golden_pit_bounce"),
+            "golden_pit_volume_ratio": item.get("golden_pit_volume_ratio"),
+            "mf_net_inflow_5d": item.get("mf_net_inflow_5d"),
+            "mf_consecutive_days": item.get("mf_consecutive_days"),
+            "chip_concentration_90": item.get("chip_concentration_90"),
+            "chip_profit_ratio": item.get("chip_profit_ratio"),
+            "board_heat_pct": item.get("board_heat_pct"),
+        }
+        candidates.append({
+            "rank": rank,
+            "code": item["code"],
+            "name": item["name"],
+            "score": item["score"],
+            "screen_score": item["screen_score"],
+            "price": item["price"],
+            "change_pct": item["change_pct"],
+            "reason": item["reason"],
+            "risk_level": "",
+            "risk_flags": [],
+            "industry": item.get("industry", ""),
+            "factor_scores": {
+                "golden_pit": item["score"],
+                "drawdown": item["golden_pit_drawdown"],
+                "bounce": item["golden_pit_bounce"],
+                "volume_ratio": item["golden_pit_volume_ratio"],
+                "mf_net_inflow_5d": item.get("mf_net_inflow_5d"),
+                "chip_concentration_90": item.get("chip_concentration_90"),
+                "board_heat_pct": item.get("board_heat_pct"),
+            },
+            "post_analysis_summaries": {},
+            "post_analysis_tags": [],
+            "raw": raw,
+        })
+
+    candidates, dsa_enrichment = _enrich_candidates_with_dsa(candidates)
+
+    result = {
+        "enabled": True,
+        "candidates": candidates,
+        "candidate_count": len(candidates),
+        "run_id": run_id,
+        "strategy": "golden_pit",
+        "market": "cn",
+        "snapshot_count": snapshot_count,
+        "snapshot_source": "snapshot",
+        "after_filter_count": after_filter_count,
+        "llm_ranked": False,
+        "llm_market_view": "",
+        "llm_selection_logic": "",
+        "llm_portfolio_risk": "",
+        "llm_coverage": None,
+        "llm_parse_errors": [],
+        "warnings": [f"专用黄金坑识别器，初筛 {after_filter_count} 只，匹配 {len(results)} 只"],
+        "source_errors": [],
+        "dsa_enrichment": dsa_enrichment,
+        "deep_analysis_requested": False,
+        "post_analyzers": [],
+        "daily_enriched": False,
+        "daily_enrich_count": 0,
+        "risk_enabled": False,
+        "portfolio_diversity_enabled": False,
+        "portfolio_concentration_notes": [],
+    }
+
+    try:
+        write_alphasift_screen_cache(
+            strategy="golden_pit", market="cn", result=result,
+        )
+    except Exception:
+        pass
+
+    return result
 
 
 def _build_alphasift_context(config: Config, *, max_results: Optional[int] = None) -> Dict[str, Any]:

@@ -34,12 +34,13 @@ screening:
   tech_weight: 0.2
   factor_weights:
     value: 0.34
-    stability: 0.20
+    stability: 0.2
     liquidity: 0.14
-    momentum: 0.10
-    activity: 0.10
+    momentum: 0.0
+    activity: 0.1
     reversal: 0.06
     size: 0.06
+    theme_heat: 0.1
   scoring_profile:
     momentum_chase_start_pct: 2.5
     momentum_chase_penalty_slope: 18.0

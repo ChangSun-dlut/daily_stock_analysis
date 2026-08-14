@@ -36,11 +36,11 @@ screening:
     consolidation_days_20d_min: 8
   tech_weight: 0.6
   factor_weights:
-    momentum: 0.32
+    momentum: 0.3
     activity: 0.28
     liquidity: 0.22
-    theme_heat: 0.08
-    stability: 0.10
+    theme_heat: 0.1
+    stability: 0.1
   scoring_profile:
     momentum_chase_start_pct: 7.0
     momentum_chase_penalty_slope: 11.0
