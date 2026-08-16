@@ -19,7 +19,7 @@ import logging
 import threading
 import time
 from datetime import datetime, date, timedelta, timezone
-from typing import Optional, List, Dict, Any, TYPE_CHECKING, Tuple, Callable, TypeVar, Union
+from typing import Optional, List, Dict, Any, TYPE_CHECKING, Tuple, Callable, TypeVar, Union, Sequence
 
 import pandas as pd
 from sqlalchemy import (
@@ -2691,9 +2691,55 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 .limit(limit)
             )
             results = session.execute(data_query).scalars().all()
-            
+
             return list(results), total
-    
+
+    def count_analysis_history_by_codes(
+        self,
+        codes: Sequence[str],
+        report_type: Optional[str] = None,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+    ) -> Dict[str, int]:
+        """批量统计每个 code 在 analysis_history 表里的命中次数。
+
+        单次 SQL 完成 ``code IN (...) GROUP BY code``，避免逐个 code 走 N+1 查询，
+        主要用于个股栏 (stock-bar) 这种需要为多只股票各拉一次 count 的场景。
+        """
+
+        if not codes:
+            return {}
+
+        normalized_codes = [str(c).strip() for c in codes if str(c or "").strip()]
+        if not normalized_codes:
+            return {}
+
+        from sqlalchemy import func
+
+        with self.get_session() as session:
+            conditions = [AnalysisHistory.code.in_(normalized_codes)]
+            if report_type:
+                conditions.append(AnalysisHistory.report_type == report_type)
+            if start_date:
+                conditions.append(
+                    AnalysisHistory.created_at
+                    >= datetime.combine(start_date, datetime.min.time())
+                )
+            if end_date:
+                conditions.append(
+                    AnalysisHistory.created_at
+                    < datetime.combine(end_date + timedelta(days=1), datetime.min.time())
+                )
+            where_clause = and_(*conditions)
+            query = (
+                select(AnalysisHistory.code, func.count(AnalysisHistory.id))
+                .where(where_clause)
+                .group_by(AnalysisHistory.code)
+            )
+            rows = session.execute(query).all()
+
+        return {code: int(count or 0) for code, count in rows}
+
     def get_analysis_history_by_id(self, record_id: int) -> Optional[AnalysisHistory]:
         """
         根据数据库主键 ID 查询单条分析历史记录

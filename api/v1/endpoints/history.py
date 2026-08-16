@@ -546,6 +546,23 @@ def get_stock_bar(
                 seen[norm_code] = record
 
         items = []
+        # 收集每个 norm_code 的若干候选 code 形式（含别名），下游一次性 GROUP BY 统计 count
+        # 避免对每个股票单独跑 ``get_analysis_history_paginated`` 走 N+1。
+        candidate_codes_by_norm: dict = {}
+        candidate_code_set: set = set()
+        for norm_code, record in seen.items():
+            display_stock_code = service._display_stock_code(record.code)
+            candidates = HistoryService._history_code_filter_candidates(display_stock_code)
+            candidate_codes_by_norm[norm_code] = candidates
+            for cand in candidates:
+                if cand:
+                    candidate_code_set.add(cand)
+        count_by_code = (
+            db_manager.count_analysis_history_by_codes(sorted(candidate_code_set))
+            if candidate_code_set
+            else {}
+        )
+
         for norm_code in seen:
             record = seen[norm_code]
             raw_result = parse_json_field(getattr(record, "raw_result", None))
@@ -571,10 +588,8 @@ def get_stock_bar(
             )
 
             display_stock_code = service._display_stock_code(record.code)
-            analysis_count = db_manager.get_analysis_history_paginated(
-                code=HistoryService._history_code_filter_candidates(display_stock_code),
-                limit=1,
-            )[1]
+            candidates = candidate_codes_by_norm.get(norm_code) or [display_stock_code]
+            analysis_count = sum(count_by_code.get(c, 0) for c in candidates)
             items.append(
                 StockBarItem(
                     id=record.id,

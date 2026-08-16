@@ -1076,6 +1076,8 @@ export const useStockPoolStore = create<StockPoolState>((set, get) => ({
   },
 
   refreshStockBar: async () => {
+    const state = get();
+    if (state.isLoadingStockBar) return;
     const requestSeq = ++stockBarRequestSeq;
     set({ isLoadingStockBar: true });
     try {

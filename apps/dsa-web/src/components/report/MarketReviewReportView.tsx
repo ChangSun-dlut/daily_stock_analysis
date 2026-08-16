@@ -1,5 +1,5 @@
 import type React from 'react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BarChart3, Clipboard, FileText, Gauge, Layers, ShieldAlert, TrendingUp, WalletCards, Workflow } from 'lucide-react';
 import { historyApi } from '../../api/history';
 import { formatUiText, UI_TEXT } from '../../i18n/uiText';
@@ -57,6 +57,11 @@ const isMarketReviewPayload = (value: unknown): value is MarketReviewPayload =>
 
 const TOP_HEADING_PATTERN = /^\s*#\s+(.+?)\s*(?:\n+|$)/;
 const SECTION_HEADING_PATTERN = /^(#{2,3})\s+(.+?)\s*$/gm;
+
+// 大盘复盘正文过长时，分批懒加载子类目，避免一次性渲染 7 段 LLM prose 拖慢首屏。
+const LAZY_INITIAL_SECTIONS = 2;
+const LAZY_BATCH_SIZE = 2;
+const LAZY_ROOT_MARGIN = '300px';
 
 const normalizeHeading = (value: string): string =>
   value.trim().replace(/\s+/g, ' ').toLowerCase();
@@ -643,6 +648,40 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
   const showStructuredMarketTitles = Boolean(marketReviewPayload?.markets);
   const canOpenRunFlow = recordId !== undefined && onOpenRunFlow;
 
+  // 懒加载状态：只渲染前 visibleSectionCount 个段落，滚动接近底部再追加渲染。
+  const [visibleSectionCount, setVisibleSectionCount] = useState(LAZY_INITIAL_SECTIONS);
+  const sectionSentinelRef = useRef<HTMLDivElement | null>(null);
+  const totalSectionCount = sections.length;
+  const hasMoreSections = visibleSectionCount < totalSectionCount;
+
+  // 切换记录 / payload 变化导致段落整体重建时，重置懒加载进度。
+  useEffect(() => {
+    setVisibleSectionCount(Math.min(LAZY_INITIAL_SECTIONS, totalSectionCount));
+  }, [totalSectionCount]);
+
+  useEffect(() => {
+    if (!hasMoreSections) {
+      return undefined;
+    }
+
+    const sentinel = sectionSentinelRef.current;
+    if (!sentinel) {
+      return undefined;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVisibleSectionCount((count) => Math.min(count + LAZY_BATCH_SIZE, totalSectionCount));
+        }
+      },
+      { rootMargin: LAZY_ROOT_MARGIN },
+    );
+
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMoreSections, totalSectionCount]);
+
   useEffect(() => {
     if (!recordId || providedContent || hasStructuredContent) {
       return undefined;
@@ -968,7 +1007,7 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
         </Card>
       ) : (
         <div data-testid="market-review-report" className="space-y-4">
-          {sections.map(({ id, title, content: sectionContent, icon: Icon }) => (
+          {sections.slice(0, visibleSectionCount).map(({ id, title, content: sectionContent, icon: Icon }) => (
             <Card key={id} variant="bordered" padding="md" className="home-panel-card text-left">
               <div className="mb-3 flex items-center gap-2">
                 <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
@@ -982,6 +1021,17 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
               />
             </Card>
           ))}
+          {hasMoreSections ? (
+            <div ref={sectionSentinelRef} aria-hidden="true">
+              <Card variant="bordered" padding="md" className="home-panel-card text-left">
+                <div className="animate-pulse space-y-3">
+                  <div className="h-4 w-1/3 rounded bg-subtle" />
+                  <div className="h-3 w-full rounded bg-subtle" />
+                  <div className="h-3 w-5/6 rounded bg-subtle" />
+                </div>
+              </Card>
+            </div>
+          ) : null}
         </div>
       )}
     </div>
