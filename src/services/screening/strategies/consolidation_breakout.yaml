@@ -1,6 +1,5 @@
 category: trend
-description: 横盘整理后量能温和回升，捕捉蓄势末期信号。consolidation_quality 专项因子主导评分，行业分层采样避免单一行业垄断。横盘越久（60/120
-  天以上）权重分越高。
+description: 横盘整理后量能温和回升，捕捉蓄势末期信号。consolidation_quality 专项因子主导评分，行业分层采样避免单一行业垄断。横盘越久（60/120 天以上）权重分越高。
 display_name: 横盘突破
 name: consolidation_breakout
 screening:
@@ -9,7 +8,7 @@ screening:
     activity: 0.12
     consolidation_quality: 0.62
     liquidity: 0.0
-    momentum: 0.1
+    momentum: 0.10
     stability: 0.08
     theme_heat: 0.08
     value: 0.0
@@ -106,7 +105,7 @@ screening:
     activity_ideal_turnover_rate: 1.5
     activity_ideal_volume_ratio: 2.0
     consolidation_quality_base: 50.0
-    consolidation_quality_breakout_bonus_slope: 0.8
+    consolidation_quality_breakout_bonus_slope: 0.80
     consolidation_quality_breakout_threshold_pct: 30.0
     consolidation_quality_days_ideal: 10.0
     consolidation_quality_days_slope: 4.0
@@ -114,8 +113,8 @@ screening:
     consolidation_quality_range_ideal_min: 2.0
     consolidation_quality_range_penalty_slope: 1.5
     consolidation_quality_volatility_ideal: 25.0
-    consolidation_quality_volatility_penalty_slope: 0.6
-    consolidation_quality_volume_ratio_ideal: 0.7
+    consolidation_quality_volatility_penalty_slope: 0.60
+    consolidation_quality_volume_ratio_ideal: 0.70
     consolidation_quality_volume_ratio_penalty_slope: 15.0
     consolidation_quality_overhead_threshold_pct: -15.0
     consolidation_quality_overhead_penalty_slope: 0.5
@@ -149,7 +148,7 @@ screening:
     industry_col: industry
     max_per_group_share: 0.35
     min_per_group: 5
-  tech_weight: 0.4
+  tech_weight: 0.40
 style:
   capital_profile: high_liquidity
   execution_style: breakout

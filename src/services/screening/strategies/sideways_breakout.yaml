@@ -1,0 +1,128 @@
+# 横盘蓄势突破策略 / Sideways Accumulation Breakout Strategy
+# 参考案例：
+#   澳洋健康(002172.SZ) 2026-08-03 → 2026-08-11（长期窄幅横盘 + 均线粘合 + 缩量蓄势 → 08-12 一字涨停突破）
+#
+# 模式定义（与黄金坑互补）:
+#   黄金坑看"坑"：底部横盘 → 放量拉升 → 缩量回踩坑底 → 温和反弹企稳；
+#   横盘突破看"势"：长期窄幅横盘 + MA5/10/20 高度粘合 + 缩量蓄势 → 放量突破。
+#
+# 核心判据:
+#   1. 连续蓄势天数（连续多日满足横盘蓄势条件）——蓄势越久、突破越临近、权重越高
+#   2. 均线粘合度 < 6%（MA5/10/20 间距越小变盘越近）
+#   3. 缩量蓄势（近10日均量 < 前10日均量的 85%）
+#   4. 收盘站上 MA5（多头蓄势）
+#   5. 距 60 日低点 ≤ 30%（还没涨完）
+#
+name: sideways_breakout
+display_name: 横盘蓄势突破
+description: 参考澳洋健康标准横盘突破模式：长期窄幅横盘 + 均线高度粘合 + 缩量蓄势，等待放量突破。核心加权"连续蓄势天数"，蓄势越久突破越可靠。
+version: "1.0"
+category: trend
+tags: [breakout, consolidation, accumulation, sideways]
+style:
+  risk_profile: aggressive
+  holding_period: short_term
+  execution_style: breakout
+  market_regime: [sideways, range_bound]
+  capital_profile: medium_liquidity
+  ui_badge: 突破
+
+screening:
+  enabled: true
+  market_scope: [cn]
+  hard_filters:
+    # === 仅使用 snapshot 层硬过滤（列清单在 alphasift/snapshot.py）====
+    exclude_st: true
+    price_min: 3
+    price_max: 150
+    amount_min: 50000000               # ≥ 0.5 亿成交额（横盘缩量期放宽下限）
+    market_cap_min: 2000000000         # ≥ 20 亿
+    change_pct_min: -2.0               # 蓄势末期/突破日，允许温和波动
+    change_pct_max: 5.0                # 排除涨停一字板（不可参与）
+    turnover_rate_min: 0.3
+
+    # === 以下 daily-feature 列全部强置 null（避免触发 daily K-line NaN 隐杀）====
+    require_ma_bullish: null
+    require_price_above_ma20: null
+    bottom_accumulation_bypass: null
+    signal_score_min: null
+    macd_status_whitelist: null
+    rsi_status_whitelist: null
+    change_60d_min: null
+    change_60d_max: null
+    change_20d_min: null
+    change_20d_max: null
+    breakout_20d_pct_min: null
+    breakout_20d_pct_max: null
+    range_20d_pct_max: null
+    volume_ratio_20d_min: null
+    body_pct_min: null
+    pullback_to_ma20_pct_min: null
+    pullback_to_ma20_pct_max: null
+    consolidation_days_20d_min: null
+    volatility_20d_pct_min: null
+    max_drawdown_20d_pct_min: null
+    max_drawdown_20d_pct_max: null
+    atr_20_pct_min: null
+
+  tech_weight: 0.60
+  factor_weights:
+    consolidation_quality: 0.30       # 横盘蓄势质量（连续天数主导）
+    stability: 0.22                    # 波动收敛
+    momentum: 0.20                     # 排除已涨太多
+    theme_heat: 0.10                   # 板块热度
+    capital_heat_quality: 0.08         # 资金关注
+    reversal: 0.10                     # 蓄势末期企稳
+
+  scoring_profile:
+    # ---- momentum：60日涨太多惩罚 ----
+    momentum_60d_overheat_pct: 20.0
+    momentum_60d_overheat_penalty_slope: 2.5
+    momentum_chase_start_pct: 3.0
+    momentum_chase_penalty_slope: 8.0
+
+    # ---- stability 波动检测 ----
+    stability_hot_change_pct: 5.0
+    stability_hot_change_penalty_slope: 8.0
+    stability_high_volume_ratio: 5.0
+    stability_high_turnover_rate: 15.0
+
+    # ---- consolidation_quality 横盘蓄势 ----
+    consolidation_quality_base: 50.0
+    consolidation_quality_days_ideal: 8.0
+    consolidation_quality_days_slope: 4.0
+    consolidation_quality_range_ideal_max: 12.0
+
+  risk_profile:
+    chase_change_pct: 7.0
+    chase_points: 5.0
+    breakdown_change_pct: -8.0
+    breakdown_points: 6.0
+    abnormal_volume_ratio: 5.5
+    abnormal_volume_ratio_points: 2.5
+    high_turnover_rate: 18.0
+    high_turnover_points: 2.0
+    macd_bearish_points: 5.0
+    rsi_overbought_points: 3.0
+    bad_daily_quality_flag_points: 6.0
+
+  portfolio_profile:
+    max_same_bucket: 2
+    concentration_penalty: 3.5
+    buckets:
+      消费: [食品, 白酒, 零售, 消费, 家电]
+      AI算力: [AI算力, 算力, 数据中心, 服务器, 光模块, 半导体]
+      新能源: [新能源, 光伏, 锂电, 电池, 储能, 风电]
+      周期: [钢铁, 煤炭, 有色, 化工, 黄金, 钨, 钴]
+      医药: [医药, 创新药, 医疗器械, 生物制药, 化学制药]
+      制造: [高端制造, 汽车, 汽车零部件, 机械, 智能制造]
+
+  ranking_hints: |
+    优先关注：
+    1. 连续蓄势天数 ≥ 5 的标的（蓄势越久突破越可靠，权重随天数递增）
+    2. MA5/10/20 粘合度 < 4.5% 的高度粘合形态
+    3. 近 10 日量能较前 10 日持续萎缩（量比 < 0.7 为佳）
+    4. 收盘站上 MA5，且距 60 日低点涨幅 ≤ 30%（还没涨完）
+    5. 当日量比温和放大（1.2-1.5）的蓄势末期信号加分
+    6. 切忌追高：当日涨幅 ≥ 7% 或已一字涨停的标的应排除
+  max_output: 5

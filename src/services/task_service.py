@@ -41,7 +41,16 @@ class TaskService:
     _instance: Optional['TaskService'] = None
     _lock = threading.Lock()
 
-    def __init__(self, max_workers: int = 3):
+    def __init__(self, max_workers: Optional[int] = None):
+        if max_workers is None:
+            try:
+                # 延迟导入避免循环依赖：task_service -> config -> 其它
+                from src.config import get_config
+                max_workers = int(get_config().max_workers)
+            except Exception:  # pragma: no cover - fallback for early init
+                max_workers = 5
+        if max_workers < 1:
+            max_workers = 1
         self._executor: Optional[ThreadPoolExecutor] = None
         self._max_workers = max_workers
         self._tasks: Dict[str, Dict[str, Any]] = {}

@@ -40,6 +40,9 @@ class GoldenPitParams:
     consolidation_max_range_pct: float = 16.0   # 横盘振幅上限（%）
     relaunch_max_bounce_pct: float = 12.0       # 坑底反弹超过此值=已起涨
     max_bounce_from_low_pct: float = 20.0       # 距60日低点累计涨幅上限（%），超过=已起涨
+    # === 下跌中继护栏（捷成股份反例）===
+    rally_start_drop_max_pct: float = 6.0       # 拉升起点当日跌幅上限（%），超过=暴跌日反抽，非底部健康拉升
+    min_drawdown_from_high60_pct: float = 15.0  # 坑底距 60 日高点回撤下限（%），低于=刚从顶部下来，非低位坑底
 
 
 @dataclass
@@ -121,6 +124,18 @@ def detect_golden_pit(
     bounce = (current_close - pit_close) / pit_close * 100
     sig.bounce_from_pit_pct = bounce
 
+    # ---- 高位回落护栏：坑底距 60 日高点回撤过浅 → 刚从顶部下来，非低位坑底 ----
+    # 捷成股份 8/4 见顶 5.72，8/14 坑底 5.10 仅回撤 10.8%，是冲高回落而非坑底。
+    high60 = high.iloc[seg_start:].max()
+    if high60 > 0:
+        sig.drawdown_from_high60_pct = (pit_close - high60) / high60 * 100
+        if sig.drawdown_from_high60_pct > -p.min_drawdown_from_high60_pct:
+            sig.notes.append(
+                f"坑底距60日高点仅回撤 {sig.drawdown_from_high60_pct:.1f}%，"
+                f"刚从顶部回落，非低位坑底"
+            )
+            return sig
+
     # ---- 技术面风险：MACD 状态 ----
     if len(close) >= 26:
         ema12 = close.ewm(span=12, adjust=False).mean()
@@ -132,10 +147,7 @@ def detect_golden_pit(
         sig.macd_below_zero = sig.macd_dif < 0
         sig.macd_dead_cross = sig.macd_dif < sig.macd_dea
 
-    # ---- 上方套牢盘近似：距 60 日高点回撤 ----
-    high60 = high.iloc[seg_start:].max()
-    if high60 > 0:
-        sig.drawdown_from_high60_pct = (current_close - high60) / high60 * 100
+    # drawdown_from_high60_pct 已在"高位回落护栏"处以坑底口径计算，此处不再重复。
 
     # ---- Phase 1 横盘检测（拉升起点之前）----
     sig.consolidation_ok = _check_consolidation(close, high, low, peak_idx, p)
@@ -176,6 +188,18 @@ def _find_rally_pit(close, high, low, volume, n, p):
     rally_gain = (peak_price - close.iloc[rally_start]) / close.iloc[rally_start] * 100
     if rally_gain < p.rally_min_gain_pct or rally_gain > p.rally_max_gain_pct:
         return None
+
+    # 1b. 拉升起点当日暴跌检测（下跌中继护栏）：
+    #     黄金坑的"拉升"起点应是底部横盘后的温和启动点，而不是暴跌日。
+    #     捷成股份 7/24 暴跌 -8.2% 作为"起点"，实为暴跌后 V 型反抽，非健康拉升。
+    if rally_start > 0 and close.iloc[rally_start - 1] > 0:
+        rally_start_chg = (
+            (close.iloc[rally_start] - close.iloc[rally_start - 1])
+            / close.iloc[rally_start - 1]
+            * 100
+        )
+        if rally_start_chg < -p.rally_start_drop_max_pct:
+            return None
 
     # 3. 坑底：峰值之后 pit_max_days 天内最低 close
     pit_end = min(n, peak_idx + 1 + p.pit_max_days)

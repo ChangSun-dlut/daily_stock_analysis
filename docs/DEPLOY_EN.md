@@ -61,7 +61,7 @@ The default `docker/docker-compose.yml` sets `limits.memory: 1G` and `reservatio
 
 - Minimum trial: `512M`, only for lightweight Web/API usage, single-stock runs, and low concurrency. Set `MAX_WORKERS=1`.
 - Recommended: `1G`, suitable for normal analysis when running either `server` or `analyzer`.
-- Heavy workloads: `2G+`, suitable when running `server + analyzer` together, multi-stock analysis, default `MAX_WORKERS=3`, market review, news expansion, image reports, or screening.
+- Heavy workloads: `2G+`, suitable when running `server + analyzer` together, multi-stock analysis, default `MAX_WORKERS=5`, market review, news expansion, image reports, or screening.
 
 If you can only use `512M`, avoid starting both `server` and `analyzer`, and disable non-essential market review, news expansion, and image report features.
 

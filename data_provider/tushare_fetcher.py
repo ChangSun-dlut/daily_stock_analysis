@@ -1197,8 +1197,15 @@ class TushareFetcher(BaseFetcher):
             else:
                 use_today = True
         else:
-            # 非交易日： today不在trade_dates中，trade_dates[0]就是最近交易日
-            use_today = True
+            # 非交易日（周末 / 节假日）：trade_dates[0] 就是最近的交易日，
+            # 直接用上一个交易日的数据，不要传 use_today=True 取当天。
+            # 此前传 True 导致非交易日 block_trade / moneyflow_ind_dc 全部拉空。
+            start_date = trade_dates[0]
+            logger.info(
+                f"[Tushare] 非交易日 ({china_date})，回退到最近交易日 {start_date}。"
+                "板块资金流 / 大宗交易通常 T+1 才有完整数据。"
+            )
+            return start_date
 
         start_date = self._pick_trade_date(trade_dates, use_today=use_today)
         if start_date is None:
@@ -1283,6 +1290,10 @@ class TushareFetcher(BaseFetcher):
 
         返回按 ``main_net`` 绝对值排序的前 ``top_n`` 个板块。
         缺失暗盘/大宗交易数据时，``block_net`` 设为 ``None``，前端会显示 "—"。
+
+        自适应回退：当 ``moneyflow_ind_dc`` 在 ``trade_date`` 当天返回空时（常见于
+        tushare 数据延迟 / 周末 / 节假日），自动按 trade_cal 回退到最近 1-3 个交易日
+        重试。最多尝试 5 个交易日，全部失败才返回 None。
         """
         try:
             start_date = trade_date or self.get_trade_time(early_time="00:00", late_time="15:30")
@@ -1290,13 +1301,43 @@ class TushareFetcher(BaseFetcher):
                 logger.warning("[Tushare] 无法确定板块资金流日期")
                 return None
 
-            logger.info("[Tushare] 获取板块资金流（%s）...", start_date)
-            df = self._call_api_with_rate_limit("moneyflow_ind_dc", trade_date=start_date)
+            # 自适应回退：当首选日期 moneyflow_ind_dc 为空，或者 block_trade 为空时
+            # （典型场景：tushare 数据延迟 / 周末 / 节假日当天数据未写入），
+            # 按交易日倒序尝试最近 1-5 个交易日，找到 moneyflow 与 block_trade 都有数据的日期。
+            trade_dates_all = self._get_trade_dates(start_date)
+            if not trade_dates_all:
+                return None
+            if trade_dates_all[0] != start_date and start_date in trade_dates_all:
+                trade_dates_all = [start_date] + [d for d in trade_dates_all if d != start_date]
+
+            df: Optional[pd.DataFrame] = None
+            used_date = start_date
+            for candidate in trade_dates_all[:5]:
+                logger.info("[Tushare] 获取板块资金流（%s）...", candidate)
+                df = self._call_api_with_rate_limit("moneyflow_ind_dc", trade_date=candidate)
+                if df is None or df.empty:
+                    continue
+                # 检查当天的 block_trade 是否有数据，没有就回退到下一天
+                bt = self._call_api_with_rate_limit("block_trade", trade_date=candidate)
+                if bt is None or bt.empty:
+                    logger.info(
+                        "[Tushare] %s block_trade 为空（数据延迟），回退到下一交易日",
+                        candidate,
+                    )
+                    df = None
+                    continue
+                used_date = candidate
+                if candidate != start_date:
+                    logger.info(
+                        "[Tushare] %s 资金流/暗盘回退到 %s 拿到数据",
+                        start_date, candidate,
+                    )
+                break
             if df is None or df.empty:
-                logger.info("[Tushare] moneyflow_ind_dc 返回空，跳过板块资金流")
+                logger.info("[Tushare] 连续 %d 天资金流/暗盘均为空，跳过板块资金流", 5)
                 return None
 
-            # 仅看"行业"content_type，排除"概念/其他"
+            # （典型场景：tushare 数据延迟 / 周末 / 节假日当天数据未写入），            # 按交易日倒序尝试最近 1-5 个交易日，找到 moneyflow 与 block_trade 都有数据的日期。            trade_dates_all = self._get_trade_dates(start_date)            if not trade_dates_all:                return None            if trade_dates_all[0] != start_date and start_date in trade_dates_all:                trade_dates_all = [start_date] + [d for d in trade_dates_all if d != start_date]            df: Optional[pd.DataFrame] = None            used_date = start_date            for candidate in trade_dates_all[:5]:                logger.info("[Tushare] 获取板块资金流（%s）...", candidate)                df = self._call_api_with_rate_limit("moneyflow_ind_dc", trade_date=candidate)                if df is None or df.empty:                    continue                # 检查当天的 block_trade 是否有数据，没有就回退到下一天                bt = self._call_api_with_rate_limit("block_trade", trade_date=candidate)                if bt is None or bt.empty:                    logger.info(                        "[Tushare] %s block_trade 为空（数据延迟），回退到下一交易日",                        candidate,                    )                    df = None                    continue                used_date = candidate                if candidate != start_date:                    logger.info(                        "[Tushare] %s 资金流/暗盘回退到 %s 拿到数据",                        start_date, candidate,                    )                break            if df is None or df.empty:                logger.info("[Tushare] 连续 %d 天资金流/暗盘均为空，跳过板块资金流", 5)                return None            # 仅看"行业"content_type，排除"概念/其他"
             if "content_type" in df.columns:
                 df = df[df["content_type"].astype(str) == "行业"].copy()
                 if df.empty:
@@ -1338,14 +1379,15 @@ class TushareFetcher(BaseFetcher):
                 )
 
             # 注入暗盘（大宗交易）按行业聚合
-            self._merge_block_trade_into_sector_money_flow(rows, trade_date=start_date)
+            # 自适应回退后用 used_date，让 block_trade / 五日主力都基于真实可用的日期
+            self._merge_block_trade_into_sector_money_flow(rows, trade_date=used_date)
 
             # 第二轮：按 lead_stock 名称补全（覆盖 stock_basic.industry 严格匹配
             # 漏掉的"同一 lead_stock 跨多板块"场景）
-            self._supplement_block_net_by_lead_stock(rows, trade_date=start_date)
+            self._supplement_block_net_by_lead_stock(rows, trade_date=used_date)
 
             # 五日主力净流入
-            self._merge_5d_main_net(rows, trade_date=start_date)
+            self._merge_5d_main_net(rows, trade_date=used_date)
 
             # 行业板块展示策略：涨幅 top_n/2 + 跌幅 top_n/2，覆盖涨跌两极
             # top_n >= 999 表示请求全量（用于 block_trade_heat 等下游）

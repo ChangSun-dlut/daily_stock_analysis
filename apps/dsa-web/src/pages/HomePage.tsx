@@ -281,6 +281,7 @@ const HomePage: React.FC = () => {
   const [isStockBarInitialLoadSettled, setIsStockBarInitialLoadSettled] = useState(false);
   const [selectedHistoryRecordIds, setSelectedHistoryRecordIds] = useState<number[]>([]);
   const [isBatchSharing, setIsBatchSharing] = useState(false);
+  const [isBatchAnalyzing, setIsBatchAnalyzing] = useState(false);
   const [completedTaskRefreshPendingCounts, setCompletedTaskRefreshPendingCounts] = useState<Map<string, number>>(
     new Map(),
   );
@@ -1378,6 +1379,52 @@ const HomePage: React.FC = () => {
     });
   }, [marketReviewHistoryItems, stockBarItems, t]);
 
+  const handleBatchAnalyze = useCallback(async () => {
+    if (isBatchAnalyzing) return;
+    if (selectedHistoryRecordIds.length < 2) return;
+
+    // selectedHistoryRecordIds 来自左侧 HistoryList 多选框（条目是 StockBarItem），
+    // 需从 mergedStockBarItems 取 stockCode；大盘复盘条目用 'MARKET' 哨兵，跳过。
+    const codeByRecord = new Map<number, string>();
+    for (const item of mergedStockBarItems) {
+      if (selectedHistoryRecordIds.includes(item.id)) {
+        const code = (item.stockCode || '').trim();
+        if (code && code !== 'MARKET') {
+          codeByRecord.set(item.id, code);
+        }
+      }
+    }
+    const codes = Array.from(new Set(codeByRecord.values()));
+    if (codes.length === 0) {
+      console.warn('[batch-analyze] no stock codes resolved from selection');
+      return;
+    }
+
+    setIsBatchAnalyzing(true);
+    try {
+      await Promise.allSettled(
+        codes.map((code) =>
+          submitAnalysis({
+            stockCode: code,
+            originalQuery: code,
+            selectionSource: 'manual',
+            forceRefresh: true,
+            skills: selectedAnalysisSkills,
+          }),
+        ),
+      );
+      console.info(`[batch-analyze] submitted ${codes.length} stocks`);
+    } finally {
+      setIsBatchAnalyzing(false);
+    }
+  }, [
+    isBatchAnalyzing,
+    mergedStockBarItems,
+    selectedAnalysisSkills,
+    selectedHistoryRecordIds,
+    submitAnalysis,
+  ]);
+
   const sidebarContent = useMemo(
     () => (
       <div className="flex h-full min-h-0 flex-col gap-2 overflow-hidden">
@@ -1766,6 +1813,19 @@ const HomePage: React.FC = () => {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                     </svg>
                     {t('home.fullReport')}
+                  </Button>
+                  <Button
+                    variant="home-action-ai"
+                    size="sm"
+                    disabled={selectedHistoryRecordIds.length < 2 || isBatchAnalyzing}
+                    isLoading={isBatchAnalyzing}
+                    loadingText={t('home.batchAnalyzeLoading')}
+                    onClick={() => void handleBatchAnalyze()}
+                  >
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                    {t('home.batchAnalyze')}
                   </Button>
                   <Button
                     variant="home-action-report"

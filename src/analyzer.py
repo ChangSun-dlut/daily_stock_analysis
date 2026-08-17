@@ -2371,7 +2371,8 @@ class GeminiAnalyzer:
 - 只有在跌破关键支撑、主力资金持续流出或风险显著放大时，才能给出卖出/减仓。
 - 必须输出 `dashboard.phase_decision` 七字段；盘中/午休/临近收盘要给出当前动作、观察条件和下一次检查点。
 - 建议输出可选展示字段 `dashboard.signal_attribution` 六字段；解释推荐理由的构成，包括技术指标、新闻舆情、基本面、市场环境的贡献度，以及最强看多/看空信号。
-- 盘前、非交易日或未知阶段不得伪造今日盘中走势；quote/daily_bars/technical 存在 stale、fallback、missing、fetch_failed、partial 或 estimated 时，`confidence_level` 不得为高。"""
+- 盘前、非交易日或未知阶段不得伪造今日盘中走势；quote/daily_bars/technical 存在 stale、fallback、missing、fetch_failed、partial 或 estimated 时，`confidence_level` 不得为高。
+- **市场阶段 ≠ 交易状态**：market_phase=盘前/盘后/非交易日仅表示当前不在连续竞价时段，不代表停牌；除非工具明确返回 suspend/停牌/停盘字段，否则禁止宣称“临时停牌”“停牌原因未明”等无证据陈述。不清楚当前是否停牌时输出“未检索到停牌/复牌公告”。"""
 
     TEXT_SYSTEM_PROMPT = """你是一位专业的股票分析助手。
 
@@ -4308,6 +4309,7 @@ class GeminiAnalyzer:
 - **检查清单**：每项用 ✅/⚠️/❌ 标记
 - **消息面时间合规**：`latest_news`、`risk_alerts`、`positive_catalysts` 不得包含超出近{news_window_days}日或时间未知的信息
 - **技术面一致性**：严禁把“空头排列”和“多头排列”等互斥结论同时当作有效依据；若基本面/事件面与技术面冲突，必须明确写“事件先行、技术待确认”或“基本面偏多，但技术面尚未确认”
+- **市场阶段 ≠ 交易状态**：market_phase=盘前/盘后/非交易日仅表示当前不在连续竞价时段，不代表停牌；除非工具明确返回 suspend/停牌/停盘字段，否则禁止在结论中宣称“临时停牌”“停牌原因未明”“停牌增加不确定性”等无证据陈述。如果不清楚当前是否停牌，输出“未检索到停牌/复牌公告”。
  
 请输出完整的 JSON 格式决策仪表盘。"""
 

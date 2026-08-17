@@ -1,0 +1,147 @@
+name: sideways_breakout
+display_name: 横盘蓄势突破
+description: 参考澳洋健康标准横盘突破模式：长期窄幅横盘 + 均线高度粘合 + 缩量蓄势，等待放量突破。核心加权"连续蓄势天数"，蓄势越久突破越可靠。
+version: '1.0'
+category: trend
+tags:
+- breakout
+- consolidation
+- accumulation
+- sideways
+style:
+  risk_profile: aggressive
+  holding_period: short_term
+  execution_style: breakout
+  market_regime:
+  - sideways
+  - range_bound
+  capital_profile: medium_liquidity
+  ui_badge: 突破
+screening:
+  enabled: true
+  market_scope:
+  - cn
+  hard_filters:
+    exclude_st: true
+    price_min: 3
+    price_max: 150
+    amount_min: 50000000
+    market_cap_min: 2000000000
+    change_pct_min: -2.0
+    change_pct_max: 5.0
+    turnover_rate_min: 0.3
+    require_ma_bullish: null
+    require_price_above_ma20: null
+    bottom_accumulation_bypass: null
+    signal_score_min: null
+    macd_status_whitelist: null
+    rsi_status_whitelist: null
+    change_60d_min: null
+    change_60d_max: null
+    change_20d_min: null
+    change_20d_max: null
+    breakout_20d_pct_min: null
+    breakout_20d_pct_max: null
+    range_20d_pct_max: null
+    volume_ratio_20d_min: null
+    body_pct_min: null
+    pullback_to_ma20_pct_min: null
+    pullback_to_ma20_pct_max: null
+    consolidation_days_20d_min: null
+    volatility_20d_pct_min: null
+    max_drawdown_20d_pct_min: null
+    max_drawdown_20d_pct_max: null
+    atr_20_pct_min: null
+  tech_weight: 0.6
+  factor_weights:
+    consolidation_quality: 0.3
+    stability: 0.22
+    momentum: 0.2
+    theme_heat: 0.1
+    capital_heat_quality: 0.08
+    reversal: 0.1
+  scoring_profile:
+    momentum_60d_overheat_pct: 20.0
+    momentum_60d_overheat_penalty_slope: 2.5
+    momentum_chase_start_pct: 3.0
+    momentum_chase_penalty_slope: 8.0
+    stability_hot_change_pct: 5.0
+    stability_hot_change_penalty_slope: 8.0
+    stability_high_volume_ratio: 5.0
+    stability_high_turnover_rate: 15.0
+    consolidation_quality_base: 50.0
+    consolidation_quality_days_ideal: 8.0
+    consolidation_quality_days_slope: 4.0
+    consolidation_quality_range_ideal_max: 12.0
+  risk_profile:
+    chase_change_pct: 7.0
+    chase_points: 5.0
+    breakdown_change_pct: -8.0
+    breakdown_points: 6.0
+    abnormal_volume_ratio: 5.5
+    abnormal_volume_ratio_points: 2.5
+    high_turnover_rate: 18.0
+    high_turnover_points: 2.0
+    macd_bearish_points: 5.0
+    rsi_overbought_points: 3.0
+    bad_daily_quality_flag_points: 6.0
+  portfolio_profile:
+    max_same_bucket: 2
+    concentration_penalty: 3.5
+    buckets:
+      消费:
+      - 食品
+      - 白酒
+      - 零售
+      - 消费
+      - 家电
+      AI算力:
+      - AI算力
+      - 算力
+      - 数据中心
+      - 服务器
+      - 光模块
+      - 半导体
+      新能源:
+      - 新能源
+      - 光伏
+      - 锂电
+      - 电池
+      - 储能
+      - 风电
+      周期:
+      - 钢铁
+      - 煤炭
+      - 有色
+      - 化工
+      - 黄金
+      - 钨
+      - 钴
+      医药:
+      - 医药
+      - 创新药
+      - 医疗器械
+      - 生物制药
+      - 化学制药
+      制造:
+      - 高端制造
+      - 汽车
+      - 汽车零部件
+      - 机械
+      - 智能制造
+  ranking_hints: '优先关注：
+
+    1. 连续蓄势天数 ≥ 5 的标的（蓄势越久突破越可靠，权重随天数递增）
+
+    2. MA5/10/20 粘合度 < 4.5% 的高度粘合形态
+
+    3. 近 10 日量能较前 10 日持续萎缩（量比 < 0.7 为佳）
+
+    4. 收盘站上 MA5，且距 60 日低点涨幅 ≤ 30%（还没涨完）
+
+    5. 当日量比温和放大（1.2-1.5）的蓄势末期信号加分
+
+    6. 切忌追高：当日涨幅 ≥ 7% 或已一字涨停的标的应排除
+
+    '
+  max_output: 5
