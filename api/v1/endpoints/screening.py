@@ -126,10 +126,12 @@ def alphasift_hotspot_detail(
 @router.get("/sector-moneyflow")
 def alphasift_sector_moneyflow(
     top_n: int = Query(100, ge=1, le=500),
+    refresh: bool = Query(False),
     _config: Config = Depends(get_config_dep),
 ) -> Dict[str, Any]:
     """返回板块资金流向分析（主力净流入、净流出、中户/散户流向等）。"""
-    return get_sector_moneyflow(top_n=top_n)
+    refresh_value = refresh if isinstance(refresh, bool) else bool(getattr(refresh, "default", False))
+    return get_sector_moneyflow(top_n=top_n, force_refresh=refresh_value)
 
 
 @router.post("/install")

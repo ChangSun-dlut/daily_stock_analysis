@@ -3787,6 +3787,47 @@ class DataFetcherManager:
             logger.warning("[板块资金流] 所有数据源均失败，最终错误: %s", last_error)
         return []
 
+    def get_sector_money_flow_realtime(
+        self,
+        top_n: int = 10,
+        trade_date: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """盘中实时板块资金流兜底（东财/akshare），不包含 Tushare。
+
+        与 :meth:`get_sector_money_flow`（Tushare 盘后快照优先）区分：
+        当 Tushare 盘中连续两次取值相同（盘后快照未更新）时，由服务层调用本方法
+        主动切换到实时源，按优先级尝试 akshare 东财实时接口。
+        """
+        last_error = ""
+        for fetcher in self._get_fetchers_snapshot():
+            fetcher_name = getattr(fetcher, "name", fetcher.__class__.__name__)
+            # 实时兜底只用东财系实时源，跳过 Tushare 盘后快照
+            if fetcher_name in ("TushareFetcher",):
+                continue
+            try:
+                impl = getattr(fetcher, "get_sector_money_flow", None)
+                if impl is None:
+                    continue
+                rows = impl(top_n=top_n, trade_date=trade_date)
+                if rows:
+                    logger.info(
+                        "[%s] 盘中实时板块资金流兜底成功 rows=%d",
+                        fetcher_name,
+                        len(rows),
+                    )
+                    return [dict(r) if isinstance(r, dict) else r for r in rows]
+                last_error = f"{fetcher_name}返回空结果"
+            except Exception as e:
+                error_type, error_reason = summarize_exception(e)
+                last_error = f"{fetcher_name} ({error_type}) {error_reason}"
+                logger.warning(
+                    "[%s] 盘中实时板块资金流兜底失败: %s", fetcher_name, error_reason,
+                )
+
+        if last_error:
+            logger.warning("[板块资金流] 实时兜底源均失败: %s", last_error)
+        return []
+
     def get_hot_stocks(self, n: int = 10) -> List[Dict[str, Any]]:
         """获取市场人气股榜（自动切换数据源）。"""
         last_error = ""

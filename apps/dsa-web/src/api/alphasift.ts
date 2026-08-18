@@ -221,6 +221,10 @@ export type AlphaSiftSectorMoneyflowItem = {
   retailNet: number;
   blockNet?: number | null;
   leadStock?: string | null;
+  topStockName?: string | null;
+  topStockChange?: number | null;
+  topStockChangeText?: string | null;
+  absorptionStock?: string | null;
   source: string;
 };
 
@@ -237,6 +241,8 @@ export type AlphaSiftSectorMoneyflowResponse = {
   topInflow: AlphaSiftSectorMoneyflowItem[];
   topOutflow: AlphaSiftSectorMoneyflowItem[];
   summaryText: string;
+  isTradingDay?: boolean;
+  isMarketOpenNow?: boolean;
 };
 
 export type AlphaSiftScreenResponse = {
@@ -517,9 +523,9 @@ export const alphasiftApi = {
     return toCamelCase<AlphaSiftHotspotDetail>(response.data);
   },
 
-  async getSectorMoneyflow(payload: { topN?: number } = {}): Promise<AlphaSiftSectorMoneyflowResponse> {
+  async getSectorMoneyflow(payload: { topN?: number; refresh?: boolean } = {}): Promise<AlphaSiftSectorMoneyflowResponse> {
     const response = await apiClient.get<Record<string, unknown>>('/api/v1/screening/sector-moneyflow', {
-      params: { top_n: payload.topN ?? 100 },
+      params: { top_n: payload.topN ?? 100, refresh: payload.refresh ?? false },
       timeout: ALPHASIFT_INSTALL_TIMEOUT_MS,
     });
     return toCamelCase<AlphaSiftSectorMoneyflowResponse>(response.data);

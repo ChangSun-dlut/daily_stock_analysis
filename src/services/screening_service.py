@@ -86,6 +86,8 @@ DSA_ALPHASIFT_HOTSPOT_PREFETCH_DETAIL_COUNT = 8
 DSA_ALPHASIFT_SCREEN_CACHE_DIR = DSA_ALPHASIFT_DATA_DIR / "screencache"
 DSA_ALPHASIFT_SECTOR_MONEYFLOW_CACHE_PATH = DSA_ALPHASIFT_DATA_DIR / "sector_moneyflow.json"
 DSA_ALPHASIFT_SECTOR_MONEYFLOW_CACHE_TTL_SECONDS = 30 * 60
+# 盘中实时兜底：Tushare 盘后快照连续 N 次取值相同（未更新）时切换实时源
+DSA_ALPHASIFT_SECTOR_MONEYFLOW_STALE_TRIGGER = 2
 DSA_ALPHASIFT_HOTSPOT_UNAVAILABLE_CODE = "eastmoney_hotspot_unavailable"
 DSA_ALPHASIFT_HOTSPOT_UNAVAILABLE_MESSAGE = "热点源连接中断，暂无可用缓存。"
 DSA_ALPHASIFT_HOTSPOT_CONNECTIVITY_ERROR_MARKERS = (
@@ -4752,8 +4754,25 @@ def _format_sector_money_amount(amount: Optional[float]) -> str:
     return f"{value:+.0f}元"
 
 
+def _format_sector_change_pct(pct: Optional[float]) -> str:
+    """板块/个股涨速格式化为带符号百分比文本。"""
+    value = float(pct) if pct is not None else 0.0
+    return f"{value:+.2f}%"
+
+
 def _build_sector_moneyflow_payload(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """将 DataFetcherManager 返回的板块资金流归一化为前端友好的 payload。"""
+    """将 DataFetcherManager 返回的板块资金流归一化为前端友好的 payload。
+
+    红框列按板块方向区分两种语义（数据源 Tushare moneyflow_ind_dc 仅提供
+    单个个股字段 ``buy_sm_amount_stock``，含义为"今日主力净流入最大股"）：
+    - 主力净流入板块（涨）：展示 ``top_stock_name`` + ``top_stock_change``，
+      该股即资金活跃代表股，日内涨速近似 = 板块整体涨速。
+    - 主力净流出板块（跌）：展示 ``absorption_stock``（吸筹量最多标的），
+      即板块内"主力净流入最大股"，代表下跌中的承接/吸筹方向；不再展示涨速。
+
+    精确的近 10 分钟个股涨速需分钟线接口（付费），这里用板块涨速近似，
+    避免每板块额外拉一次 rt_k 快速消耗 Tushare 免费配额（80/分钟）。
+    """
     if not rows:
         return {"available": False, "items": [], "top_inflow": [], "top_outflow": []}
 
@@ -4761,11 +4780,16 @@ def _build_sector_moneyflow_payload(rows: List[Dict[str, Any]]) -> Dict[str, Any
     for rank, row in enumerate(rows, start=1):
         main_net = float(row.get("main_net") or 0)
         direction = "in" if main_net > 0 else ("out" if main_net < 0 else "neutral")
+        pct_change = float(row.get("pct_change") or 0)
+        lead_stock_name = row.get("lead_stock")
+        lead_stock_name = str(lead_stock_name).strip() if lead_stock_name else ""
+        is_inflow = main_net > 0
+        is_outflow = main_net < 0
         item = {
             "rank": rank,
             "name": str(row.get("name") or ""),
             "ts_code": str(row.get("ts_code") or ""),
-            "pct_change": float(row.get("pct_change") or 0),
+            "pct_change": pct_change,
             "net": main_net,
             "net_text": _format_sector_money_amount(main_net),
             "direction": direction,
@@ -4773,7 +4797,13 @@ def _build_sector_moneyflow_payload(rows: List[Dict[str, Any]]) -> Dict[str, Any
             "mid_net": float(row.get("mid_net") or 0),
             "retail_net": float(row.get("retail_net") or 0),
             "block_net": float(row.get("block_net")) if row.get("block_net") is not None else None,
-            "lead_stock": str(row.get("lead_stock") or "") if row.get("lead_stock") else None,
+            "lead_stock": lead_stock_name or None,
+            # 上涨板块：涨速最快/资金活跃代表股 + 涨速
+            "top_stock_name": lead_stock_name or None if is_inflow else None,
+            "top_stock_change": pct_change if (is_inflow and lead_stock_name) else None,
+            "top_stock_change_text": _format_sector_change_pct(pct_change) if (is_inflow and lead_stock_name) else None,
+            # 下跌板块：吸筹量最多标的（主力净流入最大股）
+            "absorption_stock": lead_stock_name or None if is_outflow else None,
             "source": str(row.get("source") or ""),
         }
         items.append(_remove_non_finite_json_values(item))
@@ -4837,21 +4867,137 @@ def _write_sector_moneyflow_cache(payload: Dict[str, Any]) -> None:
         logger.warning(f"[板块资金流向] 缓存写入失败: {e}")
 
 
-def get_sector_moneyflow(top_n: int = 100) -> Dict[str, Any]:
-    """获取板块资金流向分析（主力/中户/散户），带本地 JSON 缓存。"""
-    cached = _read_sector_moneyflow_cache()
-    if cached is not None:
-        return cached
+# 盘中实时兜底状态（模块级，跨请求记录 Tushare 数据指纹与切换标记）
+_SECTOR_MONEYFLOW_REALTIME_MODE = False
+_SECTOR_MONEYFLOW_LAST_FINGERPRINT: Optional[str] = None
+_SECTOR_MONEYFLOW_STALE_COUNT = 0
+_SECTOR_MONEYFLOW_FALLBACK_LOCK = threading.Lock()
 
+
+def _cn_market_phase_context() -> Optional[Dict[str, Any]]:
+    """获取 A 股市场阶段上下文（交易日/是否开市），失败返回 None。"""
+    try:
+        from src.core.trading_calendar import build_market_phase_context
+
+        ctx = build_market_phase_context(market="cn")
+        return {
+            "is_trading_day": bool(ctx.is_trading_day),
+            "is_market_open_now": bool(ctx.is_market_open_now),
+        }
+    except Exception:
+        return None
+
+
+def _cn_market_open_now() -> bool:
+    """判断 A 股当前是否处于盘中交易时段（含午休）。"""
+    ctx = _cn_market_phase_context()
+    return bool(ctx and ctx.get("is_market_open_now"))
+
+
+def _sector_moneyflow_fingerprint(rows: List[Dict[str, Any]]) -> Optional[str]:
+    """对板块资金流行计算稳定指纹（仅用名称 + 主力净额，保留两位小数）。
+
+    返回 JSON 字符串；空数据返回 None。用于检测"连续两次取值相同"。
+    """
+    if not rows:
+        return None
+    keys = sorted(
+        (str(r.get("name") or ""), round(float(r.get("main_net") or 0), 2))
+        for r in rows[:30]
+    )
+    return json.dumps(keys, ensure_ascii=False)
+
+
+def _reset_sector_moneyflow_realtime_state() -> None:
+    """盘后/首次调用时重置盘中实时兜底状态。"""
+    global _SECTOR_MONEYFLOW_REALTIME_MODE, _SECTOR_MONEYFLOW_LAST_FINGERPRINT, _SECTOR_MONEYFLOW_STALE_COUNT
+    with _SECTOR_MONEYFLOW_FALLBACK_LOCK:
+        _SECTOR_MONEYFLOW_REALTIME_MODE = False
+        _SECTOR_MONEYFLOW_LAST_FINGERPRINT = None
+        _SECTOR_MONEYFLOW_STALE_COUNT = 0
+
+
+def get_sector_moneyflow(top_n: int = 100, force_refresh: bool = False) -> Dict[str, Any]:
+    """获取板块资金流向分析（主力/中户/散户）。
+
+    数据源策略：
+    - 盘后：Tushare ``moneyflow_ind_dc`` 盘后快照（含暗盘/5日主力），带 30 分钟缓存；
+      ``force_refresh=True`` 时绕过缓存强制重新拉取。
+    - 盘中：Tushare 为主，每次真实拉取并计算指纹；若连续
+      ``DSA_ALPHASIFT_SECTOR_MONEYFLOW_STALE_TRIGGER`` 次取值相同（盘后快照未更新），
+      则切换到 akshare/东财实时接口兜底。``force_refresh=True`` 时重置兜底状态，
+      立即按最新数据重新判断。
+    """
+    global _SECTOR_MONEYFLOW_REALTIME_MODE, _SECTOR_MONEYFLOW_LAST_FINGERPRINT, _SECTOR_MONEYFLOW_STALE_COUNT
+
+    if not _cn_market_open_now():
+        # 盘后：走原缓存逻辑，并重置盘中兜底状态
+        _reset_sector_moneyflow_realtime_state()
+        if not force_refresh:
+            cached = _read_sector_moneyflow_cache()
+            if cached is not None:
+                return cached
+        manager = _get_dsa_fetcher_manager()
+        try:
+            rows = manager.get_sector_money_flow(top_n=top_n)
+        except Exception as e:
+            logger.warning(f"[板块资金流向] 获取失败: {e}")
+            rows = []
+        payload = _build_sector_moneyflow_payload(rows or [])
+        _write_sector_moneyflow_cache(payload)
+        return payload
+
+    # 盘中：Tushare 为主 + 连续 N 次相同切换实时兜底
+    if force_refresh:
+        # 强制刷新：重置实时兜底状态，立即按最新数据重新判断
+        _reset_sector_moneyflow_realtime_state()
     manager = _get_dsa_fetcher_manager()
     try:
-        rows = manager.get_sector_money_flow(top_n=top_n)
+        tushare_rows = manager.get_sector_money_flow(top_n=top_n)
     except Exception as e:
-        logger.warning(f"[板块资金流向] 获取失败: {e}")
-        rows = []
+        logger.warning(f"[板块资金流向] Tushare 主源获取失败: {e}")
+        tushare_rows = []
+
+    rows = tushare_rows
+    source_hint = None
+    with _SECTOR_MONEYFLOW_FALLBACK_LOCK:
+        fingerprint = _sector_moneyflow_fingerprint(tushare_rows)
+        if not _SECTOR_MONEYFLOW_REALTIME_MODE:
+            if fingerprint is not None and fingerprint == _SECTOR_MONEYFLOW_LAST_FINGERPRINT:
+                _SECTOR_MONEYFLOW_STALE_COUNT += 1
+            else:
+                _SECTOR_MONEYFLOW_STALE_COUNT = 0
+            _SECTOR_MONEYFLOW_LAST_FINGERPRINT = fingerprint
+            if _SECTOR_MONEYFLOW_STALE_COUNT >= DSA_ALPHASIFT_SECTOR_MONEYFLOW_STALE_TRIGGER:
+                # 连续 N 次相同：Tushare 盘后快照未更新，切换到实时兜底
+                _SECTOR_MONEYFLOW_REALTIME_MODE = True
+                logger.info(
+                    "[板块资金流向] 盘中检测到 Tushare 数据连续 %d 次相同，切换实时兜底",
+                    _SECTOR_MONEYFLOW_STALE_COUNT,
+                )
+
+    if _SECTOR_MONEYFLOW_REALTIME_MODE:
+        try:
+            realtime_rows = manager.get_sector_money_flow_realtime(top_n=top_n)
+        except Exception as e:
+            logger.warning(f"[板块资金流向] 实时兜底获取失败: {e}")
+            realtime_rows = []
+        if realtime_rows:
+            rows = realtime_rows
+            source_hint = "realtime_fallback"
+        else:
+            # 兜底失败：退回 Tushare 盘后快照，保持可用
+            logger.warning("[板块资金流向] 实时兜底源无数据，退回 Tushare 盘后快照")
 
     payload = _build_sector_moneyflow_payload(rows or [])
-    _write_sector_moneyflow_cache(payload)
+    if source_hint:
+        payload["source"] = source_hint
+    # 附带市场阶段信息，供前端决定是否开启盘中定时刷新
+    _phase = _cn_market_phase_context()
+    if _phase:
+        payload["is_trading_day"] = _phase["is_trading_day"]
+        payload["is_market_open_now"] = _phase["is_market_open_now"]
+    # 盘中不写缓存：每次真实拉取以驱动"连续 N 次相同"检测；数据源由前端 10 分钟刷新兜底
     return payload
 
 

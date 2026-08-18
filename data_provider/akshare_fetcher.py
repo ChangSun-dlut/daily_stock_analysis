@@ -2071,6 +2071,74 @@ class AkshareFetcher(BaseFetcher):
             logger.error(f"[Akshare] 新浪接口获取板块排行也失败: {e}")
             return None
 
+    def get_sector_money_flow(
+        self,
+        top_n: int = 10,
+        trade_date: Optional[str] = None,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """板块资金流（东财实时，AkShare 封装）—— 盘中实时兜底源。
+
+        数据源：``ak.stock_sector_fund_flow_rank``（东财 push2 实时板块资金流），
+        盘中分钟级刷新，与 Tushare ``moneyflow_ind_dc`` 同源（均为东财口径），
+        用于 Tushare 盘后快照不更新时（盘中连续两次取值相同）的实时兜底。
+
+        返回结构与 ``TushareFetcher.get_sector_money_flow`` 对齐：
+            name / ts_code / pct_change / main_net / mid_net / retail_net /
+            block_net / lead_stock / source
+        """
+        import akshare as ak
+
+        def _pick(row: pd.Series, keywords: Tuple[str, ...]) -> Optional[Any]:
+            for col in row.index:
+                col_s = str(col)
+                if any(k in col_s for k in keywords):
+                    val = row.get(col)
+                    if val is not None and str(val).strip() not in ("", "-", "nan", "None"):
+                        return val
+            return None
+
+        try:
+            self._set_random_user_agent()
+            self._enforce_rate_limit()
+
+            df = ak.stock_sector_fund_flow_rank(indicator="今日", sector_type="行业资金流")
+            if df is None or df.empty:
+                logger.warning("[Akshare] 板块资金流实时接口返回空")
+                return None
+
+            rows: List[Dict[str, Any]] = []
+            for _, row in df.iterrows():
+                name = _pick(row, ("名称", "板块名称", "行业"))
+                if not name:
+                    continue
+                pct_change = safe_float(_pick(row, ("今日涨跌幅", "涨跌幅")))
+                main_net = safe_float(_pick(row, ("主力净流入-净额", "主力净流入", "主力净额")))
+                mid_net = safe_float(_pick(row, ("中单净流入-净额", "中单净流入", "中单净额")))
+                retail_net = safe_float(_pick(row, ("小单净流入-净额", "小单净流入", "小单净额")))
+                lead_stock = _pick(row, ("主力净流入最大股", "领涨股"))
+                rows.append(
+                    {
+                        "name": str(name).strip(),
+                        "ts_code": "",
+                        "pct_change": pct_change if pct_change is not None else 0.0,
+                        "main_net": main_net if main_net is not None else 0.0,
+                        "mid_net": mid_net if mid_net is not None else 0.0,
+                        "retail_net": retail_net if retail_net is not None else 0.0,
+                        "block_net": None,
+                        "lead_stock": str(lead_stock).strip() if lead_stock else None,
+                        "source": "akshare_realtime",
+                    }
+                )
+
+            if not rows:
+                return None
+            # 与 Tushare 一致：按主力净流入绝对值排序，覆盖涨跌两极
+            rows.sort(key=lambda r: abs(float(r["main_net"] or 0)), reverse=True)
+            return rows[: max(1, int(top_n))]
+        except Exception as e:
+            logger.warning("[Akshare] 获取板块资金流实时兜底失败: %s", e)
+            return None
+
     def get_concept_rankings(self, n: int = 5) -> Optional[Tuple[List[Dict], List[Dict]]]:
         """获取概念/题材涨跌榜。"""
         import akshare as ak

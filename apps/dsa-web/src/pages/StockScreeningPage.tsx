@@ -597,6 +597,42 @@ const SectorMoneyflowBar = ({
         {item.netText || formatSectorMoneyAmount(value)}
         {showAmount && item.pctChange ? ` · ${formatNumber(item.pctChange)}%` : null}
       </span>
+      {/* 红框位置：上涨排=涨速最快代表股；下跌排=吸筹量最多标的 */}
+      <span
+        className="flex w-24 shrink-0 flex-col items-end justify-center leading-tight"
+        title={
+          isIn
+            ? '板块内资金活跃度最高的代表股及其当日涨速'
+            : '板块内主力净流入最大的吸筹标的（下跌中承接方向）'
+        }
+      >
+        {isIn && item.topStockName ? (
+          <>
+            <span className="max-w-full truncate text-[11px] font-medium text-foreground/90">
+              {item.topStockName}
+            </span>
+            <span
+              className={cn(
+                'text-[11px] font-semibold tabular-nums',
+                (item.topStockChange ?? 0) > 0 && 'text-red-500',
+                (item.topStockChange ?? 0) < 0 && 'text-emerald-500',
+                (item.topStockChange ?? 0) === 0 && 'text-secondary-text',
+              )}
+            >
+              {item.topStockChangeText || (item.topStockChange != null ? `${item.topStockChange.toFixed(2)}%` : '—')}
+            </span>
+          </>
+        ) : !isIn && item.absorptionStock ? (
+          <>
+            <span className="max-w-full truncate text-[11px] font-medium text-foreground/90">
+              {item.absorptionStock}
+            </span>
+            <span className="text-[11px] font-semibold text-cyan">吸筹</span>
+          </>
+        ) : (
+          <span className="text-[11px] text-secondary-text/60">—</span>
+        )}
+      </span>
       <span
         className={cn(
           'w-16 shrink-0 text-right text-[11px] font-medium',
@@ -676,6 +712,11 @@ const StockScreeningPage: React.FC = () => {
   const [sectorMoneyflowDeltas, setSectorMoneyflowDeltas] = useState<Record<string, number>>({});
   const [loadingSectorMoneyflow, setLoadingSectorMoneyflow] = useState(false);
   const [sectorMoneyflowError, setSectorMoneyflowError] = useState('');
+  // 市场状态：是否交易日 / 是否开市（后端返回，用于控制盘中定时刷新开关）
+  const [sectorMarketState, setSectorMarketState] = useState<{
+    isTradingDay: boolean;
+    isMarketOpenNow: boolean;
+  } | null>(null);
   const [loadingHotspots, setLoadingHotspots] = useState(false);
   const [hotspotError, setHotspotError] = useState('');
   const [screenMeta, setScreenMeta] = useState<AlphaSiftScreenResponse | null>(null);
@@ -868,11 +909,18 @@ const StockScreeningPage: React.FC = () => {
     }
   }, []);
 
-  const loadSectorMoneyflow = useCallback(async () => {
+  const loadSectorMoneyflow = useCallback(async (forceRefresh = false) => {
     setLoadingSectorMoneyflow(true);
     setSectorMoneyflowError('');
     try {
-      const result = await alphasiftApi.getSectorMoneyflow({ topN: 100 });
+      const result = await alphasiftApi.getSectorMoneyflow({ topN: 100, refresh: forceRefresh });
+      // 同步后端返回的市场状态（交易日/是否开市）
+      if (typeof result.isTradingDay === 'boolean' || typeof result.isMarketOpenNow === 'boolean') {
+        setSectorMarketState({
+          isTradingDay: result.isTradingDay ?? false,
+          isMarketOpenNow: result.isMarketOpenNow ?? false,
+        });
+      }
       // 与上一次快照对比，计算每个板块的资金变化量（10 分钟区间）
       setSectorMoneyflow((prev) => {
         if (prev?.available && Array.isArray(prev.items) && result.available && Array.isArray(result.items)) {
@@ -966,14 +1014,32 @@ const StockScreeningPage: React.FC = () => {
     };
   }, [loadHotspots, loadSectorMoneyflow, loadStrategies]);
 
-  // 板块资金流向每 10 分钟自动刷新一次
+  // 板块资金流向自动刷新：仅「交易日 + 9:00~15:00」开启，每 10 分钟一次
   useEffect(() => {
     if (!isScreeningEnabled) return;
+
+    const shouldRefresh = () => {
+      // 1. 非交易日关闭（后端返回 isTradingDay === false 时）
+      if (sectorMarketState && sectorMarketState.isTradingDay === false) return false;
+      // 2. 时间窗口：每天 9:00 ~ 15:00（本地时区）
+      const now = new Date();
+      const minutes = now.getHours() * 60 + now.getMinutes();
+      const inWindow = minutes >= 9 * 60 && minutes < 15 * 60;
+      if (!inWindow) return false;
+      // 3. 若后端明确返回未开市，也关闭（兜底）
+      if (sectorMarketState && sectorMarketState.isMarketOpenNow === false) return false;
+      return true;
+    };
+
+    if (!shouldRefresh()) return;
+
     const timer = window.setInterval(() => {
-      void loadSectorMoneyflow();
+      if (shouldRefresh()) {
+        void loadSectorMoneyflow();
+      }
     }, 10 * 60 * 1000);
     return () => window.clearInterval(timer);
-  }, [isScreeningEnabled, loadSectorMoneyflow]);
+  }, [isScreeningEnabled, loadSectorMoneyflow, sectorMarketState]);
 
   // 服务端缓存同步：每切一次策略从服务端拉取最新存盘缓存并覆盖 localStorage，
   // 确保零停机部署后前端能拿到新增字段（如主力资金数据），不被本地旧缓存永久遮蔽。
@@ -1522,13 +1588,30 @@ const StockScreeningPage: React.FC = () => {
               <div>
                 <h2 className="text-sm font-semibold text-foreground">板块资金流向</h2>
                 <p className="mt-1 text-xs text-secondary-text">
-                  {sectorMoneyflow?.date ? `${sectorMoneyflow.date} 收盘` : 'A 股板块'}主力资金净流入/流出分布，每 10 分钟刷新；↑/↓ 为较上次刷新的区间变化，流光越快代表变化越剧烈。
+                  {sectorMoneyflow?.date ? `${sectorMoneyflow.date} 收盘` : 'A 股板块'}主力资金净流入/流出分布，每 10 分钟刷新；红框列上涨排为涨速最快代表股、下跌排为吸筹量最多标的，↑/↓ 为较上次刷新的区间变化，流光越快代表变化越剧烈。
                 </p>
               </div>
             </div>
-            <span className="rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1 text-xs font-semibold text-cyan">
-              {sectorMoneyflow?.source || 'tushare'}
-            </span>
+            <div className="flex shrink-0 items-center gap-2">
+              <span className="rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1 text-xs font-semibold text-cyan">
+                {(() => {
+                  const src = sectorMoneyflow?.source || 'tushare';
+                  if (src === 'realtime_fallback') return '实时兜底';
+                  if (src === 'akshare_realtime') return '东财实时';
+                  return src;
+                })()}
+              </span>
+              <button
+                type="button"
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-cyan/40 bg-cyan/10 px-3 text-xs font-semibold text-cyan transition-colors hover:border-cyan hover:bg-cyan/15 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => void loadSectorMoneyflow(true)}
+                disabled={loadingSectorMoneyflow}
+                title="绕过缓存强制重新拉取板块资金流数据"
+              >
+                <RefreshCw className={cn('h-3.5 w-3.5', loadingSectorMoneyflow && 'animate-spin')} />
+                强制刷新
+              </button>
+            </div>
           </div>
 
           {loadingSectorMoneyflow ? (
