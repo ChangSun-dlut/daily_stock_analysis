@@ -30,6 +30,8 @@ export type AlphaSiftCandidate = {
   name: string;
   score?: number | null;
   screenScore?: number | null;
+  /** 最近 30 天被该策略选出的天数（基于本地 screencache 统计）。 */
+  selectedDays?: number | null;
   reason: string;
   riskLevel?: string;
   riskFlags?: string[];
@@ -41,6 +43,23 @@ export type AlphaSiftCandidate = {
   mfConsecutiveDays?: number | null;
   mfInflowStrengthPct?: number | null;
   mfAvailable?: boolean | null;
+  /**
+   * 四档资金明细（超大单 / 大单 / 中单 / 小单），单位万元
+   */
+  mfTierBreakdown?: Array<{
+    tier: string;
+    net: number | null;
+    pct: number | null;
+    note: string;
+  }> | null;
+  /**
+   * 四档资金结构分析文本（如四档守恒、主力承接、散户离场等）
+   */
+  mfBreakdownText?: string;
+  /**
+   * 四档资金明细是否可用
+   */
+  mfBreakdownAvailable?: boolean;
   llmSector?: string;
   llmTheme?: string;
   llmTags?: string[];
@@ -187,6 +206,37 @@ export type AlphaSiftHotspotsResponse = {
   hotspots: AlphaSiftHotspot[];
   hotspotCount: number;
   details?: Record<string, AlphaSiftHotspotDetail>;
+};
+
+export type AlphaSiftSectorMoneyflowItem = {
+  rank: number;
+  name: string;
+  tsCode: string;
+  pctChange: number;
+  net: number;
+  netText: string;
+  direction: 'in' | 'out' | 'neutral';
+  mainNet: number;
+  midNet: number;
+  retailNet: number;
+  blockNet?: number | null;
+  leadStock?: string | null;
+  source: string;
+};
+
+export type AlphaSiftSectorMoneyflowResponse = {
+  available: boolean;
+  date?: string;
+  source?: string;
+  totalInflow: number;
+  totalOutflow: number;
+  netFlow: number;
+  inflowCount: number;
+  outflowCount: number;
+  items: AlphaSiftSectorMoneyflowItem[];
+  topInflow: AlphaSiftSectorMoneyflowItem[];
+  topOutflow: AlphaSiftSectorMoneyflowItem[];
+  summaryText: string;
 };
 
 export type AlphaSiftScreenResponse = {
@@ -465,6 +515,14 @@ export const alphasiftApi = {
       },
     );
     return toCamelCase<AlphaSiftHotspotDetail>(response.data);
+  },
+
+  async getSectorMoneyflow(payload: { topN?: number } = {}): Promise<AlphaSiftSectorMoneyflowResponse> {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/screening/sector-moneyflow', {
+      params: { top_n: payload.topN ?? 100 },
+      timeout: ALPHASIFT_INSTALL_TIMEOUT_MS,
+    });
+    return toCamelCase<AlphaSiftSectorMoneyflowResponse>(response.data);
   },
 
   async install(): Promise<AlphaSiftInstallResponse> {

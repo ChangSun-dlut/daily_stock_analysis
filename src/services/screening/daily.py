@@ -189,6 +189,11 @@ def enrich_daily_features(
             )
         for _idx, _mf in _mf_results:
             for _key, _value in _mf.items():
+                # list/dict 等 iterable 直接写入 DataFrame 新列会在 pandas 3.x 触发
+                # "Must have equal len keys and value when setting with an iterable"，
+                # 统一序列化为 JSON 字符串，读取端再解析。
+                if isinstance(_value, (list, dict)):
+                    _value = json.dumps(_value, ensure_ascii=False)
                 result.at[_idx, _key] = _value
 
     result.attrs["daily_errors"] = daily_errors
@@ -1524,7 +1529,12 @@ def _fetch_moneyflow_tushare(
         ts_code=ts_code,
         start_date=start_date,
         end_date=end_date,
-        fields="trade_date,ts_code,net_amount,net_amount_rate",
+        fields=(
+            "trade_date,ts_code,net_amount,net_amount_rate,"
+            "buy_elg_amount,buy_lg_amount,buy_md_amount,buy_sm_amount,"
+            "sell_elg_amount,sell_lg_amount,sell_md_amount,sell_sm_amount,"
+            "amount"
+        ),
     )
     if df is None or df.empty:
         return None
@@ -1603,6 +1613,10 @@ def _fetch_moneyflow_akshare(
         "日期": "trade_date",
         "主力净流入-净额": "net_amount",
         "主力净流入-净占比": "net_amount_rate",
+        "超大单净流入-净额": "net_elg_amount",
+        "大单净流入-净额": "net_lg_amount",
+        "中单净流入-净额": "net_md_amount",
+        "小单净流入-净额": "net_sm_amount",
     }
     df = df.rename(columns=rename_map)
     for k in ("trade_date", "net_amount", "net_amount_rate"):
@@ -1650,6 +1664,120 @@ def _fetch_moneyflow(
     return None, "unavailable"
 
 
+def _compute_tier_breakdown(moneyflow: pd.DataFrame) -> dict[str, object]:
+    """计算最新交易日的四档资金净额、占比与分析文本。
+
+    优先使用 Tushare ``moneyflow_dc`` 返回的买入/卖出金额（元）计算；
+    缺失时回退到 AkShare 风格的四档净流入净额（元/万元，通过正负号判断）。
+    输出：
+    - 超大单、大单、中单、小单净额（万元）
+    - 每档净额占当日成交额的比例（%）
+    - 简短说明（如主力承接/散户离场/无大单等）
+    """
+    if moneyflow is None or moneyflow.empty:
+        return {
+            "mf_tier_breakdown": None,
+            "mf_breakdown_text": "",
+            "mf_breakdown_available": False,
+        }
+
+    latest = moneyflow.iloc[-1]
+    amount = _mf_to_float(latest.get("amount"))
+
+    # Tushare 形式：买入/卖出分开；AkShare 形式：净流入净额
+    tiers = [
+        ("超大单", "buy_elg_amount", "sell_elg_amount", "net_elg_amount"),
+        ("大单（主力）", "buy_lg_amount", "sell_lg_amount", "net_lg_amount"),
+        ("中单", "buy_md_amount", "sell_md_amount", "net_md_amount"),
+        ("小单（散户）", "buy_sm_amount", "sell_sm_amount", "net_sm_amount"),
+    ]
+
+    breakdown: list[dict[str, object]] = []
+    total_net_yuan = 0.0
+    for label, buy_col, sell_col, net_col in tiers:
+        buy = _mf_to_float(latest.get(buy_col))
+        sell = _mf_to_float(latest.get(sell_col))
+        net_direct = _mf_to_float(latest.get(net_col))
+
+        if buy is not None and sell is not None:
+            net_yuan = buy - sell
+        elif net_direct is not None:
+            # AkShare 返回的净额通常已经是万元或元，这里统一按元处理需要缩放；
+            # 经验上个股资金流接口净额列常为万元，且量纲与 net_amount（万元）接近，
+            # 因此当作万元再转元。若数据异常会在守恒校验中暴露。
+            net_yuan = net_direct * 10000.0
+        else:
+            breakdown.append({
+                "tier": label,
+                "net": None,
+                "pct": None,
+                "note": "数据缺失",
+            })
+            continue
+
+        total_net_yuan += net_yuan
+        net_wan = round(net_yuan / 10000.0, 2)
+        pct = round((net_yuan / amount) * 100.0, 2) if amount and amount > 0 else None
+
+        if abs(net_wan) < 0.01:
+            note = f"今天无{label.split('（')[0]}"
+        elif label.startswith("超大单"):
+            note = f"占成交额 {pct}%" if pct is not None else "净流入" if net_wan > 0 else "净流出"
+        elif "主力" in label:
+            note = f"占成交额 {pct}%" if pct is not None else "主力流入" if net_wan > 0 else "主力流出"
+        elif "散户" in label:
+            note = "净流入" if net_wan > 0 else "净流出"
+        else:
+            note = f"占成交额 {pct}%" if pct is not None else "净流入" if net_wan > 0 else "净流出"
+
+        breakdown.append({
+            "tier": label,
+            "net": net_wan,
+            "pct": pct,
+            "note": note,
+        })
+
+    # 守恒验证：四档净额之和应接近 0（买入=卖出）
+    conservation_sum = round(total_net_yuan / 10000.0, 2)
+    conservation_ok = abs(conservation_sum) < 1.0
+
+    # 生成分析文本
+    lg = next((t for t in breakdown if t["tier"] == "大单（主力）"), None)
+    sm = next((t for t in breakdown if t["tier"] == "小单（散户）"), None)
+    elg = next((t for t in breakdown if t["tier"] == "超大单"), None)
+    md = next((t for t in breakdown if t["tier"] == "中单"), None)
+
+    parts: list[str] = []
+    if conservation_ok:
+        parts.append(f"四档守恒（{conservation_sum}≈0）")
+    else:
+        parts.append(f"四档净额合计 {conservation_sum} 万元")
+
+    structure: list[str] = []
+    if elg and isinstance(elg.get("net"), (int, float)) and elg["net"] > 0:
+        structure.append("超大单进场")
+    if lg and isinstance(lg.get("net"), (int, float)) and lg["net"] > 0:
+        structure.append("主力承接")
+    elif lg and isinstance(lg.get("net"), (int, float)) and lg["net"] < 0:
+        structure.append("主力出货")
+    if sm and isinstance(sm.get("net"), (int, float)) and sm["net"] < 0:
+        structure.append("散户离场")
+    elif sm and isinstance(sm.get("net"), (int, float)) and sm["net"] > 0:
+        structure.append("散户进场")
+    if md and isinstance(md.get("net"), (int, float)) and md["net"] > 0:
+        structure.append("中单跟进")
+
+    if structure:
+        parts.append("、".join(structure))
+    parts.append("量价结构自洽" if conservation_ok else "资金结构待确认")
+
+    return {
+        "mf_tier_breakdown": breakdown if breakdown else None,
+        "mf_breakdown_text": "，".join(parts),
+        "mf_breakdown_available": bool(breakdown),
+    }
+
+
 def _compute_moneyflow_features(
     code: str,
     *,
@@ -1668,6 +1796,9 @@ def _compute_moneyflow_features(
         "mf_consecutive_days": None,
         "mf_inflow_strength_pct": None,
         "mf_available": False,
+        "mf_tier_breakdown": None,
+        "mf_breakdown_text": "",
+        "mf_breakdown_available": False,
     }
 
     moneyflow, _src = _fetch_moneyflow(code, lookback_days=lookback_days)
@@ -1709,6 +1840,8 @@ def _compute_moneyflow_features(
     else:
         mf_inflow_strength_pct = None
 
+    tier_result = _compute_tier_breakdown(moneyflow)
+
     return {
         "mf_net_inflow": None if mf_net_inflow is None else round(mf_net_inflow, 2),
         "mf_net_inflow_5d": round(mf_net_inflow_5d, 2),
@@ -1718,6 +1851,7 @@ def _compute_moneyflow_features(
         "mf_consecutive_days": int(mf_consecutive_days),
         "mf_inflow_strength_pct": mf_inflow_strength_pct,
         "mf_available": True,
+        **tier_result,
     }
 
 

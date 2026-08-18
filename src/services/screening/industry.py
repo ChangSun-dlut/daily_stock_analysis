@@ -36,6 +36,10 @@ _NUMERIC_FIELDS = (
 )
 _TEXT_FIELDS = ("board_heat_summary", "board_heat_state")
 _HEAT_FIELDS = (*_NUMERIC_FIELDS, *_TEXT_FIELDS)
+# 连板梯队：同板块涨停家数阈值（主板 10cm / 创业板·科创板 20cm）
+_LIMIT_UP_MAIN_PCT = 9.5
+_LIMIT_UP_CHUANG_PCT = 19.5
+_CHUANG_PREFIXES = {"30", "68"}
 _FIELD_ALIASES = {
     "industry_rank": ["industry_rank", "行业排名", "板块排名", "排名"],
     "industry_change_pct": ["industry_change_pct", "行业涨跌幅", "板块涨跌幅", "涨跌幅"],
@@ -108,6 +112,11 @@ def enrich_industry_concepts(
         result,
         mapping,
     )
+
+    # 全市场口径统计"同板块涨停家数"（连板梯队信号）。
+    # 必须在 hard-filter 之前基于全市场快照统计，否则候选子集会导致涨停家数失真。
+    if "change_pct" in result.columns:
+        result = _attach_industry_limitup_count(result)
 
     notes.append(
         "industry/concepts enrichment applied: "
@@ -297,6 +306,42 @@ def save_industry_map(mapping: dict[str, dict[str, object]], path_like: str | Pa
     else:
         pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8")
     return path
+
+
+def _attach_industry_limitup_count(df: pd.DataFrame) -> pd.DataFrame:
+    """统计全市场每个行业内的涨停家数（连板梯队信号）。
+
+    基于**全市场快照**（不是硬筛后的候选子集）按 industry 分组统计当日涨停股数，
+    生成 ``industry_limitup_count`` 字段 join 回每只股票。涨停阈值按板块区分：
+    主板 10cm（≥9.5%）、创业板/科创板 20cm（≥19.5%）。
+
+    该字段供 scorer 的 ``sector_limitup_ladder`` 因子使用：同板块涨停家数多、
+    形成连板梯队时加分。
+    """
+    result = df.copy()
+    result["industry_limitup_count"] = 0
+    if "change_pct" not in result.columns or "industry" not in result.columns:
+        return result
+
+    change = pd.to_numeric(result["change_pct"], errors="coerce")
+    industry = result["industry"].map(_safe_text)
+
+    if "code" in result.columns:
+        prefix = result["code"].map(_normalize_code).str[:2]
+    else:
+        prefix = pd.Series("", index=result.index)
+
+    threshold = prefix.isin(_CHUANG_PREFIXES).map(
+        {True: _LIMIT_UP_CHUANG_PCT, False: _LIMIT_UP_MAIN_PCT}
+    )
+    is_limit_up = change >= threshold
+    valid = industry.ne("") & is_limit_up.fillna(False)
+    if not valid.any():
+        return result
+
+    counts = industry[valid].value_counts()
+    result["industry_limitup_count"] = industry.map(counts).fillna(0).astype(int)
+    return result
 
 
 def _apply_mapping_to_snapshot(

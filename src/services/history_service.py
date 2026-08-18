@@ -919,7 +919,7 @@ class HistoryService:
                 news_summary=raw_result.get("news_summary", record.news_content or ""),
                 market_sentiment=raw_result.get("market_sentiment", ""),
                 hot_topics=raw_result.get("hot_topics", ""),
-                analysis_summary=cls._rewrite_halt_misreading(
+                analysis_summary=self._rewrite_halt_misreading(
                     raw_result.get("analysis_summary", record.analysis_summary or "")
                 ),
                 key_points=raw_result.get("key_points", ""),

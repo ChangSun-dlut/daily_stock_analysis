@@ -20,6 +20,7 @@ _FACTOR_COLUMNS = {
     "consolidation_quality": "factor_consolidation_quality_score",
     "bottom_accumulation_quality": "factor_bottom_accumulation_quality_score",
     "capital_heat_quality": "factor_capital_heat_quality_score",
+    "sector_limitup_ladder": "factor_sector_limitup_ladder_score",
 }
 _DEFAULT_SCORING_PROFILE = {
     "momentum_base": 60.0,
@@ -158,6 +159,13 @@ _DEFAULT_SCORING_PROFILE = {
     "capital_heat_mf_strength_pct_min": 3.0,
     "capital_heat_mf_strength_pct_max": 10.0,
     "capital_heat_capital_confirmed_bonus": 2.4,
+    # sector_limitup_ladder（连板梯队 + 板块资金活跃）
+    "sector_limitup_ladder_base": 50.0,
+    "sector_limitup_ladder_2_limitup_bonus": 5.0,      # 同板块涨停 ≥2 家（形成梯队）
+    "sector_limitup_ladder_4_limitup_bonus": 8.0,      # 同板块涨停 ≥4 家（梯队明显）
+    "sector_limitup_ladder_6_limitup_bonus": 8.0,      # 同板块涨停 ≥6 家（强连板梯队）
+    "sector_limitup_ladder_active_capital_bonus": 6.0, # 板块涨幅 >1%（资金活跃）叠加
+    "sector_limitup_ladder_active_capital_pct": 1.0,
 }
 
 
@@ -223,6 +231,7 @@ def _compute_factor_scores(df: pd.DataFrame, config: ScreeningConfig | None = No
         "consolidation_quality": _compute_consolidation_quality_score(df, profile),
         "bottom_accumulation_quality": _compute_bottom_accumulation_quality_score(df, profile),
         "capital_heat_quality": _compute_capital_heat_quality_score(df, profile),
+        "sector_limitup_ladder": _compute_sector_limitup_ladder_score(df, profile),
     }
 
 
@@ -1115,5 +1124,53 @@ def _compute_capital_heat_quality_score(
         )
         score = score + (mf_avail & (cons >= 2)).astype(float) * bonus * 0.5
         score = score + (mf_avail & (cons >= 4)).astype(float) * bonus * 0.3
+
+    return score.clip(lower=0, upper=100.0)
+
+
+def _compute_sector_limitup_ladder_score(
+    df: pd.DataFrame, profile: dict[str, float]
+) -> pd.Series:
+    """连板梯队 + 板块资金活跃加分。
+
+    信号来自两个维度（均为全市场口径，见 industry._attach_industry_limitup_count）：
+    1. **同板块涨停家数**（``industry_limitup_count``）：同板块涨停家数越多、
+       形成连板梯队，越强；
+    2. **板块资金活跃**（``industry_change_pct``）：板块涨幅靠前说明资金在积极做多。
+
+    加分规则：
+    - 同板块涨停 ≥2 家 → +5（开始形成梯队）
+    - ≥4 家 → 再 +8（梯队明显）
+    - ≥6 家 → 再 +8（强连板梯队）
+    - 且板块涨幅 >1%（资金活跃）→ 额外 +6
+
+    数据缺失时返回中性 50 分，不扭曲结果。
+    """
+    base = float(profile.get("sector_limitup_ladder_base", 50.0))
+    score = pd.Series(base, index=df.index)
+
+    if "industry_limitup_count" not in df.columns:
+        return score
+
+    limitup = (
+        pd.to_numeric(df["industry_limitup_count"], errors="coerce")
+        .fillna(0)
+        .clip(lower=0)
+    )
+    bonus_2 = float(profile.get("sector_limitup_ladder_2_limitup_bonus", 5.0))
+    bonus_4 = float(profile.get("sector_limitup_ladder_4_limitup_bonus", 8.0))
+    bonus_6 = float(profile.get("sector_limitup_ladder_6_limitup_bonus", 8.0))
+
+    score = score + (limitup >= 2).astype(float) * bonus_2
+    score = score + (limitup >= 4).astype(float) * bonus_4
+    score = score + (limitup >= 6).astype(float) * bonus_6
+
+    # 板块资金活跃（涨幅为正且超过阈值）时，在有梯队基础上额外加分
+    active_bonus = float(profile.get("sector_limitup_ladder_active_capital_bonus", 6.0))
+    active_pct = float(profile.get("sector_limitup_ladder_active_capital_pct", 1.0))
+    if "industry_change_pct" in df.columns:
+        ind_chg = pd.to_numeric(df["industry_change_pct"], errors="coerce").fillna(0)
+        active = (limitup >= 2) & (ind_chg > active_pct)
+        score = score + active.astype(float) * active_bonus
 
     return score.clip(lower=0, upper=100.0)

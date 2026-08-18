@@ -6,11 +6,12 @@ screening:
   enabled: true
   factor_weights:
     activity: 0.12
-    consolidation_quality: 0.62
+    consolidation_quality: 0.56
     liquidity: 0.0
     momentum: 0.10
     stability: 0.08
     theme_heat: 0.08
+    sector_limitup_ladder: 0.06
     value: 0.0
   hard_filters:
     amount_min: -999
@@ -87,6 +88,8 @@ screening:
     4. 波动率较低的回踩确认信号，假突破概率更低
 
     5. 大盘蓝筹低换手与中小盘微跌触底均可覆盖
+
+    6. 同板块资金活跃（板块涨幅靠前）且涨停家数多、形成连板梯队时，额外加分
 
     '
   risk_profile:

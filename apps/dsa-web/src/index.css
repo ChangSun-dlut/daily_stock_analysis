@@ -886,6 +886,37 @@
   }
 }
 
+/* 板块资金流向：流光动画（默认从左向右，reverse 表示从右向左） */
+@keyframes moneyflow-slide {
+  from {
+    transform: translateX(-120%);
+  }
+  to {
+    transform: translateX(120%);
+  }
+}
+
+/* 板块资金流向：填充条发光呼吸 */
+@keyframes moneyflow-glow {
+  0%,
+  100% {
+    filter: brightness(1);
+  }
+  50% {
+    filter: brightness(1.45);
+  }
+}
+
+/* 板块资金流向：头部光点游走 */
+@keyframes moneyflow-head {
+  from {
+    left: -6%;
+  }
+  to {
+    left: 106%;
+  }
+}
+
 @keyframes zoomIn {
   from {
     opacity: 0;

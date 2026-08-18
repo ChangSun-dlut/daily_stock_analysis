@@ -98,6 +98,23 @@ export type ScreeningCandidate = {
   mfConsecutiveDays?: number | null;
   mfInflowStrengthPct?: number | null;
   mfAvailable?: boolean;
+  /**
+   * 四档资金明细（超大单 / 大单 / 中单 / 小单），单位万元
+   */
+  mfTierBreakdown?: Array<{
+    tier: string;
+    net: number | null;
+    pct: number | null;
+    note: string;
+  }> | null;
+  /**
+   * 四档资金结构分析文本（如四档守恒、主力承接、散户离场等）
+   */
+  mfBreakdownText?: string;
+  /**
+   * 四档资金明细是否可用
+   */
+  mfBreakdownAvailable?: boolean;
   raw: Record<string, unknown>;
 };
 
@@ -254,6 +271,37 @@ export type ScreeningScreenResponse = {
   resultVariantApplied?: boolean;
   resultVariantPoolSize?: number;
   resultVariantRotatedSlots?: number;
+};
+
+export type ScreeningSectorMoneyflowItem = {
+  rank: number;
+  name: string;
+  tsCode: string;
+  pctChange: number;
+  net: number;
+  netText: string;
+  direction: 'in' | 'out' | 'neutral';
+  mainNet: number;
+  midNet: number;
+  retailNet: number;
+  blockNet?: number | null;
+  leadStock?: string | null;
+  source: string;
+};
+
+export type ScreeningSectorMoneyflowResponse = {
+  available: boolean;
+  date?: string;
+  source?: string;
+  totalInflow: number;
+  totalOutflow: number;
+  netFlow: number;
+  inflowCount: number;
+  outflowCount: number;
+  items: ScreeningSectorMoneyflowItem[];
+  topInflow: ScreeningSectorMoneyflowItem[];
+  topOutflow: ScreeningSectorMoneyflowItem[];
+  summaryText: string;
 };
 
 export type ScreeningScreenAccepted = {
@@ -464,6 +512,14 @@ export const screeningApi = {
       },
     );
     return toCamelCase<ScreeningHotspotDetail>(response.data);
+  },
+
+  async getSectorMoneyflow(payload: { topN?: number } = {}): Promise<ScreeningSectorMoneyflowResponse> {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/screening/sector-moneyflow', {
+      params: { top_n: payload.topN ?? 100 },
+      timeout: SCREENING_REQUEST_TIMEOUT_MS,
+    });
+    return toCamelCase<ScreeningSectorMoneyflowResponse>(response.data);
   },
 
   async enable(): Promise<void> {

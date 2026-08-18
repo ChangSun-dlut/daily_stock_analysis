@@ -13,7 +13,12 @@ from api.deps import get_config_dep
 from api.v1.errors import api_error
 from src.config import Config
 from src.services.alphasift_backtest_service import run_backtest, run_yesterday_backtest
-from src.services.screening_service import AlphaSiftService, read_alphasift_screen_cache, write_alphasift_screen_cache
+from src.services.screening_service import (
+    AlphaSiftService,
+    get_sector_moneyflow,
+    read_alphasift_screen_cache,
+    write_alphasift_screen_cache,
+)
 from src.services.task_queue import TaskStatus as QueueTaskStatus
 from src.services.task_queue import get_task_queue
 
@@ -116,6 +121,15 @@ def alphasift_hotspot_detail(
 ) -> Dict[str, Any]:
     refresh_value = refresh if isinstance(refresh, bool) else bool(getattr(refresh, "default", False))
     return _service(config).hotspot_detail(topic=topic, provider=provider, refresh=refresh_value)
+
+
+@router.get("/sector-moneyflow")
+def alphasift_sector_moneyflow(
+    top_n: int = Query(100, ge=1, le=500),
+    _config: Config = Depends(get_config_dep),
+) -> Dict[str, Any]:
+    """返回板块资金流向分析（主力净流入、净流出、中户/散户流向等）。"""
+    return get_sector_moneyflow(top_n=top_n)
 
 
 @router.post("/install")

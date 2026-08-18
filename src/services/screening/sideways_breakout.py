@@ -37,12 +37,13 @@ class SidewaysBreakoutParams:
     lookback_days: int = 60                     # 回看交易日数
     ma_spread_max_pct: float = 6.0              # MA5/10/20 粘合度上限（%）
     amplitude_max_pct: float = 12.0             # 近 10 日收盘振幅上限（%）
-    volume_shrink_max: float = 0.6              # 缩量率上限（近5日均量/近60日峰值均量，越小越缩量）
+    volume_shrink_max: float = 0.6              # 缩量率上限（近5日均量/近60日峰值均量，越小越缩量；仅作评分加分，不作硬门槛）
     bounce_from_low60_max_pct: float = 30.0     # 距 60 日低点累计涨幅上限（%），超过=已涨完
     consecutive_min_days: int = 3               # 最少连续蓄势天数（低于此不匹配）
     breakout_vol_ratio_min: float = 1.5         # 突破日量比（当日量 / 近 10 日均量）
     breakout_gain_min_pct: float = 2.0          # 突破日涨幅下限（%）
     breakout_gain_max_pct: float = 9.0          # 突破日涨幅上限（排除涨停一字板，不可参与）
+    down_volume_break_threshold: float = 0.8    # 放量下跌阈值：收跌日近5日均量/峰值均量超过此值视为下跌中继，打断连续蓄势
 
 
 @dataclass
@@ -187,17 +188,20 @@ def _is_accumulation_day(close, high, low, volume, ma5, ma10, ma20, i, p) -> boo
     amp = (seg.max() - seg.min()) / seg.min() * 100
     if amp > p.amplitude_max_pct:
         return False
-    # 3. 缩量蓄势：近 5 日均量 < 近 60 日 5 日均量峰值 × volume_shrink_max（量能萎缩到活跃期低位）
-    if volume is not None:
+    # 3. 放量下跌检测（下跌中继护栏，替代原"必须缩量"硬门槛）：
+    #    只在"当日收跌 且 近 5 日均量明显放大"时打断连续蓄势。
+    #    起涨前量能温和放大（突破前预热，如神奇制药 8/11-8/12）是健康信号，不应打断。
+    if volume is not None and i > 0 and close.iloc[i] < close.iloc[i - 1]:
         v5 = volume.iloc[max(0, i - 4):i + 1].mean()
         win = volume.iloc[max(0, i - 59):i + 1]
         if len(win) >= 5:
             v_peak = win.rolling(5).mean().max()
-            if v_peak and v_peak > 0 and v5 > v_peak * p.volume_shrink_max:
+            if v_peak and v_peak > 0 and v5 > v_peak * p.down_volume_break_threshold:
                 return False
-    # 4. 收盘守稳 MA20（横盘中枢，允许在 MA5 附近小幅震荡，但不破位）
-    if close.iloc[i] < m20:
-        return False
+    # （注：不再单独要求"收盘守稳 MA20"。
+    #  横盘蓄势的本质是"价格在均线簇附近窄幅震荡"，均线粘合(spread<6%) +
+    #  近10日振幅(<12%) 已经隐含了这一点；破不破 MA20 在横盘语境下无关紧要。
+    #  真正的破位出逃由上面的"放量下跌检测"拦截。）
     return True
 
 
@@ -308,9 +312,13 @@ def _score(sig: SidewaysBreakoutSignal, p: SidewaysBreakoutParams) -> float:
         score -= (sig.bounce_from_low60_pct - 20.0) * 0.5
 
     # ---- MACD ----
-    if sig.macd_dead_cross:
-        score -= 12
-    else:
-        score += 3
+    # 放量突破日（量比≥1.5 且收涨 2~9%）是强动能转多信号，此时 DIF 通常刚从下方拉起、
+    # 尚未完全站上 DEA，处于"临界金叉"状态（如登海种业 8/17：DIF=0.085 vs DEA=0.094）。
+    # 若按普通死叉一刀切扣 12 分，会把真实突破误杀成"突破反而落选"，故突破日豁免死叉惩罚。
+    if not sig.is_breakout_day:
+        if sig.macd_dead_cross:
+            score -= 12
+        else:
+            score += 3
 
     return max(0.0, min(100.0, score))

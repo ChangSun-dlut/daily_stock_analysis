@@ -15,6 +15,7 @@ import {
   FolderTree,
   Gem,
   Landmark,
+  Layers,
   Pickaxe,
   Plane,
   Play,
@@ -42,6 +43,8 @@ import {
   type AlphaSiftHotspotsResponse,
   type AlphaSiftScreenResponse,
   type AlphaSiftScreenTaskStatus,
+  type AlphaSiftSectorMoneyflowItem,
+  type AlphaSiftSectorMoneyflowResponse,
   type AlphaSiftStrategy,
   type BacktestResponse,
   type YesterdayBacktestResponse,
@@ -389,6 +392,24 @@ const hasLlmInsight = (item: AlphaSiftCandidate) =>
       item.llmCatalysts?.length,
   );
 
+// "已选出天数"小徽标：值 ≥3 高亮（连日选出更强信号）。
+const SelectedDaysBadge = ({ days }: { days?: number | null }) => {
+  const n = typeof days === 'number' && days > 0 ? days : 0;
+  if (n === 0) {
+    return <span className="text-secondary-text">-</span>;
+  }
+  const tone = n >= 3 ? 'bg-amber/15 text-amber border-amber/30' : 'bg-cyan/10 text-cyan border-cyan/30';
+  const label = n === 1 ? '1 天' : `${n} 天`;
+  return (
+    <span
+      className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-semibold ${tone}`}
+      title={`最近 30 天被该策略选出的天数：${n} 天`}
+    >
+      {label}
+    </span>
+  );
+};
+
 const getRouteTimeLabel = (item: AlphaSiftHotspotDetail['route'][number]) => {
   const rawTime = item.publishedAt || item.date || item.time || '';
   if (!rawTime) {
@@ -474,6 +495,125 @@ const getHotspotStrength = (item: AlphaSiftHotspot, index: number) => {
   return { label: '较强', className: 'bg-cyan/10 text-cyan' };
 };
 
+const formatSectorMoneyAmount = (value: number | undefined | null) => {
+  const n = Number(value) || 0;
+  if (Math.abs(n) >= 1e8) {
+    return `${(n / 1e8).toFixed(1)}亿`;
+  }
+  if (Math.abs(n) >= 1e4) {
+    return `${(n / 1e4).toFixed(1)}万`;
+  }
+  return `${n.toFixed(0)}元`;
+};
+
+// 变化幅度 → 动画频率映射：变化越大流光越快（周期越短）
+const moneyflowAnimDuration = (deltaRatio: number | null): number => {
+  if (deltaRatio == null || !Number.isFinite(deltaRatio) || deltaRatio <= 0) return 3.2;
+  // deltaRatio 0~1 映射到 1.2s（剧烈）~ 4.5s（平缓）
+  const clamped = Math.min(1, deltaRatio);
+  return 4.5 - clamped * 3.3;
+};
+
+const SectorMoneyflowBar = ({
+  item,
+  maxAbs,
+  delta,
+  maxDeltaAbs,
+  showAmount,
+}: {
+  item: AlphaSiftSectorMoneyflowItem;
+  maxAbs: number;
+  delta?: number | null;
+  maxDeltaAbs?: number;
+  showAmount?: boolean;
+}) => {
+  const value = item.net || 0;
+  const ratio = maxAbs > 0 ? Math.abs(value) / maxAbs : 0;
+  const isIn = value > 0;
+  const widthPct = Math.max(4, ratio * 100);
+  const deltaValue = typeof delta === 'number' && Number.isFinite(delta) ? delta : null;
+  const deltaRatio = deltaValue != null && maxDeltaAbs && maxDeltaAbs > 0 ? Math.abs(deltaValue) / maxDeltaAbs : null;
+  const animDuration = moneyflowAnimDuration(deltaRatio);
+  const deltaUp = deltaValue != null && deltaValue > 0;
+  const deltaDown = deltaValue != null && deltaValue < 0;
+  const slideDir = isIn ? '' : ' reverse';
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <span className="w-16 shrink-0 truncate font-medium text-foreground" title={item.name}>
+        {item.name}
+      </span>
+      <div className="relative h-2.5 flex-1 overflow-hidden rounded-full bg-surface/70">
+        <div
+          className={cn(
+            'absolute top-0 h-2.5 overflow-hidden rounded-full transition-[width] duration-700 ease-out',
+            isIn ? 'left-0' : 'right-0',
+          )}
+          style={{
+            width: `${widthPct}%`,
+            background: isIn
+              ? 'linear-gradient(90deg, rgba(252,165,165,0.85), #ef4444 55%, #f97316)'
+              : 'linear-gradient(90deg, rgba(52,211,153,0.85), #10b981 55%, #06b6d4)',
+            boxShadow: isIn
+              ? '0 0 10px rgba(239,68,68,0.55), inset 0 0 4px rgba(255,255,255,0.35)'
+              : '0 0 10px rgba(16,185,129,0.55), inset 0 0 4px rgba(255,255,255,0.35)',
+            animation: `moneyflow-glow ${Math.max(1.6, animDuration * 0.8).toFixed(2)}s ease-in-out infinite`,
+          }}
+        >
+          {/* 主光带 */}
+          <div
+            className="absolute inset-y-0"
+            style={{ animation: `moneyflow-slide ${animDuration.toFixed(2)}s linear infinite${slideDir}` }}
+          >
+            <div
+              className="h-full w-1/2"
+              style={{ background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.7), transparent)' }}
+            />
+          </div>
+          {/* 次光带（错峰、更窄更淡） */}
+          <div
+            className="absolute inset-y-0"
+            style={{
+              animation: `moneyflow-slide ${(animDuration * 1.5).toFixed(2)}s linear infinite${slideDir}`,
+              animationDelay: `${(-animDuration * 0.4).toFixed(2)}s`,
+            }}
+          >
+            <div
+              className="h-full w-1/4"
+              style={{ background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent)' }}
+            />
+          </div>
+          {/* 头部光点 */}
+          <div
+            className="absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full"
+            style={{
+              background: 'radial-gradient(circle, #fff 0%, rgba(255,255,255,0) 70%)',
+              boxShadow: '0 0 8px 2px rgba(255,255,255,0.9)',
+              animation: `moneyflow-head ${animDuration.toFixed(2)}s linear infinite${slideDir}`,
+            }}
+          />
+        </div>
+      </div>
+      <span className={cn('w-20 shrink-0 text-right font-semibold', isIn ? 'text-red-500' : 'text-emerald-500')}>
+        {item.netText || formatSectorMoneyAmount(value)}
+        {showAmount && item.pctChange ? ` · ${formatNumber(item.pctChange)}%` : null}
+      </span>
+      <span
+        className={cn(
+          'w-16 shrink-0 text-right text-[11px] font-medium',
+          deltaUp && 'text-red-400',
+          deltaDown && 'text-emerald-400',
+          deltaValue == null && 'text-secondary-text/60',
+        )}
+        title={deltaValue != null ? '较上次刷新的资金变化' : '首次加载，暂无对比基线'}
+      >
+        {deltaValue != null
+          ? `${deltaUp ? '↑' : deltaDown ? '↓' : '→'}${formatSectorMoneyAmount(Math.abs(deltaValue)).replace(/^\+/, '')}`
+          : '—'}
+      </span>
+    </div>
+  );
+};
+
 const HOTSPOT_ICON_RULES: Array<{
   pattern: RegExp;
   icon: React.ComponentType<{ className?: string }>;
@@ -532,6 +672,10 @@ const StockScreeningPage: React.FC = () => {
   const [hotspotDetail, setHotspotDetail] = useState<AlphaSiftHotspotDetail | null>(null);
   const [loadingHotspotDetail, setLoadingHotspotDetail] = useState(false);
   const [hotspotDetailError, setHotspotDetailError] = useState('');
+  const [sectorMoneyflow, setSectorMoneyflow] = useState<AlphaSiftSectorMoneyflowResponse | null>(null);
+  const [sectorMoneyflowDeltas, setSectorMoneyflowDeltas] = useState<Record<string, number>>({});
+  const [loadingSectorMoneyflow, setLoadingSectorMoneyflow] = useState(false);
+  const [sectorMoneyflowError, setSectorMoneyflowError] = useState('');
   const [loadingHotspots, setLoadingHotspots] = useState(false);
   const [hotspotError, setHotspotError] = useState('');
   const [screenMeta, setScreenMeta] = useState<AlphaSiftScreenResponse | null>(null);
@@ -724,6 +868,37 @@ const StockScreeningPage: React.FC = () => {
     }
   }, []);
 
+  const loadSectorMoneyflow = useCallback(async () => {
+    setLoadingSectorMoneyflow(true);
+    setSectorMoneyflowError('');
+    try {
+      const result = await alphasiftApi.getSectorMoneyflow({ topN: 100 });
+      // 与上一次快照对比，计算每个板块的资金变化量（10 分钟区间）
+      setSectorMoneyflow((prev) => {
+        if (prev?.available && Array.isArray(prev.items) && result.available && Array.isArray(result.items)) {
+          const prevMap = new Map(prev.items.map((i) => [i.tsCode || i.name, i.net || 0]));
+          const deltas: Record<string, number> = {};
+          for (const item of result.items) {
+            const key = item.tsCode || item.name;
+            const prevNet = prevMap.get(key);
+            if (typeof prevNet === 'number') {
+              deltas[key] = (item.net || 0) - prevNet;
+            }
+          }
+          setSectorMoneyflowDeltas(deltas);
+        }
+        return result;
+      });
+      setSectorMoneyflowError('');
+    } catch (err) {
+      setSectorMoneyflow(null);
+      setSectorMoneyflowDeltas({});
+      setSectorMoneyflowError(toApiErrorMessage(err, '板块资金流向加载失败，请稍后重试。'));
+    } finally {
+      setLoadingSectorMoneyflow(false);
+    }
+  }, []);
+
   const toggleHotspotsExpanded = useCallback(() => {
     setHotspotsExpanded((expanded) => {
       const nextExpanded = !expanded;
@@ -777,6 +952,7 @@ const StockScreeningPage: React.FC = () => {
         if (status.enabled && status.available) {
           void loadStrategies();
           void loadHotspots(false);
+          void loadSectorMoneyflow();
         }
       })
       .catch(() => {
@@ -788,7 +964,16 @@ const StockScreeningPage: React.FC = () => {
     return () => {
       active = false;
     };
-  }, [loadHotspots, loadStrategies]);
+  }, [loadHotspots, loadSectorMoneyflow, loadStrategies]);
+
+  // 板块资金流向每 10 分钟自动刷新一次
+  useEffect(() => {
+    if (!isScreeningEnabled) return;
+    const timer = window.setInterval(() => {
+      void loadSectorMoneyflow();
+    }, 10 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [isScreeningEnabled, loadSectorMoneyflow]);
 
   // 服务端缓存同步：每切一次策略从服务端拉取最新存盘缓存并覆盖 localStorage，
   // 确保零停机部署后前端能拿到新增字段（如主力资金数据），不被本地旧缓存永久遮蔽。
@@ -1329,6 +1514,97 @@ const StockScreeningPage: React.FC = () => {
         ) : null}
       </section>
 
+      {isScreeningEnabled && (
+        <section className="rounded-2xl border border-cyan/35 bg-card/95 p-4 shadow-soft-card">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Layers className="h-4 w-4 text-cyan" />
+              <div>
+                <h2 className="text-sm font-semibold text-foreground">板块资金流向</h2>
+                <p className="mt-1 text-xs text-secondary-text">
+                  {sectorMoneyflow?.date ? `${sectorMoneyflow.date} 收盘` : 'A 股板块'}主力资金净流入/流出分布，每 10 分钟刷新；↑/↓ 为较上次刷新的区间变化，流光越快代表变化越剧烈。
+                </p>
+              </div>
+            </div>
+            <span className="rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1 text-xs font-semibold text-cyan">
+              {sectorMoneyflow?.source || 'tushare'}
+            </span>
+          </div>
+
+          {loadingSectorMoneyflow ? (
+            <div className="rounded-xl border border-dashed border-border bg-surface/70 p-4 text-sm text-secondary-text">
+              正在加载板块资金流向…
+            </div>
+          ) : sectorMoneyflowError ? (
+            <div className="rounded-xl border border-dashed border-border bg-surface/70 p-4 text-sm text-secondary-text">
+              {sectorMoneyflowError}
+            </div>
+          ) : !sectorMoneyflow?.available ? (
+            <div className="rounded-xl border border-dashed border-border bg-surface/70 p-4 text-sm text-secondary-text">
+              暂无板块资金流向数据。
+            </div>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-2">
+              {(() => {
+                const maxAbs = Math.max(...(sectorMoneyflow.items || []).map((i) => Math.abs(i.net || 0)), 1);
+                const deltaValues = Object.values(sectorMoneyflowDeltas).map((v) => Math.abs(v));
+                const maxDeltaAbs = deltaValues.length > 0 ? Math.max(...deltaValues, 1) : 1;
+                const hasDelta = deltaValues.length > 0;
+                return (
+                  <>
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-semibold text-red-500">主力净流入</span>
+                        <span className="text-secondary-text">
+                          {sectorMoneyflow.inflowCount} 个板块{hasDelta ? ' · 末列为区间变化' : ''}
+                        </span>
+                      </div>
+                      <div className="space-y-2">
+                        {sectorMoneyflow.topInflow.slice(0, 10).map((item) => (
+                          <SectorMoneyflowBar
+                            key={item.tsCode || item.name}
+                            item={item}
+                            maxAbs={maxAbs}
+                            delta={sectorMoneyflowDeltas[item.tsCode || item.name]}
+                            maxDeltaAbs={maxDeltaAbs}
+                            showAmount
+                          />
+                        ))}
+                      </div>
+                    </div>
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-semibold text-emerald-500">主力净流出</span>
+                        <span className="text-secondary-text">
+                          {sectorMoneyflow.outflowCount} 个板块{hasDelta ? ' · 末列为区间变化' : ''}
+                        </span>
+                      </div>
+                      <div className="space-y-2">
+                        {sectorMoneyflow.topOutflow.slice(0, 10).map((item) => (
+                          <SectorMoneyflowBar
+                            key={item.tsCode || item.name}
+                            item={item}
+                            maxAbs={maxAbs}
+                            delta={sectorMoneyflowDeltas[item.tsCode || item.name]}
+                            maxDeltaAbs={maxDeltaAbs}
+                            showAmount
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
+              {sectorMoneyflow.summaryText ? (
+                <div className="md:col-span-2 rounded-xl bg-surface/70 p-3 text-xs text-secondary-text">
+                  {sectorMoneyflow.summaryText}
+                </div>
+              ) : null}
+            </div>
+          )}
+        </section>
+      )}
+
       <section className="rounded-2xl border border-cyan/35 bg-card/95 p-4 shadow-soft-card">
         <div className="mb-4 flex items-center justify-between gap-3">
           <div>
@@ -1604,6 +1880,7 @@ const StockScreeningPage: React.FC = () => {
                   <th className="px-4 py-3 font-semibold">价格</th>
                   <th className="px-4 py-3 font-semibold">涨跌幅</th>
                   <th className="px-4 py-3 font-semibold">评分</th>
+                  <th className="px-4 py-3 font-semibold">已选出</th>
                   <th className="px-4 py-3 font-semibold">LLM</th>
                   <th className="px-4 py-3 font-semibold">风险</th>
                   <th className="px-4 py-3 font-semibold">详情</th>
@@ -1630,6 +1907,9 @@ const StockScreeningPage: React.FC = () => {
                         <td className="px-4 py-3 text-secondary-text">{formatNumber(item.price)}</td>
                         <td className="px-4 py-3 text-secondary-text">{formatNumber(item.changePct)}%</td>
                         <td className="px-4 py-3 font-bold text-cyan">{formatScore(item.score)}</td>
+                        <td className="px-4 py-3 text-secondary-text">
+                          <SelectedDaysBadge days={item.selectedDays} />
+                        </td>
                         <td className="px-4 py-3 text-secondary-text">{llmDegraded ? '未重排' : formatScore(item.llmScore)}</td>
                         <td className="px-4 py-3">
                           <span className="rounded-lg bg-success/10 px-2.5 py-1 text-xs font-semibold text-success">
@@ -1702,6 +1982,33 @@ const StockScreeningPage: React.FC = () => {
                                   ) : (
                                     <p className="mt-1 text-sm text-secondary-text">暂无主力资金数据</p>
                                   )}
+                                  {item.mfBreakdownAvailable && item.mfTierBreakdown && item.mfTierBreakdown.length > 0 && (
+                                    <div className="mt-2 overflow-hidden rounded-md border border-border">
+                                      <table className="w-full text-left text-xs">
+                                        <thead className="bg-muted/60">
+                                          <tr>
+                                            <th className="px-3 py-1.5 font-medium text-secondary-text">档次</th>
+                                            <th className="px-3 py-1.5 font-medium text-secondary-text">净额</th>
+                                            <th className="px-3 py-1.5 font-medium text-secondary-text">说明</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-border">
+                                          {item.mfTierBreakdown.map((tier, tierIdx) => (
+                                            <tr key={tierIdx} className="bg-card">
+                                              <td className="px-3 py-1.5 text-foreground">{tier.tier}</td>
+                                              <td className="px-3 py-1.5 text-foreground">
+                                                {tier.net != null ? formatWanAmount(tier.net) : '—'}
+                                              </td>
+                                              <td className="px-3 py-1.5 text-secondary-text">{tier.note || '—'}</td>
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  )}
+                                  {item.mfBreakdownText ? (
+                                    <p className="mt-2 text-xs text-foreground">{item.mfBreakdownText}</p>
+                                  ) : null}
                                 </div>
                               </div>
                               <div className="space-y-3">

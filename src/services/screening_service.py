@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field
@@ -84,6 +84,8 @@ DSA_ALPHASIFT_HOTSPOT_DETAIL_CACHE_TTL_SECONDS = 30 * 60
 DSA_ALPHASIFT_HOTSPOT_EVENT_SUMMARY_MAX_CHARS = 90
 DSA_ALPHASIFT_HOTSPOT_PREFETCH_DETAIL_COUNT = 8
 DSA_ALPHASIFT_SCREEN_CACHE_DIR = DSA_ALPHASIFT_DATA_DIR / "screencache"
+DSA_ALPHASIFT_SECTOR_MONEYFLOW_CACHE_PATH = DSA_ALPHASIFT_DATA_DIR / "sector_moneyflow.json"
+DSA_ALPHASIFT_SECTOR_MONEYFLOW_CACHE_TTL_SECONDS = 30 * 60
 DSA_ALPHASIFT_HOTSPOT_UNAVAILABLE_CODE = "eastmoney_hotspot_unavailable"
 DSA_ALPHASIFT_HOTSPOT_UNAVAILABLE_MESSAGE = "热点源连接中断，暂无可用缓存。"
 DSA_ALPHASIFT_HOTSPOT_CONNECTIVITY_ERROR_MARKERS = (
@@ -244,19 +246,77 @@ def _write_alphasift_hotspot_detail_cache(*, provider: str, topic: str, payload:
 # ---------------------------------------------------------------------------
 
 def _alphasift_screen_cache_path(strategy: str) -> Path:
+    """Return the single-file path (legacy path).
+
+    New writes go to ``{strategy}/{YYYY-MM-DD}.json`` instead; this helper
+    is kept for backward-compatible reads of the legacy single-file cache.
+    """
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", _env_text(strategy) or strategy)
     return DSA_ALPHASIFT_SCREEN_CACHE_DIR / f"{safe}.json"
 
 
+def _alphasift_screen_cache_dir(strategy: str) -> Path:
+    """Per-day cache directory: ``screencache/{strategy}/{YYYY-MM-DD}.json``."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", _env_text(strategy) or strategy)
+    return DSA_ALPHASIFT_SCREEN_CACHE_DIR / safe
+
+
+def _alphasift_screen_cache_day_path(strategy: str, cache_date: str) -> Path:
+    """Path to ``{cache_dir}/{YYYY-MM-DD}.json`` for a given strategy + date."""
+    return _alphasift_screen_cache_dir(strategy) / f"{cache_date}.json"
+
+
+def _latest_cache_date(strategy: str) -> Optional[str]:
+    """Return the most recent YYYY-MM-DD subpath for ``strategy``, or None."""
+    cache_dir = _alphasift_screen_cache_dir(strategy)
+    if not cache_dir.is_dir():
+        return None
+    dates: list[str] = []
+    for child in cache_dir.iterdir():
+        if child.is_file() and child.suffix == ".json" and re.match(r"^\d{4}-\d{2}-\d{2}\.json$", child.name):
+            dates.append(child.stem)
+    if not dates:
+        return None
+    return max(dates)
+
+
 def read_alphasift_screen_cache(strategy: str) -> dict | None:
-    """返回某策略的最新缓存结果；无缓存或缓存超过 7 天返回 None。"""
-    cache_path = _alphasift_screen_cache_path(strategy)
+    """返回某策略的最新缓存结果；无缓存或缓存超过 7 天返回 None。
+
+    优先从新结构 ``screencache/{strategy}/{YYYY-MM-DD}.json`` 读最新一天；
+    若新结构不存在，降级读旧的单文件 ``screencache/{strategy}.json``。
+    """
+    # 1) 新结构：读最新一天的子文件
+    latest_date = _latest_cache_date(strategy)
+    if latest_date:
+        try:
+            raw = json.loads(
+                _alphasift_screen_cache_day_path(strategy, latest_date)
+                .read_text(encoding="utf-8")
+            )
+            if isinstance(raw, dict) and raw.get("date"):
+                try:
+                    cache_dt = datetime.strptime(raw["date"], "%Y-%m-%d").date()
+                except ValueError:
+                    cache_dt = None
+                today = datetime.now(timezone.utc).astimezone().date()
+                if cache_dt is None or (today - cache_dt).days > 7:
+                    return None
+                return raw
+        except Exception as exc:
+            logger.warning(
+                "Failed to read AlphaSift screen cache %s/%s: %s",
+                strategy, latest_date, exc,
+            )
+
+    # 2) 旧单文件 fallback（向后兼容）
+    legacy_path = _alphasift_screen_cache_path(strategy)
     try:
-        raw = json.loads(cache_path.read_text(encoding="utf-8"))
+        raw = json.loads(legacy_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
     except Exception as exc:
-        logger.warning("Failed to read AlphaSift screen cache %s: %s", cache_path, exc)
+        logger.warning("Failed to read AlphaSift screen cache %s: %s", legacy_path, exc)
         return None
 
     if not isinstance(raw, dict):
@@ -282,17 +342,28 @@ def write_alphasift_screen_cache(
     market: str,
     result: dict,
 ) -> None:
-    """将一次选股结果写入文件，同一天覆盖，只保留最后一次。"""
-    cache_path = _alphasift_screen_cache_path(strategy)
+    """将一次选股结果写入 ``screencache/{strategy}/{YYYY-MM-DD}.json``。
+
+    每次写覆盖当天文件（同一天多次跑选股只保留最新结果），
+    不同日期之间独立保留，用于支持"已选出多少天"统计。
+    """
     now_dt = datetime.now(timezone.utc).astimezone()
+    cache_date = now_dt.strftime("%Y-%m-%d")
+    cache_path = _alphasift_screen_cache_day_path(strategy, cache_date)
     payload: dict = {
         "cached_at": now_dt.isoformat(),
-        "date": now_dt.strftime("%Y-%m-%d"),
+        "date": cache_date,
         "strategy": strategy,
         "market": market,
         "run_id": result.get("run_id"),
         "candidates": result.get("candidates") or [],
         "candidate_count": result.get("candidate_count"),
+        # 完整候选池：只要进入初筛的票都写入缓存，用于跨日 selected_days 统计，
+        # 避免"进池但未进 Top N"的票无法累计权重分。
+        "all_candidates": result.get("all_candidates") or result.get("candidates") or [],
+        "all_candidate_count": result.get("all_candidate_count")
+            if result.get("all_candidate_count") is not None
+            else len(result.get("all_candidates") or result.get("candidates") or []),
         "snapshot_count": result.get("snapshot_count"),
         "after_filter_count": result.get("after_filter_count"),
         "llm_ranked": result.get("llm_ranked"),
@@ -303,6 +374,164 @@ def write_alphasift_screen_cache(
         logger.info("AlphaSift screen cache written: %s", cache_path)
     except Exception as exc:
         logger.warning("Failed to write AlphaSift screen cache for %s: %s", strategy, exc)
+
+
+def compute_selected_days(
+    strategy: str,
+    codes: Iterable[str],
+    *,
+    lookback_days: int = 30,
+) -> Dict[str, int]:
+    """统计 ``codes`` 里每只票在最近 ``lookback_days`` 天内被该策略选中的天数。
+
+    返回 ``{code: days}``，0 表示历史缓存里没出现过。
+    仅基于本地 ``screencache/{strategy}/*.json``，不依赖网络。
+
+    注意：历史候选里 code 可能带/不带交易所后缀（``300388`` vs ``300388.SZ``），
+    统一按"无后缀 6 位代码"归一化后再比对。
+    """
+    raw_codes: list[str] = [str(c) for c in codes if c]
+    if not raw_codes:
+        return {}
+
+    def _normalize(code: object) -> str:
+        s = str(code or "").strip().upper()
+        for suffix in (".SH", ".SZ", ".BJ", ".HK", ".US"):
+            if s.endswith(suffix):
+                s = s[: -len(suffix)]
+                break
+        return s
+
+    # 输入端：每个查询 code 映射到其归一化形式，保留原始表示作为返回 key。
+    input_norm_map: Dict[str, set[str]] = {}
+    for c in raw_codes:
+        norm = _normalize(c)
+        if norm:
+            input_norm_map.setdefault(norm, set()).add(c)
+    code_norm_set: set[str] = set(input_norm_map.keys())
+    if not code_norm_set:
+        return {c: 0 for c in raw_codes}
+
+    counts_norm: Dict[str, int] = {n: 0 for n in code_norm_set}
+    cache_dir = _alphasift_screen_cache_dir(strategy)
+    if not cache_dir.is_dir():
+        return {c: 0 for c in raw_codes}
+
+    today = datetime.now(timezone.utc).astimezone().date()
+    cutoff = today.toordinal() - lookback_days
+
+    for child in cache_dir.iterdir():
+        if not child.is_file() or child.suffix != ".json":
+            continue
+        date_str = child.stem
+        try:
+            file_dt = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if file_dt.toordinal() < cutoff:
+            continue
+        try:
+            raw = json.loads(child.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(raw, dict):
+            continue
+        # 优先使用完整候选池 all_candidates；未写入时降级到 candidates（Top N）。
+        pool = raw.get("all_candidates") or raw.get("candidates") or []
+        # 同一天内多次跑只算 1 天（用归一化 set 去重）。
+        day_codes: set[str] = set()
+        for cand in pool:
+            if not isinstance(cand, dict):
+                continue
+            code = cand.get("code") or cand.get("stock_code")
+            norm = _normalize(code)
+            if norm in code_norm_set:
+                day_codes.add(norm)
+        for n in day_codes:
+            counts_norm[n] = counts_norm.get(n, 0) + 1
+
+    # 把归一化结果映射回每个原始 code key
+    result: Dict[str, int] = {c: 0 for c in raw_codes}
+    for norm, originals in input_norm_map.items():
+        days = counts_norm.get(norm, 0)
+        for c in originals:
+            result[c] = max(result.get(c, 0), days)
+    return result
+
+
+def _selected_days_bonus(days: int) -> float:
+    """连续多日被选出的排序加分（跨日、基于历史缓存统计）。
+
+    连续多日横盘蓄势说明资金反复吸筹、突破概率更高
+    （如亚太股份 8/13-8/18 连续 6 天，8/17 选出后 8/18 涨停兑现）。
+    档位：≥3 天 +4，≥5 天 +7，≥7 天 +10。
+    """
+    if days >= 7:
+        return 10.0
+    if days >= 5:
+        return 7.0
+    if days >= 3:
+        return 4.0
+    return 0.0
+
+
+def _build_sideways_candidate(item: dict, rank: Optional[int] = None) -> dict:
+    """把 ``results`` 里的单只股票 item 转成通用 candidate 结构。
+
+    复用于构造"前端返回 Top N"和"完整候选池"，保证两者结构一致。
+    """
+    _phase_action = {
+        "breakout": "突破跟进",
+        "pre_breakout": "低吸",
+        "accumulation": "低吸",
+        "extended": "观察",
+    }
+    action = _phase_action.get(item.get("sideways_phase", ""), "观察")
+    raw = {
+        "code": item["code"],
+        "name": item["name"],
+        "action": action,
+        "signal": "横盘蓄势突破",
+        "price": item["price"],
+        "change_pct": item["change_pct"],
+        "sideways_phase": item.get("sideways_phase"),
+        "sideways_consecutive_days": item.get("sideways_consecutive_days"),
+        "sideways_ma_spread": item.get("sideways_ma_spread"),
+        "sideways_amplitude": item.get("sideways_amplitude"),
+        "sideways_volume_ratio": item.get("sideways_volume_ratio"),
+        "mf_net_inflow_5d": item.get("mf_net_inflow_5d"),
+        "mf_consecutive_days": item.get("mf_consecutive_days"),
+        "chip_concentration_90": item.get("chip_concentration_90"),
+        "chip_profit_ratio": item.get("chip_profit_ratio"),
+        "board_heat_pct": item.get("board_heat_pct"),
+    }
+    candidate = {
+        "rank": rank,
+        "code": item["code"],
+        "name": item["name"],
+        "score": item["score"],
+        "screen_score": item["screen_score"],
+        "price": item["price"],
+        "change_pct": item["change_pct"],
+        "reason": item["reason"],
+        "risk_level": "",
+        "risk_flags": [],
+        "industry": item.get("industry", ""),
+        "factor_scores": {
+            "sideways_breakout": item["score"],
+            "consecutive_days": item["sideways_consecutive_days"],
+            "ma_spread": item["sideways_ma_spread"],
+            "amplitude": item["sideways_amplitude"],
+            "volume_ratio": item["sideways_volume_ratio"],
+            "mf_net_inflow_5d": item.get("mf_net_inflow_5d"),
+            "chip_concentration_90": item.get("chip_concentration_90"),
+            "board_heat_pct": item.get("board_heat_pct"),
+        },
+        "post_analysis_summaries": {},
+        "post_analysis_tags": [],
+        "raw": raw,
+    }
+    return candidate
 
 
 def _ensure_hotspot_detail_compat_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1306,6 +1535,22 @@ class AlphaSiftService:
         candidates = _normalize_candidates(raw_data)
         selected = candidates[:max_results]
         selected, dsa_enrichment = _enrich_candidates_with_dsa(selected)
+
+        # 附加"已选出天数"（基于本地 screencache 统计），让前端表格加列展示。
+        try:
+            _strategy_name = raw_data.get("strategy") or strategy
+            _codes = [
+                c.get("code") or c.get("stock_code")
+                for c in selected
+                if c.get("code") or c.get("stock_code")
+            ]
+            _days = compute_selected_days(_strategy_name, _codes, lookback_days=30)
+            for c in selected:
+                code = c.get("code") or c.get("stock_code")
+                if code:
+                    c["selected_days"] = int(_days.get(str(code), 0) or 0)
+        except Exception as exc:
+            logger.debug("attach selected_days failed: %s", exc)
         screen_result = {
             "enabled": True,
             "candidates": selected,
@@ -3695,6 +3940,21 @@ def _screen_golden_pit_specialized(config: Config, max_results: int) -> Dict[str
             "raw": raw,
         })
 
+    # 附加"已选出天数"（基于本地 screencache 统计），让前端表格加列展示。
+    try:
+        _codes = [
+            c.get("code") or c.get("stock_code")
+            for c in candidates
+            if c.get("code") or c.get("stock_code")
+        ]
+        _days = compute_selected_days("golden_pit", _codes, lookback_days=30)
+        for c in candidates:
+            code = c.get("code") or c.get("stock_code")
+            if code:
+                c["selected_days"] = int(_days.get(str(code), 0) or 0)
+    except Exception as exc:
+        logger.debug("attach selected_days (golden_pit) failed: %s", exc)
+
     candidates, dsa_enrichment = _enrich_candidates_with_dsa(candidates)
 
     result = {
@@ -3944,64 +4204,50 @@ def _screen_sideways_breakout_specialized(config: Config, max_results: int) -> D
             if item:
                 results.append(item)
 
-    # 4. 按横盘突破分数排序
+    # 4. 连续多日被选出的股票加权（跨日、基于本地 screencache 统计）。
+    #    "已选出天数"此前仅前端展示，现参与排序：连续多日横盘蓄势说明资金反复吸筹、
+    #    突破概率更高（如亚太 8/17 连续 6 天选出后 8/18 涨停兑现）。
+    #    注意：这里基于**完整候选池** results 计算，让"进池但未进 Top N"的票也能累计 selected_days。
+    try:
+        _sel_codes = [item["code"] for item in results]
+        _sel_days_map = compute_selected_days("sideways_breakout", _sel_codes, lookback_days=30)
+    except Exception as exc:
+        logger.debug("compute selected_days bonus failed: %s", exc)
+        _sel_days_map = {}
+    for item in results:
+        days = int(_sel_days_map.get(str(item["code"]), 0) or 0)
+        item["selected_days"] = days
+        bonus = _selected_days_bonus(days)
+        if bonus:
+            new_score = max(0.0, min(100.0, float(item["score"]) + bonus))
+            item["score"] = round(new_score, 1)
+            item["screen_score"] = item["score"]
+
+    # 5. 按横盘突破分数排序
     results.sort(key=lambda x: x["score"], reverse=True)
     top = results[:max_results]
 
-    # 5. 构造候选（对齐通用 candidate 结构）
-    _phase_action = {
-        "breakout": "突破跟进",
-        "pre_breakout": "低吸",
-        "accumulation": "低吸",
-        "extended": "观察",
-    }
-    candidates = []
-    for rank, item in enumerate(top, start=1):
-        action = _phase_action.get(item.get("sideways_phase", ""), "观察")
-        raw = {
-            "code": item["code"],
-            "name": item["name"],
-            "action": action,
-            "signal": "横盘蓄势突破",
-            "price": item["price"],
-            "change_pct": item["change_pct"],
-            "sideways_phase": item.get("sideways_phase"),
-            "sideways_consecutive_days": item.get("sideways_consecutive_days"),
-            "sideways_ma_spread": item.get("sideways_ma_spread"),
-            "sideways_amplitude": item.get("sideways_amplitude"),
-            "sideways_volume_ratio": item.get("sideways_volume_ratio"),
-            "mf_net_inflow_5d": item.get("mf_net_inflow_5d"),
-            "mf_consecutive_days": item.get("mf_consecutive_days"),
-            "chip_concentration_90": item.get("chip_concentration_90"),
-            "chip_profit_ratio": item.get("chip_profit_ratio"),
-            "board_heat_pct": item.get("board_heat_pct"),
-        }
-        candidates.append({
-            "rank": rank,
-            "code": item["code"],
-            "name": item["name"],
-            "score": item["score"],
-            "screen_score": item["screen_score"],
-            "price": item["price"],
-            "change_pct": item["change_pct"],
-            "reason": item["reason"],
-            "risk_level": "",
-            "risk_flags": [],
-            "industry": item.get("industry", ""),
-            "factor_scores": {
-                "sideways_breakout": item["score"],
-                "consecutive_days": item["sideways_consecutive_days"],
-                "ma_spread": item["sideways_ma_spread"],
-                "amplitude": item["sideways_amplitude"],
-                "volume_ratio": item["sideways_volume_ratio"],
-                "mf_net_inflow_5d": item.get("mf_net_inflow_5d"),
-                "chip_concentration_90": item.get("chip_concentration_90"),
-                "board_heat_pct": item.get("board_heat_pct"),
-            },
-            "post_analysis_summaries": {},
-            "post_analysis_tags": [],
-            "raw": raw,
-        })
+    # 6. 构造候选（对齐通用 candidate 结构）
+    #    all_candidates：所有通过初筛的候选，写入缓存并参与跨日 selected_days 统计；
+    #    candidates：返回给前端的 Top N（ enrichment 后展示）。
+    all_candidates = [_build_sideways_candidate(item) for item in results]
+    candidates = [_build_sideways_candidate(item, rank=rank) for rank, item in enumerate(top, start=1)]
+
+    # 附加"已选出天数"（基于本地 screencache 统计），让前端表格加列展示。
+    # 使用完整候选池的 codes 统计，保证 Top N 里某只票的 selected_days 与历史全池一致。
+    try:
+        _codes = [
+            c.get("code") or c.get("stock_code")
+            for c in all_candidates
+            if c.get("code") or c.get("stock_code")
+        ]
+        _days = compute_selected_days("sideways_breakout", _codes, lookback_days=30)
+        for c in candidates:
+            code = c.get("code") or c.get("stock_code")
+            if code:
+                c["selected_days"] = int(_days.get(str(code), 0) or 0)
+    except Exception as exc:
+        logger.debug("attach selected_days (sideways_breakout) failed: %s", exc)
 
     candidates, dsa_enrichment = _enrich_candidates_with_dsa(candidates)
 
@@ -4009,6 +4255,8 @@ def _screen_sideways_breakout_specialized(config: Config, max_results: int) -> D
         "enabled": True,
         "candidates": candidates,
         "candidate_count": len(candidates),
+        "all_candidates": all_candidates,
+        "all_candidate_count": len(all_candidates),
         "run_id": run_id,
         "strategy": "sideways_breakout",
         "market": "cn",
@@ -4492,6 +4740,119 @@ def get_dsa_fundamental_context(stock_code: str) -> Dict[str, Any]:
     manager = _get_dsa_fetcher_manager()
     context = manager.get_fundamental_context(stock_code, budget_seconds=4.0)
     return _compact_fundamental_context(_remove_non_finite_json_values(_to_plain(context)))
+
+
+def _format_sector_money_amount(amount: Optional[float]) -> str:
+    """将金额格式化为可读文本：亿/万/元。"""
+    value = float(amount) if amount is not None else 0.0
+    if abs(value) >= 1e8:
+        return f"{value / 1e8:+.1f}亿"
+    if abs(value) >= 1e4:
+        return f"{value / 1e4:+.1f}万"
+    return f"{value:+.0f}元"
+
+
+def _build_sector_moneyflow_payload(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """将 DataFetcherManager 返回的板块资金流归一化为前端友好的 payload。"""
+    if not rows:
+        return {"available": False, "items": [], "top_inflow": [], "top_outflow": []}
+
+    items: List[Dict[str, Any]] = []
+    for rank, row in enumerate(rows, start=1):
+        main_net = float(row.get("main_net") or 0)
+        direction = "in" if main_net > 0 else ("out" if main_net < 0 else "neutral")
+        item = {
+            "rank": rank,
+            "name": str(row.get("name") or ""),
+            "ts_code": str(row.get("ts_code") or ""),
+            "pct_change": float(row.get("pct_change") or 0),
+            "net": main_net,
+            "net_text": _format_sector_money_amount(main_net),
+            "direction": direction,
+            "main_net": main_net,
+            "mid_net": float(row.get("mid_net") or 0),
+            "retail_net": float(row.get("retail_net") or 0),
+            "block_net": float(row.get("block_net")) if row.get("block_net") is not None else None,
+            "lead_stock": str(row.get("lead_stock") or "") if row.get("lead_stock") else None,
+            "source": str(row.get("source") or ""),
+        }
+        items.append(_remove_non_finite_json_values(item))
+
+    inflow_items = [i for i in items if i["net"] > 0]
+    outflow_items = [i for i in items if i["net"] < 0]
+    total_inflow = sum(i["net"] for i in inflow_items)
+    total_outflow = sum(i["net"] for i in outflow_items)
+    net_flow = total_inflow + total_outflow
+
+    inflow_leaders = sorted(inflow_items, key=lambda x: x["net"], reverse=True)[:10]
+    outflow_leaders = sorted(outflow_items, key=lambda x: x["net"])[:10]
+
+    leader_parts = []
+    if inflow_leaders:
+        leader_parts.append(f"主力净流入 {inflow_leaders[0]['name']} {inflow_leaders[0]['net_text']}")
+    if outflow_leaders:
+        leader_parts.append(f"主力净流出 {outflow_leaders[0]['name']} {outflow_leaders[0]['net_text']}")
+    summary_text = "；".join(leader_parts) if leader_parts else "暂无板块资金流向数据"
+
+    return {
+        "available": True,
+        "date": str(rows[0].get("trade_date") or ""),
+        "source": str(rows[0].get("source") or items[0].get("source", "")),
+        "total_inflow": total_inflow,
+        "total_outflow": total_outflow,
+        "net_flow": net_flow,
+        "inflow_count": len(inflow_items),
+        "outflow_count": len(outflow_items),
+        "items": items,
+        "top_inflow": inflow_leaders,
+        "top_outflow": outflow_leaders,
+        "summary_text": summary_text,
+    }
+
+
+def _read_sector_moneyflow_cache() -> Optional[Dict[str, Any]]:
+    path = DSA_ALPHASIFT_SECTOR_MONEYFLOW_CACHE_PATH
+    if not path.exists():
+        return None
+    try:
+        stat = path.stat()
+        age = time.time() - stat.st_mtime
+        if age > DSA_ALPHASIFT_SECTOR_MONEYFLOW_CACHE_TTL_SECONDS:
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if isinstance(payload, dict) and payload.get("available"):
+            return payload
+    except Exception:
+        pass
+    return None
+
+
+def _write_sector_moneyflow_cache(payload: Dict[str, Any]) -> None:
+    try:
+        DSA_ALPHASIFT_SECTOR_MONEYFLOW_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(DSA_ALPHASIFT_SECTOR_MONEYFLOW_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, default=str)
+    except Exception as e:
+        logger.warning(f"[板块资金流向] 缓存写入失败: {e}")
+
+
+def get_sector_moneyflow(top_n: int = 100) -> Dict[str, Any]:
+    """获取板块资金流向分析（主力/中户/散户），带本地 JSON 缓存。"""
+    cached = _read_sector_moneyflow_cache()
+    if cached is not None:
+        return cached
+
+    manager = _get_dsa_fetcher_manager()
+    try:
+        rows = manager.get_sector_money_flow(top_n=top_n)
+    except Exception as e:
+        logger.warning(f"[板块资金流向] 获取失败: {e}")
+        rows = []
+
+    payload = _build_sector_moneyflow_payload(rows or [])
+    _write_sector_moneyflow_cache(payload)
+    return payload
 
 
 def search_dsa_stock_news(stock_code: str, stock_name: str = "", max_results: int = 3) -> Dict[str, Any]:
@@ -4983,6 +5344,18 @@ def _normalize_candidate(raw: Any, rank: int) -> Dict[str, Any]:
         if _mf_finite(v):
             return v
         return _dsa_mf_features.get(key) if _mf_finite(_dsa_mf_features.get(key)) else None
+
+    def _mf_breakdown_value() -> Any:
+        # enrich_daily_features 会把 list/dict 字段序列化为 JSON 字符串写入
+        # DataFrame，这里统一解析回 list；若解析失败则丢弃该字段。
+        v = _mf_value("mf_tier_breakdown")
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+                return parsed if isinstance(parsed, list) else None
+            except (ValueError, TypeError):
+                return None
+        return v
     dsa_analysis_summary = (
         item.get("dsa_analysis_summary")
         or source.get("dsa_analysis_summary")
@@ -5025,6 +5398,14 @@ def _normalize_candidate(raw: Any, rank: int) -> Dict[str, Any]:
         "mf_net_inflow_5d": _mf_value("mf_net_inflow_5d"),
         "mf_consecutive_days": _mf_value("mf_consecutive_days"),
         "mf_inflow_strength_pct": _mf_value("mf_inflow_strength_pct"),
+        "mf_tier_breakdown": _mf_breakdown_value(),
+        "mf_breakdown_text": _mf_value("mf_breakdown_text") or "",
+        "mf_breakdown_available": bool(
+            _mf_value("mf_breakdown_available")
+            or source.get("mf_breakdown_available")
+            or item.get("mf_breakdown_available")
+            or bool(_mf_breakdown_value())
+        ),
         "mf_available": bool(
             _mf_value("mf_net_inflow") is not None
             or _mf_value("mf_net_inflow_5d") is not None
