@@ -125,6 +125,13 @@ _DEFAULT_SCORING_PROFILE = {
     "consolidation_quality_long_bonus_120d": 15.0,
     "consolidation_quality_ma_bullish_bonus": 5.0,
     "consolidation_quality_price_above_ma20_bonus": 3.0,
+    # 破位惩罚（横盘蓄势相关）：大阴线 + 倍量柱 + 下穿多条均线
+    "consolidation_quality_bear_candle_pct": -5.0,
+    "consolidation_quality_bear_volume_ratio": 2.0,
+    "consolidation_quality_bear_ma_breakdown_min": 2,
+    "consolidation_quality_bear_penalty_each": 6.0,
+    "consolidation_quality_bear_penalty_all_extra": 7.0,
+    "consolidation_quality_bear_penalty_cap": 25.0,
     # --- bottom_accumulation_quality ---
     "bottom_accumulation_decline_sweet_min": 15.0,
     "bottom_accumulation_decline_sweet_max": 40.0,
@@ -146,6 +153,13 @@ _DEFAULT_SCORING_PROFILE = {
     "bottom_accumulation_chase_10d_start_pct": 5.0,
     "bottom_accumulation_upper_shadow_threshold_pct": 50.0,
     "bottom_accumulation_upper_shadow_rise_min_pct": 3.0,
+    # 破位惩罚（底部吸筹相关）：大阴线 + 倍量柱 + 下穿多条均线
+    "bottom_accumulation_bear_candle_pct": -5.0,
+    "bottom_accumulation_bear_volume_ratio": 2.0,
+    "bottom_accumulation_bear_ma_breakdown_min": 2,
+    "bottom_accumulation_bear_penalty_each": 6.0,
+    "bottom_accumulation_bear_penalty_all_extra": 7.0,
+    "bottom_accumulation_bear_penalty_cap": 25.0,
     "consolidation_mf_inflow_5d_min": 300.0,
     "consolidation_mf_inflow_5d_max": 3000.0,
     "consolidation_mf_outflow_5d_min": -300.0,
@@ -653,6 +667,10 @@ def _compute_consolidation_quality_score(df: pd.DataFrame, profile: dict[str, fl
     if "price_above_ma20" in df.columns:
         score += df["price_above_ma20"].fillna(False).astype(bool).astype(float) * price_above_ma20_bonus
 
+    # 11. 破位惩罚：大阴线 + 倍量柱 + 下穿多条均线 = 出货/破位，与横盘蓄势相悖（如「天银机电」式）。
+    bear_penalty = _compute_bearish_breakdown_penalty(df, profile, "consolidation_quality_bear_")
+    score = score - bear_penalty
+
     # --- Money Flow Confirmation (0-10 pts, consolidation-breakout overlay) ---
     #     Rewards sustained main-force accumulation; penalises outflow.
     mf_score = pd.Series(5.0, index=df.index)
@@ -712,6 +730,48 @@ def _numeric_column(df: pd.DataFrame, column: str) -> pd.Series:
     if column not in df.columns:
         return pd.Series(pd.NA, index=df.index)
     return pd.to_numeric(df[column], errors="coerce")
+
+
+def _compute_bearish_breakdown_penalty(
+    df: pd.DataFrame, profile: dict[str, float], prefix: str
+) -> pd.Series:
+    """破位惩罚：大阴线 + 倍量柱 + 下穿多条均线 = 出货/破位信号，与吸筹/横盘蓄势逻辑相悖。
+
+    三个条件全部命中时给予最强扣分；部分命中按比例扣减（每个条件独立扣分 + 全中额外加成）。
+    用于 bottom_accumulation / consolidation 等底部吸筹类策略。
+
+    prefix 用于在各策略 profile 中区分阈值/权重，例如：
+      - bottom_accumulation_bear_candle_pct / _bear_volume_ratio / _bear_ma_breakdown_min / _bear_penalty_each / _bear_penalty_all_extra / _bear_penalty_cap
+      - consolidation_quality_bear_candle_pct / ... 同形
+    """
+    cfg = {
+        "candle_pct": float(profile.get(f"{prefix}candle_pct", -5.0)),       # 当日涨跌幅 ≤ 此值视为大阴线
+        "volume_ratio": float(profile.get(f"{prefix}volume_ratio", 2.0)),    # 量比 ≥ 此值视为倍量柱
+        "ma_breakdown_min": float(profile.get(f"{prefix}ma_breakdown_min", 2)),
+        "penalty_each": float(profile.get(f"{prefix}penalty_each", 6.0)),
+        "penalty_all_extra": float(profile.get(f"{prefix}penalty_all_extra", 7.0)),
+        "penalty_cap": float(profile.get(f"{prefix}penalty_cap", 25.0)),
+    }
+
+    change_pct = _numeric_column(df, "change_pct")
+    volume_ratio = _numeric_column(df, "volume_ratio")
+    ma_breakdown = _numeric_column(df, "ma_breakdown_count")
+
+    # 大阴线：当日跌幅超过阈值（candle_pct 为负，change_pct 更负即满足）
+    bear_candle = change_pct <= cfg["candle_pct"]
+    # 倍量柱：量比（今日量 / 近5日均量）≥ 阈值
+    double_volume = volume_ratio >= cfg["volume_ratio"]
+    # 下穿多条均线：收盘价低于 ≥ min 条均线
+    ma_break = ma_breakdown >= cfg["ma_breakdown_min"]
+
+    penalty = (
+        bear_candle.astype(float) * cfg["penalty_each"]
+        + double_volume.astype(float) * cfg["penalty_each"]
+        + ma_break.astype(float) * cfg["penalty_each"]
+    )
+    all_three = bear_candle & double_volume & ma_break
+    penalty = penalty + all_three.astype(float) * cfg["penalty_all_extra"]
+    return penalty.clip(lower=0, upper=cfg["penalty_cap"])
 
 
 def _rank_score(
@@ -1040,6 +1100,12 @@ def _compute_bottom_accumulation_quality_score(df: pd.DataFrame, profile: dict[s
 
     shadow_penalty = shadow_penalty.clip(lower=-10.0, upper=0.0)
     score = score + shadow_penalty
+
+    # --- 9. 破位惩罚（0 至 -25 分）---
+    # 大阴线 + 倍量柱 + 下穿多条均线 = 出货/破位信号（如「天银机电」式放量大跌击穿均线），
+    # 与底部吸筹逻辑相悖，应作为强减分项。三条件全中时扣分最强。
+    bear_penalty = _compute_bearish_breakdown_penalty(df, profile, "bottom_accumulation_bear_")
+    score = score - bear_penalty
 
     return score.clip(lower=0, upper=100.0)
 

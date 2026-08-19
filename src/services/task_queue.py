@@ -856,8 +856,10 @@ class AnalysisTaskQueue:
 
         except Exception as e:  # pragma: no cover - behavior verified in downstream tests
             error_msg = str(e)
+            # exc_info=True 保留完整 traceback，便于定位真实出错文件/行号
             logger.error(
-                f"[TaskQueue] 自定义任务失败: {task_id}, 错误: {error_msg}"
+                f"[TaskQueue] 自定义任务失败: {task_id}, 错误: {error_msg}",
+                exc_info=True,
             )
 
             with self._data_lock:

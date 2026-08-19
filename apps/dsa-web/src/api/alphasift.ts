@@ -243,6 +243,38 @@ export type AlphaSiftSectorMoneyflowResponse = {
   summaryText: string;
   isTradingDay?: boolean;
   isMarketOpenNow?: boolean;
+  isStale?: boolean;
+  fallbackFailCount?: number;
+};
+
+export type SectorRotationPhase = 'starting' | 'accelerating' | 'ebb' | 'quiet';
+export type SectorRotationSignal = 'buy' | 'hold' | 'avoid' | 'watch';
+
+export type AlphaSiftSectorRotationItem = {
+  name: string;
+  tsCode: string;
+  cumChange5d: number;
+  upDays5d: number;
+  streak: number;
+  inflowDays5d: number;
+  todayPct: number;
+  todayNet: number;
+  todayNetText: string;
+  phase: SectorRotationPhase;
+  signal: SectorRotationSignal;
+  score: number;
+  tradeDate: string;
+};
+
+export type AlphaSiftSectorRotationResponse = {
+  available: boolean;
+  days: number;
+  tradeDate: string;
+  items: AlphaSiftSectorRotationItem[];
+  topBuy: AlphaSiftSectorRotationItem[];
+  topAvoid: AlphaSiftSectorRotationItem[];
+  phaseCounts: Record<string, number>;
+  signalCounts: Record<string, number>;
 };
 
 export type AlphaSiftScreenResponse = {
@@ -529,6 +561,14 @@ export const alphasiftApi = {
       timeout: ALPHASIFT_INSTALL_TIMEOUT_MS,
     });
     return toCamelCase<AlphaSiftSectorMoneyflowResponse>(response.data);
+  },
+
+  async getSectorRotation(payload: { days?: number; refresh?: boolean } = {}): Promise<AlphaSiftSectorRotationResponse> {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/screening/sector-rotation', {
+      params: { days: payload.days ?? 10, refresh: payload.refresh ?? false },
+      timeout: ALPHASIFT_INSTALL_TIMEOUT_MS,
+    });
+    return toCamelCase<AlphaSiftSectorRotationResponse>(response.data);
   },
 
   async install(): Promise<AlphaSiftInstallResponse> {

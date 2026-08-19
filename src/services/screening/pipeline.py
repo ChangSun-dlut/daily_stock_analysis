@@ -295,6 +295,10 @@ def screen(
                 df = enriched
         except Exception as exc:
             if daily_needed:
+                logger.error(
+                    "Daily K-line enrichment failed (see traceback for real site)",
+                    exc_info=True,
+                )
                 raise RuntimeError(
                     "Daily K-line enrichment is required by this strategy but failed: "
                     f"{exc}"

@@ -36,6 +36,26 @@ setup_logging(
     extra_quiet_loggers=['uvicorn', 'fastapi'],
 )
 
+# 启动检查：验证 alphasift.daily 已打单元格序列化补丁（避免 pandas 3.x .at 写入 iterable 报错）
+# 运行时 pipeline 调用的是 alphasift 安装包内的 daily.py（非项目派生版本），
+# 若安装包被重新安装导致补丁丢失，需手动重新执行修补脚本。
+try:
+    import alphasift.daily as _alphasift_daily
+    if hasattr(_alphasift_daily, "_serialize_cell_value"):
+        logging.getLogger("server").info(
+            "[check] alphasift.daily cell serialization patch present (v3)"
+        )
+    else:
+        logging.getLogger("server").warning(
+            "[check] alphasift.daily MISSING cell serialization patch — "
+            "run `python scripts/patch_alphasift_daily.py` to re-apply"
+        )
+except Exception:
+    logging.getLogger("server").warning(
+        "failed to check alphasift.daily serialization patch, continuing",
+        exc_info=True,
+    )
+
 # 从 api.app 导入应用实例
 from api.app import app  # noqa: E402
 

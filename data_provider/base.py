@@ -3828,6 +3828,31 @@ class DataFetcherManager:
             logger.warning("[板块资金流] 实时兜底源均失败: %s", last_error)
         return []
 
+    def get_sector_money_flow_history(self, days: int = 10) -> List[Dict[str, Any]]:
+        """获取行业板块最近 N 个交易日的资金流历史（板块轮动用）。
+
+        按数据源优先级遍历，首个返回非空结果的源胜出（目前仅 Tushare 实现）。
+        """
+        last_error = ""
+        for fetcher in self._get_fetchers_snapshot():
+            fetcher_name = getattr(fetcher, "name", fetcher.__class__.__name__)
+            try:
+                impl = getattr(fetcher, "get_sector_money_flow_history", None)
+                if impl is None:
+                    continue
+                rows = impl(days=days)
+                if rows:
+                    logger.info("[%s] 板块资金流历史获取成功 rows=%d", fetcher_name, len(rows))
+                    return [dict(r) if isinstance(r, dict) else r for r in rows]
+                last_error = f"{fetcher_name}返回空结果"
+            except Exception as e:
+                error_type, error_reason = summarize_exception(e)
+                last_error = f"{fetcher_name} ({error_type}) {error_reason}"
+                logger.warning("[%s] 板块资金流历史获取失败: %s", fetcher_name, error_reason)
+        if last_error:
+            logger.warning("[板块资金流] 历史数据源均失败: %s", last_error)
+        return []
+
     def get_hot_stocks(self, n: int = 10) -> List[Dict[str, Any]]:
         """获取市场人气股榜（自动切换数据源）。"""
         last_error = ""

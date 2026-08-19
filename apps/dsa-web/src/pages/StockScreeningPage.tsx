@@ -45,6 +45,7 @@ import {
   type AlphaSiftScreenTaskStatus,
   type AlphaSiftSectorMoneyflowItem,
   type AlphaSiftSectorMoneyflowResponse,
+  type AlphaSiftSectorRotationResponse,
   type AlphaSiftStrategy,
   type BacktestResponse,
   type YesterdayBacktestResponse,
@@ -495,6 +496,20 @@ const getHotspotStrength = (item: AlphaSiftHotspot, index: number) => {
   return { label: '较强', className: 'bg-cyan/10 text-cyan' };
 };
 
+const ROTATION_PHASE_META: Record<string, { label: string; className: string }> = {
+  starting: { label: '启动', className: 'bg-amber-500/15 text-amber-500 border-amber-500/30' },
+  accelerating: { label: '加速', className: 'bg-red-500/15 text-red-500 border-red-500/30' },
+  ebb: { label: '退潮', className: 'bg-emerald-500/15 text-emerald-500 border-emerald-500/30' },
+  quiet: { label: '沉寂', className: 'bg-secondary-text/10 text-secondary-text border-border' },
+};
+
+const ROTATION_SIGNAL_META: Record<string, { label: string; className: string }> = {
+  buy: { label: '明日布局', className: 'bg-red-500/15 text-red-500 border-red-500/30' },
+  hold: { label: '持有', className: 'bg-amber-500/15 text-amber-500 border-amber-500/30' },
+  avoid: { label: '回避', className: 'bg-emerald-500/15 text-emerald-500 border-emerald-500/30' },
+  watch: { label: '观察', className: 'bg-cyan/10 text-cyan border-cyan/30' },
+};
+
 const formatSectorMoneyAmount = (value: number | undefined | null) => {
   const n = Number(value) || 0;
   if (Math.abs(n) >= 1e8) {
@@ -717,6 +732,10 @@ const StockScreeningPage: React.FC = () => {
     isTradingDay: boolean;
     isMarketOpenNow: boolean;
   } | null>(null);
+  // 板块轮动（最近一周涨没涨过、涨几天、是否退潮、明日布局预测）
+  const [sectorRotation, setSectorRotation] = useState<AlphaSiftSectorRotationResponse | null>(null);
+  const [loadingSectorRotation, setLoadingSectorRotation] = useState(false);
+  const [sectorRotationError, setSectorRotationError] = useState('');
   const [loadingHotspots, setLoadingHotspots] = useState(false);
   const [hotspotError, setHotspotError] = useState('');
   const [screenMeta, setScreenMeta] = useState<AlphaSiftScreenResponse | null>(null);
@@ -947,6 +966,21 @@ const StockScreeningPage: React.FC = () => {
     }
   }, []);
 
+  const loadSectorRotation = useCallback(async (forceRefresh = false) => {
+    setLoadingSectorRotation(true);
+    setSectorRotationError('');
+    try {
+      const result = await alphasiftApi.getSectorRotation({ days: 10, refresh: forceRefresh });
+      setSectorRotation(result);
+      setSectorRotationError('');
+    } catch (err) {
+      setSectorRotation(null);
+      setSectorRotationError(toApiErrorMessage(err, '板块轮动加载失败，请稍后重试。'));
+    } finally {
+      setLoadingSectorRotation(false);
+    }
+  }, []);
+
   const toggleHotspotsExpanded = useCallback(() => {
     setHotspotsExpanded((expanded) => {
       const nextExpanded = !expanded;
@@ -1001,6 +1035,7 @@ const StockScreeningPage: React.FC = () => {
           void loadStrategies();
           void loadHotspots(false);
           void loadSectorMoneyflow();
+          void loadSectorRotation();
         }
       })
       .catch(() => {
@@ -1012,7 +1047,7 @@ const StockScreeningPage: React.FC = () => {
     return () => {
       active = false;
     };
-  }, [loadHotspots, loadSectorMoneyflow, loadStrategies]);
+  }, [loadHotspots, loadSectorMoneyflow, loadSectorRotation, loadStrategies]);
 
   // 板块资金流向自动刷新：仅「交易日 + 9:00~15:00」开启，每 10 分钟一次
   useEffect(() => {
@@ -1586,6 +1621,140 @@ const StockScreeningPage: React.FC = () => {
             <div className="flex items-center gap-2">
               <Layers className="h-4 w-4 text-cyan" />
               <div>
+                <h2 className="text-sm font-semibold text-foreground">板块轮动</h2>
+                <p className="mt-1 text-xs text-secondary-text">
+                  最近一周板块上涨天数 / 连涨 / 退潮判断与明日布局预测（简化 STMS 动量+资金评分）。
+                </p>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {sectorRotation?.tradeDate ? (
+                <span className="rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1 text-xs font-semibold text-cyan">
+                  {sectorRotation.tradeDate}
+                </span>
+              ) : null}
+              <button
+                type="button"
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-cyan/40 bg-cyan/10 px-3 text-xs font-semibold text-cyan transition-colors hover:border-cyan hover:bg-cyan/15 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => void loadSectorRotation(true)}
+                disabled={loadingSectorRotation}
+                title="绕过缓存强制重新计算板块轮动"
+              >
+                <RefreshCw className={cn('h-3.5 w-3.5', loadingSectorRotation && 'animate-spin')} />
+                刷新
+              </button>
+            </div>
+          </div>
+
+          {loadingSectorRotation ? (
+            <div className="rounded-xl border border-dashed border-border bg-surface/70 p-4 text-sm text-secondary-text">
+              正在加载板块轮动…
+            </div>
+          ) : sectorRotationError ? (
+            <div className="rounded-xl border border-dashed border-border bg-surface/70 p-4 text-sm text-secondary-text">
+              {sectorRotationError}
+            </div>
+          ) : !sectorRotation?.available ? (
+            <div className="rounded-xl border border-dashed border-border bg-surface/70 p-4 text-sm text-secondary-text">
+              暂无板块轮动数据。
+            </div>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-red-500">明日布局候选</span>
+                  <span className="text-secondary-text">
+                    {sectorRotation.signalCounts?.buy ?? 0} 个板块
+                  </span>
+                </div>
+                <div className="space-y-1.5">
+                  {sectorRotation.topBuy.map((item) => {
+                    const phase = ROTATION_PHASE_META[item.phase] || ROTATION_PHASE_META.quiet;
+                    const signal = ROTATION_SIGNAL_META[item.signal] || ROTATION_SIGNAL_META.watch;
+                    return (
+                      <div
+                        key={item.tsCode || item.name}
+                        className="flex items-center gap-2 rounded-lg bg-surface/60 px-2.5 py-1.5 text-xs"
+                        title={`近5日累计 ${item.cumChange5d}% · 上涨 ${item.upDays5d} 天 · 主力净流入 ${item.inflowDays5d} 天`}
+                      >
+                        <span className="w-16 shrink-0 truncate font-medium text-foreground" title={item.name}>
+                          {item.name}
+                        </span>
+                        <span className={cn('w-12 shrink-0 text-right font-semibold tabular-nums', item.cumChange5d >= 0 ? 'text-red-500' : 'text-emerald-500')}>
+                          {item.cumChange5d >= 0 ? '+' : ''}{item.cumChange5d}%
+                        </span>
+                        <span className="w-10 shrink-0 text-right text-secondary-text tabular-nums">
+                          {item.streak > 0 ? `连涨${item.streak}` : item.streak < 0 ? `连跌${-item.streak}` : '平'}
+                        </span>
+                        <span className={cn('shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-semibold', phase.className)}>
+                          {phase.label}
+                        </span>
+                        <span className={cn('ml-auto shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-semibold', signal.className)}>
+                          {signal.label}
+                        </span>
+                      </div>
+                    );
+                  })}
+                  {sectorRotation.topBuy.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-border bg-surface/60 p-3 text-xs text-secondary-text">
+                      今日无布局候选板块。
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-emerald-500">退潮 / 回避</span>
+                  <span className="text-secondary-text">
+                    {sectorRotation.signalCounts?.avoid ?? 0} 个板块
+                  </span>
+                </div>
+                <div className="space-y-1.5">
+                  {sectorRotation.topAvoid.map((item) => {
+                    const phase = ROTATION_PHASE_META[item.phase] || ROTATION_PHASE_META.quiet;
+                    const signal = ROTATION_SIGNAL_META[item.signal] || ROTATION_SIGNAL_META.watch;
+                    return (
+                      <div
+                        key={item.tsCode || item.name}
+                        className="flex items-center gap-2 rounded-lg bg-surface/60 px-2.5 py-1.5 text-xs"
+                        title={`近5日累计 ${item.cumChange5d}% · 上涨 ${item.upDays5d} 天 · 主力净流入 ${item.inflowDays5d} 天`}
+                      >
+                        <span className="w-16 shrink-0 truncate font-medium text-foreground" title={item.name}>
+                          {item.name}
+                        </span>
+                        <span className={cn('w-12 shrink-0 text-right font-semibold tabular-nums', item.cumChange5d >= 0 ? 'text-red-500' : 'text-emerald-500')}>
+                          {item.cumChange5d >= 0 ? '+' : ''}{item.cumChange5d}%
+                        </span>
+                        <span className="w-10 shrink-0 text-right text-secondary-text tabular-nums">
+                          {item.streak > 0 ? `连涨${item.streak}` : item.streak < 0 ? `连跌${-item.streak}` : '平'}
+                        </span>
+                        <span className={cn('shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-semibold', phase.className)}>
+                          {phase.label}
+                        </span>
+                        <span className={cn('ml-auto shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-semibold', signal.className)}>
+                          {signal.label}
+                        </span>
+                      </div>
+                    );
+                  })}
+                  {sectorRotation.topAvoid.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-border bg-surface/60 p-3 text-xs text-secondary-text">
+                      今日无退潮板块。
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+
+      {isScreeningEnabled && (
+        <section className="rounded-2xl border border-cyan/35 bg-card/95 p-4 shadow-soft-card">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Layers className="h-4 w-4 text-cyan" />
+              <div>
                 <h2 className="text-sm font-semibold text-foreground">板块资金流向</h2>
                 <p className="mt-1 text-xs text-secondary-text">
                   {sectorMoneyflow?.date ? `${sectorMoneyflow.date} 收盘` : 'A 股板块'}主力资金净流入/流出分布，每 10 分钟刷新；红框列上涨排为涨速最快代表股、下跌排为吸筹量最多标的，↑/↓ 为较上次刷新的区间变化，流光越快代表变化越剧烈。
@@ -1593,6 +1762,14 @@ const StockScreeningPage: React.FC = () => {
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-2">
+              {sectorMoneyflow?.isStale ? (
+                <span
+                  className="rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-500"
+                  title={`实时兜底源连续 ${sectorMoneyflow.fallbackFailCount ?? 0} 次失败，当前显示 Tushare 盘后数据（可能陈旧）`}
+                >
+                  数据可能陈旧
+                </span>
+              ) : null}
               <span className="rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1 text-xs font-semibold text-cyan">
                 {(() => {
                   const src = sectorMoneyflow?.source || 'tushare';

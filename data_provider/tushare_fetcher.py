@@ -1301,9 +1301,10 @@ class TushareFetcher(BaseFetcher):
                 logger.warning("[Tushare] 无法确定板块资金流日期")
                 return None
 
-            # 自适应回退：当首选日期 moneyflow_ind_dc 为空，或者 block_trade 为空时
-            # （典型场景：tushare 数据延迟 / 周末 / 节假日当天数据未写入），
-            # 按交易日倒序尝试最近 1-5 个交易日，找到 moneyflow 与 block_trade 都有数据的日期。
+            # 自适应回退：仅针对 moneyflow_ind_dc 本身为空的情况
+            # （典型场景：tushare 数据延迟 / 周末 / 节假日当天数据未写入）。
+            # block_trade（暗盘）延迟不应阻塞当天板块资金流的展示，缺失时 block_net
+            # 保持为 None 即可（下游已处理为空展示）。
             trade_dates_all = self._get_trade_dates(start_date)
             if not trade_dates_all:
                 return None
@@ -1317,27 +1318,18 @@ class TushareFetcher(BaseFetcher):
                 df = self._call_api_with_rate_limit("moneyflow_ind_dc", trade_date=candidate)
                 if df is None or df.empty:
                     continue
-                # 检查当天的 block_trade 是否有数据，没有就回退到下一天
-                bt = self._call_api_with_rate_limit("block_trade", trade_date=candidate)
-                if bt is None or bt.empty:
-                    logger.info(
-                        "[Tushare] %s block_trade 为空（数据延迟），回退到下一交易日",
-                        candidate,
-                    )
-                    df = None
-                    continue
                 used_date = candidate
                 if candidate != start_date:
                     logger.info(
-                        "[Tushare] %s 资金流/暗盘回退到 %s 拿到数据",
+                        "[Tushare] %s 资金流回退到 %s 拿到数据",
                         start_date, candidate,
                     )
                 break
             if df is None or df.empty:
-                logger.info("[Tushare] 连续 %d 天资金流/暗盘均为空，跳过板块资金流", 5)
+                logger.info("[Tushare] 连续 %d 天资金流均为空，跳过板块资金流", 5)
                 return None
 
-            # （典型场景：tushare 数据延迟 / 周末 / 节假日当天数据未写入），            # 按交易日倒序尝试最近 1-5 个交易日，找到 moneyflow 与 block_trade 都有数据的日期。            trade_dates_all = self._get_trade_dates(start_date)            if not trade_dates_all:                return None            if trade_dates_all[0] != start_date and start_date in trade_dates_all:                trade_dates_all = [start_date] + [d for d in trade_dates_all if d != start_date]            df: Optional[pd.DataFrame] = None            used_date = start_date            for candidate in trade_dates_all[:5]:                logger.info("[Tushare] 获取板块资金流（%s）...", candidate)                df = self._call_api_with_rate_limit("moneyflow_ind_dc", trade_date=candidate)                if df is None or df.empty:                    continue                # 检查当天的 block_trade 是否有数据，没有就回退到下一天                bt = self._call_api_with_rate_limit("block_trade", trade_date=candidate)                if bt is None or bt.empty:                    logger.info(                        "[Tushare] %s block_trade 为空（数据延迟），回退到下一交易日",                        candidate,                    )                    df = None                    continue                used_date = candidate                if candidate != start_date:                    logger.info(                        "[Tushare] %s 资金流/暗盘回退到 %s 拿到数据",                        start_date, candidate,                    )                break            if df is None or df.empty:                logger.info("[Tushare] 连续 %d 天资金流/暗盘均为空，跳过板块资金流", 5)                return None            # 仅看"行业"content_type，排除"概念/其他"
+            # 仅看"行业"content_type，排除"概念/其他"
             if "content_type" in df.columns:
                 df = df[df["content_type"].astype(str) == "行业"].copy()
                 if df.empty:
@@ -1375,6 +1367,8 @@ class TushareFetcher(BaseFetcher):
                         "block_net": None,  # 第二步由 block_trade 填充
                         "lead_stock": str(row.get("buy_sm_amount_stock", "")).strip() or None,
                         "source": "tushare_dc",
+                        # 实际数据日期（用于上层判断 Tushare 盘后快照是否已更新）
+                        "trade_date": used_date,
                     }
                 )
 
@@ -1621,6 +1615,63 @@ class TushareFetcher(BaseFetcher):
                     row["main_net_5d"] = agg[name]
         except Exception as exc:
             logger.debug("[Tushare] 5日主力净流入聚合失败: %s", exc)
+
+    def get_sector_money_flow_history(self, days: int = 10) -> List[Dict[str, Any]]:
+        """获取行业板块最近 N 个交易日的资金流历史（板块轮动用）。
+
+        从 ``moneyflow_ind_dc`` 拉取约 2 倍自然日的数据，过滤 ``content_type=行业``，
+        按板块分组后每板块返回最近 ``days`` 个交易日记录（按日期升序）：
+
+        返回：
+            [{"name": 板块名, "ts_code": str, "history": [
+                {"trade_date": "YYYYMMDD", "pct_change": float, "net_amount": float},
+                ...
+            ]}, ...]
+        """
+        try:
+            import datetime
+
+            end_dt = datetime.datetime.now()
+            # 拉取约 2.5 倍自然日，确保覆盖 N 个交易日（含周末/节假日）
+            start_dt = end_dt - datetime.timedelta(days=max(30, int(days * 2.5)))
+            df_all = self._call_api_with_rate_limit(
+                "moneyflow_ind_dc",
+                start_date=start_dt.strftime("%Y%m%d"),
+                end_date=end_dt.strftime("%Y%m%d"),
+            )
+            if df_all is None or df_all.empty:
+                return []
+            if "content_type" in df_all.columns:
+                df_all = df_all[df_all["content_type"].astype(str) == "行业"].copy()
+            if df_all.empty:
+                return []
+
+            df_all["net_amount"] = pd.to_numeric(df_all["net_amount"], errors="coerce").fillna(0.0)
+            df_all["pct_change"] = pd.to_numeric(df_all["pct_change"], errors="coerce").fillna(0.0)
+            df_all["trade_date"] = df_all["trade_date"].astype(str)
+
+            result: List[Dict[str, Any]] = []
+            for (name, ts_code), grp in df_all.groupby(["name", "ts_code"]):
+                grp = grp.sort_values("trade_date")
+                history = [
+                    {
+                        "trade_date": str(r["trade_date"]),
+                        "pct_change": float(r["pct_change"]),
+                        "net_amount": float(r["net_amount"]),
+                    }
+                    for _, r in grp.iterrows()
+                ]
+                result.append(
+                    {
+                        "name": str(name).strip(),
+                        "ts_code": str(ts_code).strip(),
+                        "history": history[-days:],
+                    }
+                )
+            return result
+        except Exception as exc:
+            logger.warning("[Tushare] 获取板块资金流历史失败: %s", exc)
+            return []
 
     def _load_industry_map(self, ts_codes: List[str]) -> Dict[str, str]:
         """拉取 ``ts_code -> industry`` 映射（行业板块名）。

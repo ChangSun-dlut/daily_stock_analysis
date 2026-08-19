@@ -15,10 +15,22 @@ import threading
 import time
 from typing import Callable
 
+import numpy as np
 import pandas as pd
 import requests
 
 from src.services.screening.source_guard import call_with_timeout, parse_source_timeout_seconds
+
+import logging  # noqa: E402
+
+logger = logging.getLogger(__name__)
+
+# 诊断指纹：进程启动时打印实际加载的 daily.py 绝对路径与序列化版本标记。
+# 用于确认运行中的服务是否加载到最新代码（避免旧进程 / 陈旧 .pyc 导致修复不生效）。
+logger.info(
+    "[daily-enrich] module loaded from %s (cell-serializer v3)",
+    os.path.abspath(__file__),
+)
 
 _DAILY_FEATURE_DEFAULTS = {
     "daily_data_points": pd.NA,
@@ -26,6 +38,7 @@ _DAILY_FEATURE_DEFAULTS = {
     "ma5": pd.NA,
     "ma20": pd.NA,
     "ma60": pd.NA,
+    "ma_breakdown_count": pd.NA,
     "ma_bullish": pd.NA,
     "price_above_ma20": pd.NA,
     "macd_status": "",
@@ -64,6 +77,81 @@ _BAOSTOCK_LOCK = threading.Lock()
 _BAOSTOCK_OUTAGE_ERROR: str | None = None
 _SOURCE_HEALTH: dict[str, dict[str, object]] = {}
 _SOURCE_HEALTH_LOCK = threading.Lock()
+
+
+def _to_jsonable(value: object) -> object:
+    """递归将 numpy/pandas 类型转为可 JSON 序列化的 Python 原生类型。"""
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_to_jsonable(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return [_to_jsonable(v) for v in value.tolist()]
+    if isinstance(value, np.ma.MaskedArray):  # 非 ndarray 子类，需单独处理
+        return [_to_jsonable(v) for v in value.tolist()]
+    if isinstance(value, (pd.Timestamp, pd.Timedelta)):
+        return str(value)
+    if isinstance(value, pd.Series):
+        return _to_jsonable(value.tolist())
+    if isinstance(value, pd.DataFrame):
+        return _to_jsonable(value.to_dict(orient="records"))
+    if isinstance(value, pd.Index):
+        return [_to_jsonable(v) for v in value.tolist()]
+    if isinstance(value, pd.Categorical):
+        return [_to_jsonable(v) for v in value.categories.tolist()]
+    # 其余未知类型由 json default 兜底（转为 str），避免序列化失败
+    return value
+
+
+def _json_default(value: object) -> object:
+    """json.dumps 遇到无法识别类型时的兜底转换。"""
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    return str(value)
+
+
+def _serialize_cell_value(value: object) -> object:
+    """将非标量单元格值序列化为 JSON 字符串，避免 pandas 3.x 报错。
+
+    pandas 3.x 中 ``DataFrame.at[idx, col] = <iterable>`` 会抛
+    ``Must have equal len keys and value when setting with an iterable``。
+    daily/moneyflow 特征里偶有 list/dict/tuple/numpy 数组/MaskedArray/
+    pd.Index/Categorical 等非标量值，统一序列化为 JSON 字符串后再写入，
+    读取端按需解析。标量（含 numpy 标量）原样转 Python 原生类型返回。
+    """
+    if value is None:
+        return None
+    # numpy / pandas 标量 → Python 原生标量（pandas 写入更稳妥）
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    # str / bytes / bool / 原生 int / float 原样返回
+    if isinstance(value, (str, bytes, bool)):
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    # 其余（容器 / 数组类）→ JSON 字符串；序列化失败则降级为 str
+    try:
+        return json.dumps(
+            _to_jsonable(value), ensure_ascii=False, default=_json_default
+        )
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def enrich_daily_features(
@@ -159,7 +247,17 @@ def enrich_daily_features(
             if isinstance(source_health, dict):
                 daily_source_health.update(source_health)
         for key, value in features.items():
-            result.at[idx, key] = value
+            try:
+                result.at[idx, key] = _serialize_cell_value(value)
+            except (ValueError, TypeError) as exc:
+                _msg = str(exc)
+                if "equal len keys" in _msg or "setting with an iterable" in _msg:
+                    # 最后兜底：任何漏网的 iterable 都序列化为 JSON 字符串
+                    result.at[idx, key] = json.dumps(
+                        _to_jsonable(value), ensure_ascii=False, default=_json_default
+                    )
+                else:
+                    raise
 
     # ---- moneyflow pass: independent of daily K-line fetch ----
     # moneyflow_dc data is fetched via Tushare (with AkShare fallback) and is not
@@ -189,12 +287,16 @@ def enrich_daily_features(
             )
         for _idx, _mf in _mf_results:
             for _key, _value in _mf.items():
-                # list/dict 等 iterable 直接写入 DataFrame 新列会在 pandas 3.x 触发
-                # "Must have equal len keys and value when setting with an iterable"，
-                # 统一序列化为 JSON 字符串，读取端再解析。
-                if isinstance(_value, (list, dict)):
-                    _value = json.dumps(_value, ensure_ascii=False)
-                result.at[_idx, _key] = _value
+                try:
+                    result.at[_idx, _key] = _serialize_cell_value(_value)
+                except (ValueError, TypeError) as exc:
+                    _msg = str(exc)
+                    if "equal len keys" in _msg or "setting with an iterable" in _msg:
+                        result.at[_idx, _key] = json.dumps(
+                            _to_jsonable(_value), ensure_ascii=False, default=_json_default
+                        )
+                    else:
+                        raise
 
     result.attrs["daily_errors"] = daily_errors
     result.attrs["daily_success_count"] = success_count
@@ -911,7 +1013,9 @@ def compute_daily_features(hist: pd.DataFrame) -> dict[str, object]:
     last_ma5 = _last_float(ma5)
     last_ma20 = _last_float(ma20)
     last_ma60 = _last_float(ma60)
-    shape = _compute_shape_features(df, last_close=last_close, last_ma20=last_ma20)
+    shape = _compute_shape_features(
+        df, last_close=last_close, last_ma5=last_ma5, last_ma20=last_ma20, last_ma60=last_ma60
+    )
     quality = _compute_daily_quality(hist, df)
 
     lookback_idx = max(0, len(close) - 61)
@@ -1238,7 +1342,9 @@ def _compute_shape_features(
     df: pd.DataFrame,
     *,
     last_close: float,
-    last_ma20: float | None,
+    last_ma5: float | None = None,
+    last_ma20: float | None = None,
+    last_ma60: float | None = None,
 ) -> dict[str, object]:
     previous = df.iloc[:-1].tail(20)
     recent = df.tail(20)
@@ -1265,6 +1371,13 @@ def _compute_shape_features(
 
     contraction_pct, ramp_ratio = _coiled_spring_metrics(df)
 
+    # 下穿均线计数：收盘价低于（ma5/ma20/ma60）的均线条数，用于识别破位（如大阴线倍量下穿多条均线）
+    ma_breakdown_count = None
+    if last_close is not None and pd.notna(last_close):
+        _ma_vals = [m for m in (last_ma5, last_ma20, last_ma60) if m is not None and pd.notna(m)]
+        if _ma_vals:
+            ma_breakdown_count = int(sum(1 for m in _ma_vals if last_close < m))
+
     return {
         "prev_high_20d": _round_or_none(prev_high_20d),
         "range_20d_pct": _round_or_none(range_20d_pct),
@@ -1288,6 +1401,7 @@ def _compute_shape_features(
         "consecutive_volume_spike_3d": _consecutive_volume_spike(df, 3),
         "coiled_spring_contraction_pct": _round_or_none(contraction_pct),
         "coiled_spring_ramp_ratio": _round_or_none(ramp_ratio),
+        "ma_breakdown_count": ma_breakdown_count,
     }
 
 
@@ -1576,7 +1690,13 @@ def _fetch_moneyflow_tushare_legacy(
         ts_code=ts_code,
         start_date=start_date,
         end_date=end_date,
-        fields="trade_date,ts_code,net_mf_amount",
+        fields=(
+            "trade_date,ts_code,net_mf_amount,"
+            "buy_elg_amount,sell_elg_amount,"
+            "buy_lg_amount,sell_lg_amount,"
+            "buy_md_amount,sell_md_amount,"
+            "buy_sm_amount,sell_sm_amount"
+        ),
     )
     if df is None or df.empty:
         return None
@@ -1840,7 +1960,23 @@ def _compute_moneyflow_features(
     else:
         mf_inflow_strength_pct = None
 
-    tier_result = _compute_tier_breakdown(moneyflow)
+    # 四档分解需要买/卖两侧列；moneyflow_dc（主源）只返回买入侧，会导致全部「数据缺失」。
+    # 主源缺卖出列时，单独用 doc-170 的 moneyflow（含买/卖/净额）取四档。
+    tier_df = moneyflow
+    _tier_sell_cols = (
+        "sell_elg_amount",
+        "sell_lg_amount",
+        "sell_md_amount",
+        "sell_sm_amount",
+    )
+    if not all(col in moneyflow.columns for col in _tier_sell_cols):
+        legacy_df = _fetch_moneyflow_tushare_legacy(code, lookback_days=lookback_days)
+        if legacy_df is not None and not legacy_df.empty and all(
+            col in legacy_df.columns for col in _tier_sell_cols
+        ):
+            tier_df = legacy_df
+
+    tier_result = _compute_tier_breakdown(tier_df)
 
     return {
         "mf_net_inflow": None if mf_net_inflow is None else round(mf_net_inflow, 2),

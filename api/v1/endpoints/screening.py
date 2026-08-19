@@ -16,6 +16,7 @@ from src.services.alphasift_backtest_service import run_backtest, run_yesterday_
 from src.services.screening_service import (
     AlphaSiftService,
     get_sector_moneyflow,
+    get_sector_rotation,
     read_alphasift_screen_cache,
     write_alphasift_screen_cache,
 )
@@ -132,6 +133,17 @@ def alphasift_sector_moneyflow(
     """返回板块资金流向分析（主力净流入、净流出、中户/散户流向等）。"""
     refresh_value = refresh if isinstance(refresh, bool) else bool(getattr(refresh, "default", False))
     return get_sector_moneyflow(top_n=top_n, force_refresh=refresh_value)
+
+
+@router.get("/sector-rotation")
+def alphasift_sector_rotation(
+    days: int = Query(10, ge=5, le=30),
+    refresh: bool = Query(False),
+    _config: Config = Depends(get_config_dep),
+) -> Dict[str, Any]:
+    """板块轮动分析：最近一周板块上涨天数、连涨、退潮判断与明日布局预测。"""
+    refresh_value = refresh if isinstance(refresh, bool) else bool(getattr(refresh, "default", False))
+    return get_sector_rotation(days=days, force_refresh=refresh_value)
 
 
 @router.post("/install")

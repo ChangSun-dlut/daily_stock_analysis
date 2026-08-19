@@ -893,7 +893,7 @@ def _extract_litellm_message_content(response: Any) -> str:
 
 
 def _clean_hotspot_llm_summary(text: str) -> str:
-    summary = _normalize_inline_text(text).strip(" 　\"'“”‘’")
+    summary = _normalize_inline_text(text).strip(" 　\"'""''")
     summary = re.sub(r"^(摘要|总结|消息催化|事件催化)\s*[:：]\s*", "", summary)
     return summary
 
@@ -2363,7 +2363,7 @@ def _ensure_supported_strategy(strategy: str) -> None:
     if strategy in ids:
         return
 
-    # 兼容“策略列表为空时手动输入”以及“用户手动覆盖策略参数”场景，
+    # 兼容"策略列表为空时手动输入"以及"用户手动覆盖策略参数"场景，
     # 策略由适配层进行最终校验，因此在列表外仍保持透传。
 
 
@@ -4851,8 +4851,18 @@ def _read_sector_moneyflow_cache() -> Optional[Dict[str, Any]]:
             return None
         with open(path, "r", encoding="utf-8") as f:
             payload = json.load(f)
-        if isinstance(payload, dict) and payload.get("available"):
-            return payload
+        if not isinstance(payload, dict) or not payload.get("available"):
+            return None
+        # 日线数据有日切语义：盘后/日初缓存的上一交易日数据不应被复用到新的交易日。
+        effective_date = _cn_effective_daily_bar_date()
+        cache_date = payload.get("date")
+        if effective_date and cache_date and cache_date != effective_date:
+            logger.info(
+                "[板块资金流向] 缓存日期 %s 与当前有效日期 %s 不一致，丢弃缓存",
+                cache_date, effective_date,
+            )
+            return None
+        return payload
     except Exception:
         pass
     return None
@@ -4871,6 +4881,8 @@ def _write_sector_moneyflow_cache(payload: Dict[str, Any]) -> None:
 _SECTOR_MONEYFLOW_REALTIME_MODE = False
 _SECTOR_MONEYFLOW_LAST_FINGERPRINT: Optional[str] = None
 _SECTOR_MONEYFLOW_STALE_COUNT = 0
+# 实时兜底连续失败次数（用于给前端"数据陈旧"提示）
+_SECTOR_MONEYFLOW_FALLBACK_FAIL_COUNT = 0
 _SECTOR_MONEYFLOW_FALLBACK_LOCK = threading.Lock()
 
 
@@ -4894,6 +4906,16 @@ def _cn_market_open_now() -> bool:
     return bool(ctx and ctx.get("is_market_open_now"))
 
 
+def _cn_effective_daily_bar_date() -> Optional[str]:
+    """获取 A 股当前应使用的日线/收盘数据日期（YYYYMMDD）。"""
+    try:
+        from src.core.trading_calendar import get_effective_trading_date
+
+        return get_effective_trading_date("cn").strftime("%Y%m%d")
+    except Exception:
+        return None
+
+
 def _sector_moneyflow_fingerprint(rows: List[Dict[str, Any]]) -> Optional[str]:
     """对板块资金流行计算稳定指纹（仅用名称 + 主力净额，保留两位小数）。
 
@@ -4908,13 +4930,35 @@ def _sector_moneyflow_fingerprint(rows: List[Dict[str, Any]]) -> Optional[str]:
     return json.dumps(keys, ensure_ascii=False)
 
 
+def _sector_moneyflow_today_str() -> str:
+    """本地"今天" yyyymmdd；用于对比 Tushare trade_date 判断是否已盘后更新。"""
+    import datetime
+
+    return datetime.datetime.now().strftime("%Y%m%d")
+
+
+def _sector_moneyflow_tushare_is_today(rows: List[Dict[str, Any]]) -> Optional[bool]:
+    """判断 Tushare 返回数据是否是今日更新。
+
+    返回 True = 今日（已盘后更新）；False = 昨日/更早（盘中或盘前 Tushare 仍是旧数据）；
+    None = 无法判断（rows 为空或 trade_date 缺失）。
+    """
+    if not rows:
+        return None
+    td = str(rows[0].get("trade_date") or "").strip()
+    if not td:
+        return None
+    return td == _sector_moneyflow_today_str()
+
+
 def _reset_sector_moneyflow_realtime_state() -> None:
     """盘后/首次调用时重置盘中实时兜底状态。"""
-    global _SECTOR_MONEYFLOW_REALTIME_MODE, _SECTOR_MONEYFLOW_LAST_FINGERPRINT, _SECTOR_MONEYFLOW_STALE_COUNT
+    global _SECTOR_MONEYFLOW_REALTIME_MODE, _SECTOR_MONEYFLOW_LAST_FINGERPRINT, _SECTOR_MONEYFLOW_STALE_COUNT, _SECTOR_MONEYFLOW_FALLBACK_FAIL_COUNT
     with _SECTOR_MONEYFLOW_FALLBACK_LOCK:
         _SECTOR_MONEYFLOW_REALTIME_MODE = False
         _SECTOR_MONEYFLOW_LAST_FINGERPRINT = None
         _SECTOR_MONEYFLOW_STALE_COUNT = 0
+        _SECTOR_MONEYFLOW_FALLBACK_FAIL_COUNT = 0
 
 
 def get_sector_moneyflow(top_n: int = 100, force_refresh: bool = False) -> Dict[str, Any]:
@@ -4928,7 +4972,7 @@ def get_sector_moneyflow(top_n: int = 100, force_refresh: bool = False) -> Dict[
       则切换到 akshare/东财实时接口兜底。``force_refresh=True`` 时重置兜底状态，
       立即按最新数据重新判断。
     """
-    global _SECTOR_MONEYFLOW_REALTIME_MODE, _SECTOR_MONEYFLOW_LAST_FINGERPRINT, _SECTOR_MONEYFLOW_STALE_COUNT
+    global _SECTOR_MONEYFLOW_REALTIME_MODE, _SECTOR_MONEYFLOW_LAST_FINGERPRINT, _SECTOR_MONEYFLOW_STALE_COUNT, _SECTOR_MONEYFLOW_FALLBACK_FAIL_COUNT
 
     if not _cn_market_open_now():
         # 盘后：走原缓存逻辑，并重置盘中兜底状态
@@ -4960,6 +5004,16 @@ def get_sector_moneyflow(top_n: int = 100, force_refresh: bool = False) -> Dict[
 
     rows = tushare_rows
     source_hint = None
+    # 盘中提前检测：Tushare trade_date 不是今日（如盘前/盘中盘后未更新）→ 立即走实时兜底，
+    # 不等连续 N 次相同（避免浪费 2 个 10 分钟周期）
+    is_today = _sector_moneyflow_tushare_is_today(tushare_rows)
+    if is_today is False and not _SECTOR_MONEYFLOW_REALTIME_MODE:
+        with _SECTOR_MONEYFLOW_FALLBACK_LOCK:
+            _SECTOR_MONEYFLOW_REALTIME_MODE = True
+            _SECTOR_MONEYFLOW_STALE_COUNT = 0
+        logger.info(
+            "[板块资金流向] 盘中检测到 Tushare trade_date 非今日，立即切换实时兜底",
+        )
     with _SECTOR_MONEYFLOW_FALLBACK_LOCK:
         fingerprint = _sector_moneyflow_fingerprint(tushare_rows)
         if not _SECTOR_MONEYFLOW_REALTIME_MODE:
@@ -4985,9 +5039,14 @@ def get_sector_moneyflow(top_n: int = 100, force_refresh: bool = False) -> Dict[
         if realtime_rows:
             rows = realtime_rows
             source_hint = "realtime_fallback"
+            with _SECTOR_MONEYFLOW_FALLBACK_LOCK:
+                # 兜底成功：重置失败计数
+                _SECTOR_MONEYFLOW_FALLBACK_FAIL_COUNT = 0
         else:
             # 兜底失败：退回 Tushare 盘后快照，保持可用
             logger.warning("[板块资金流向] 实时兜底源无数据，退回 Tushare 盘后快照")
+            with _SECTOR_MONEYFLOW_FALLBACK_LOCK:
+                _SECTOR_MONEYFLOW_FALLBACK_FAIL_COUNT += 1
 
     payload = _build_sector_moneyflow_payload(rows or [])
     if source_hint:
@@ -4997,7 +5056,216 @@ def get_sector_moneyflow(top_n: int = 100, force_refresh: bool = False) -> Dict[
     if _phase:
         payload["is_trading_day"] = _phase["is_trading_day"]
         payload["is_market_open_now"] = _phase["is_market_open_now"]
+    # 陈旧数据标记：兜底连续失败 > 0 时，前端可显示"数据可能陈旧"提示
+    with _SECTOR_MONEYFLOW_FALLBACK_LOCK:
+        payload["is_stale"] = _SECTOR_MONEYFLOW_FALLBACK_FAIL_COUNT > 0
+        payload["fallback_fail_count"] = _SECTOR_MONEYFLOW_FALLBACK_FAIL_COUNT
     # 盘中不写缓存：每次真实拉取以驱动"连续 N 次相同"检测；数据源由前端 10 分钟刷新兜底
+    return payload
+
+
+# ---------- 板块轮动（最近一周涨没涨过、涨几天、是否退潮、明日布局预测） ----------
+
+DSA_ALPHASIFT_SECTOR_ROTATION_CACHE_PATH = DSA_ALPHASIFT_DATA_DIR / "sector_rotation.json"
+DSA_ALPHASIFT_SECTOR_ROTATION_CACHE_TTL_SECONDS = 60 * 60  # 1 小时
+DSA_ALPHASIFT_SECTOR_ROTATION_DAYS = 10
+
+
+def _rotation_momentum_score(cum5: float, up_days: int) -> float:
+    """动量得分（0~100）：近 5 日累计涨幅 + 上涨天数各占一半。"""
+    if cum5 >= 8:
+        s_cum = 100.0
+    elif cum5 >= 4:
+        s_cum = 75.0
+    elif cum5 >= 0:
+        s_cum = 50.0
+    elif cum5 >= -4:
+        s_cum = 25.0
+    else:
+        s_cum = 0.0
+    s_days = {5: 100.0, 4: 80.0, 3: 60.0, 2: 40.0}.get(up_days, 20.0)
+    return (s_cum + s_days) / 2.0
+
+
+def _rotation_capital_score(inflow_days: int, today_net: float) -> float:
+    """资金得分（0~100）：近 5 日主力净流入天数 + 今日资金方向各占一半。"""
+    s_days = {5: 100.0, 4: 80.0, 3: 60.0, 2: 40.0}.get(inflow_days, 20.0)
+    s_today = 100.0 if today_net > 0 else 0.0
+    return (s_days + s_today) / 2.0
+
+
+def _classify_rotation_phase(
+    streak: int,
+    today_net: float,
+    today_pct: float,
+    cum5: float,
+    inflow_days: int,
+) -> str:
+    """板块阶段：starting（启动）/ accelerating（加速）/ ebb（退潮）/ quiet（沉寂）。
+
+    参考 STMS 退潮逻辑（资金流转负即资金分归零）与板块周期经验：
+    - 退潮：连涨 >= 2 天但今日主力净流出（资金撤）；或近 5 日涨幅大（>=6%）且今日跌。
+    - 加速：连涨 >= 3 天且今日主力净流入。
+    - 启动：今日才上涨（streak==1）且今日主力净流入、今日收阳（资金刚进场）。
+    - 沉寂：其余。
+    """
+    if streak >= 2 and today_net < 0:
+        return "ebb"
+    if cum5 >= 6 and today_pct < 0:
+        return "ebb"
+    if streak >= 3 and today_net > 0:
+        return "accelerating"
+    if streak == 1 and today_net > 0 and today_pct > 0:
+        return "starting"
+    return "quiet"
+
+
+def _classify_tomorrow_signal(phase: str, inflow_days: int, capital_score: float) -> str:
+    """明日布局信号：buy（布局候选）/ hold（持有）/ avoid（回避）/ watch（观察）。
+
+    简化自「14 天轮动周期因子 + STMS」：
+    - buy：启动期（资金刚进场），或加速期且资金连续流入 >= 3 天（主线延续）。
+    - hold：加速期（趋势仍在）。
+    - avoid：退潮期（资金撤退，不接盘）。
+    - watch：沉寂期（等待信号）。
+    """
+    if phase == "ebb":
+        return "avoid"
+    if phase == "starting":
+        return "buy"
+    if phase == "accelerating":
+        return "buy" if inflow_days >= 3 else "hold"
+    # quiet：等待信号（STMS "资金分高、动量分低" 的事前拐点可后续增强为单独预警）
+    return "watch"
+
+
+def _build_sector_rotation_item(name: str, ts_code: str, history: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """根据单个板块的历史记录计算轮动指标。history 按日期升序。"""
+    if not history:
+        return None
+    recent = history[-5:] if len(history) >= 5 else history
+    cum5 = round(sum(float(h.get("pct_change") or 0) for h in recent), 2)
+    up_days = sum(1 for h in recent if float(h.get("pct_change") or 0) > 0)
+    inflow_days = sum(1 for h in recent if float(h.get("net_amount") or 0) > 0)
+
+    latest = history[-1]
+    today_pct = float(latest.get("pct_change") or 0)
+    today_net = float(latest.get("net_amount") or 0)
+
+    # 当前连涨/连跌天数（从最新日往前数，同号连续；正=连涨，负=连跌）
+    streak = 0
+    if today_pct > 0:
+        for h in reversed(history):
+            if float(h.get("pct_change") or 0) > 0:
+                streak += 1
+            else:
+                break
+    elif today_pct < 0:
+        for h in reversed(history):
+            if float(h.get("pct_change") or 0) < 0:
+                streak -= 1
+            else:
+                break
+
+    phase = _classify_rotation_phase(streak, today_net, today_pct, cum5, inflow_days)
+    momentum = _rotation_momentum_score(cum5, up_days)
+    capital = _rotation_capital_score(inflow_days, today_net)
+    score = round(0.5 * momentum + 0.5 * capital, 1)
+    signal = _classify_tomorrow_signal(phase, inflow_days, capital)
+
+    return {
+        "name": name,
+        "ts_code": ts_code,
+        "cum_change_5d": cum5,
+        "up_days_5d": up_days,
+        "streak": streak,
+        "inflow_days_5d": inflow_days,
+        "today_pct": round(today_pct, 2),
+        "today_net": today_net,
+        "today_net_text": _format_sector_money_amount(today_net),
+        "phase": phase,
+        "signal": signal,
+        "score": score,
+        "trade_date": str(latest.get("trade_date") or ""),
+    }
+
+
+def _read_sector_rotation_cache() -> Optional[Dict[str, Any]]:
+    path = DSA_ALPHASIFT_SECTOR_ROTATION_CACHE_PATH
+    if not path.exists():
+        return None
+    try:
+        age = time.time() - path.stat().st_mtime
+        if age > DSA_ALPHASIFT_SECTOR_ROTATION_CACHE_TTL_SECONDS:
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if isinstance(payload, dict) and payload.get("available"):
+            return payload
+    except Exception:
+        pass
+    return None
+
+
+def _write_sector_rotation_cache(payload: Dict[str, Any]) -> None:
+    try:
+        DSA_ALPHASIFT_SECTOR_ROTATION_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(DSA_ALPHASIFT_SECTOR_ROTATION_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, default=str)
+    except Exception as e:
+        logger.warning(f"[板块轮动] 缓存写入失败: {e}")
+
+
+def get_sector_rotation(days: int = DSA_ALPHASIFT_SECTOR_ROTATION_DAYS, force_refresh: bool = False) -> Dict[str, Any]:
+    """板块轮动分析：最近一周哪些板块涨过、涨几天、是否退潮、明日布局预测。
+
+    数据：Tushare ``moneyflow_ind_dc`` 多日板块资金流（盘后更新）。
+    算法：简化 STMS（动量 50% + 资金 50%）+ 阶段划分 + 明日信号，详见
+    ``_classify_rotation_phase`` / ``_classify_tomorrow_signal``。
+    结果按 score 降序，带 1 小时缓存（盘后数据本身不频繁变化）。
+    """
+    if not force_refresh:
+        cached = _read_sector_rotation_cache()
+        if cached is not None:
+            return cached
+
+    manager = _get_dsa_fetcher_manager()
+    try:
+        history_rows = manager.get_sector_money_flow_history(days=days)
+    except Exception as e:
+        logger.warning(f"[板块轮动] 历史数据获取失败: {e}")
+        history_rows = []
+
+    items: List[Dict[str, Any]] = []
+    for row in history_rows or []:
+        item = _build_sector_rotation_item(
+            name=str(row.get("name") or ""),
+            ts_code=str(row.get("ts_code") or ""),
+            history=list(row.get("history") or []),
+        )
+        if item:
+            items.append(_remove_non_finite_json_values(item))
+
+    items.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+    phase_counts: Dict[str, int] = {}
+    signal_counts: Dict[str, int] = {}
+    for it in items:
+        phase_counts[it["phase"]] = phase_counts.get(it["phase"], 0) + 1
+        signal_counts[it["signal"]] = signal_counts.get(it["signal"], 0) + 1
+
+    payload: Dict[str, Any] = {
+        "available": bool(items),
+        "days": days,
+        "trade_date": items[0]["trade_date"] if items else "",
+        "items": items,
+        "top_buy": [i for i in items if i["signal"] == "buy"][:10],
+        "top_avoid": [i for i in items if i["signal"] == "avoid"][:10],
+        "phase_counts": phase_counts,
+        "signal_counts": signal_counts,
+    }
+    if items:
+        _write_sector_rotation_cache(payload)
     return payload
 
 
@@ -5304,9 +5572,10 @@ def _build_dsa_candidate_context(
             quote = {}
 
     if quote:
-        candidate["price"] = _first_non_empty(candidate.get("price"), quote.get("price"))
-        candidate["change_pct"] = _first_non_empty(candidate.get("change_pct"), quote.get("change_pct"))
-        candidate["amount"] = _first_non_empty(candidate.get("amount"), quote.get("amount"))
+        # 实时行情应覆盖 AlphaSift 选股时携带的盘后/缓存快照，避免列表展示旧价格/涨跌幅
+        candidate["price"] = _first_non_empty(quote.get("price"), candidate.get("price"))
+        candidate["change_pct"] = _first_non_empty(quote.get("change_pct"), candidate.get("change_pct"))
+        candidate["amount"] = _first_non_empty(quote.get("amount"), candidate.get("amount"))
         if not candidate.get("name") and quote.get("name"):
             candidate["name"] = quote.get("name")
 
