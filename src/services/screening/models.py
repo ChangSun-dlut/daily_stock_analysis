@@ -53,6 +53,13 @@ class HardFilterConfig:
     # 底部吸筹旁路：为 True 时，底部吸筹信号达标的个股可跳过
     # consolidation_days_20d / range_20d_pct / volatility_20d_pct 约束
     bottom_accumulation_bypass: bool = False
+    # 累积破位硬过滤（防"立昂技术"类已放量破位票进候选）：
+    # change_5d_min: 5 日累计涨幅下限（如 -8.0 表示 change_5d ≤ -8% 时淘汰）
+    # ma_breakdown_count_max: 收盘价下穿均线数上限（如 1 表示 >1 时淘汰）
+    # mf_net_inflow_5d_min: 5 日主力净流入下限（如 -1e9 表示 < -10亿 时淘汰）
+    change_5d_min: float | None = None
+    ma_breakdown_count_max: int | None = None
+    mf_net_inflow_5d_min: float | None = None
 
 
 @dataclass

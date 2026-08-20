@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.schemas.decision_scale import signal_key_for_score
 
@@ -1339,3 +1339,36 @@ def get_sentiment_label(score: int, language: Optional[str]) -> str:
     if score >= 20:
         return "悲观"
     return "极度悲观"
+
+
+# 已知 LLM 幻觉模式：market_phase=盘前/盘后被误读为"临时停牌"或"停牌原因未明"。
+# 实际盘前/盘后是正常交易时段外，并非交易所停牌。下列文本在展示层自动改写，
+# 不修改数据库。匹配时保持长度相近，避免破坏排版。
+# 顺序敏感：更具体（更长）的 phrase 必须先匹配，否则会被短 phrase 先吃掉。
+_HALLUCINATED_HALT_REWRITES: List[Tuple[str, str]] = [
+    ("昨日盘中临时停牌", "昨日盘中大幅调整"),
+    ("盘中临时停牌原因未明", "未检索到盘中停牌公告"),
+    ("盘前临时停牌原因未明", "盘前成交，价格仅作撮合参考"),
+    ("盘中临时停牌增加不确定性", "未检索到盘中停牌信息"),
+    ("临时停牌增加不确定性", "盘前/盘后成交，无停牌信息"),
+    ("临时停牌原因未明", "盘前/盘后成交，未检索到停牌公告"),
+    ("盘中临时停牌", "盘中大幅调整"),
+    ("等待复牌后方向选择", "等待企稳后方向选择"),
+    ("等待复牌", "等待企稳"),
+]
+
+
+def sanitize_hallucinated_halt_text(text: Optional[str]) -> Optional[str]:
+    """Rewrite common LLM halt-related hallucinations into neutral wording.
+
+    The rewrite is display-only: callers should use the sanitized value for
+    rendering, but keep the original text in persistent storage so that the
+    hallucination can still be audited later.
+    """
+    if not text:
+        return text
+    out = str(text)
+    for src, dst in _HALLUCINATED_HALT_REWRITES:
+        if src in out:
+            out = out.replace(src, dst)
+    return out

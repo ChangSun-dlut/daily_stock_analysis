@@ -75,6 +75,8 @@ class StockService:
                 "prev_close": getattr(quote, "pre_close", None),
                 "volume": getattr(quote, "volume", None),
                 "amount": getattr(quote, "amount", None),
+                # 量比：当日累计 / 近 N 日同时段均量；数据源不可用时为 None
+                "volume_ratio": getattr(quote, "volume_ratio", None),
                 "update_time": datetime.now().isoformat(),
             }
             

@@ -724,6 +724,7 @@ const StockScreeningPage: React.FC = () => {
   const [loadingHotspotDetail, setLoadingHotspotDetail] = useState(false);
   const [hotspotDetailError, setHotspotDetailError] = useState('');
   const [sectorMoneyflow, setSectorMoneyflow] = useState<AlphaSiftSectorMoneyflowResponse | null>(null);
+  const sectorMoneyflowRef = useRef<AlphaSiftSectorMoneyflowResponse | null>(null);
   const [sectorMoneyflowDeltas, setSectorMoneyflowDeltas] = useState<Record<string, number>>({});
   const [loadingSectorMoneyflow, setLoadingSectorMoneyflow] = useState(false);
   const [sectorMoneyflowError, setSectorMoneyflowError] = useState('');
@@ -928,6 +929,17 @@ const StockScreeningPage: React.FC = () => {
     }
   }, []);
 
+  // 进入板块资金流向页面时，若已是盘后且当前数据停留在"前一交易日"，强制刷新一次，
+  // 避免 React state 缓存导致页面停留在 8月19日数据。
+  const isStaleAfterClose = (current: { date?: string } | null) => {
+    if (!current || !current.date) return false;
+    const now = new Date();
+    const minutes = now.getHours() * 60 + now.getMinutes();
+    if (minutes < 15 * 60) return false; // 盘中不需要特殊处理
+    const today = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
+    return current.date !== today;
+  };
+
   const loadSectorMoneyflow = useCallback(async (forceRefresh = false) => {
     setLoadingSectorMoneyflow(true);
     setSectorMoneyflowError('');
@@ -956,6 +968,7 @@ const StockScreeningPage: React.FC = () => {
         }
         return result;
       });
+      sectorMoneyflowRef.current = result;
       setSectorMoneyflowError('');
     } catch (err) {
       setSectorMoneyflow(null);
@@ -1034,7 +1047,9 @@ const StockScreeningPage: React.FC = () => {
         if (status.enabled && status.available) {
           void loadStrategies();
           void loadHotspots(false);
-          void loadSectorMoneyflow();
+          // 盘后场景：若页面 state 仍持有前一交易日数据，强制刷新一次，
+          // 让用户立刻看到今日（Tushare 18:00 后才有）盘后快照。
+          void loadSectorMoneyflow(isStaleAfterClose(sectorMoneyflowRef.current));
           void loadSectorRotation();
         }
       })
@@ -1049,22 +1064,33 @@ const StockScreeningPage: React.FC = () => {
     };
   }, [loadHotspots, loadSectorMoneyflow, loadSectorRotation, loadStrategies]);
 
-  // 板块资金流向自动刷新：仅「交易日 + 9:00~15:00」开启，每 10 分钟一次
+  // 板块资金流向自动刷新：
+  // - 盘中（9:00~15:00）：每 10 分钟一次
+  // - 盘后（15:00~23:59）：每 30 分钟一次
+  //   原因：Tushare moneyflow_ind_dc 在 18:00 后才更新当日盘后快照，盘后若不开
+  //   刷新则页面会一直停留在上一交易日数据（如 8月20日 15:30 仍是 8月19日收盘数据）。
   useEffect(() => {
     if (!isScreeningEnabled) return;
 
     const shouldRefresh = () => {
       // 1. 非交易日关闭（后端返回 isTradingDay === false 时）
       if (sectorMarketState && sectorMarketState.isTradingDay === false) return false;
-      // 2. 时间窗口：每天 9:00 ~ 15:00（本地时区）
+      // 2. 时间窗口：每天 9:00 ~ 23:59（盘中+盘后，本地时区）
       const now = new Date();
       const minutes = now.getHours() * 60 + now.getMinutes();
-      const inWindow = minutes >= 9 * 60 && minutes < 15 * 60;
+      const inWindow = minutes >= 9 * 60 && minutes < 24 * 60;
       if (!inWindow) return false;
-      // 3. 若后端明确返回未开市，也关闭（兜底）
-      if (sectorMarketState && sectorMarketState.isMarketOpenNow === false) return false;
+      // 3. 盘中必须确认 isMarketOpenNow（后端兜底）；盘后允许 isMarketOpenNow=false
+      const isOpen = sectorMarketState ? sectorMarketState.isMarketOpenNow === true : true;
+      if (!isOpen && minutes < 15 * 60) return false;
       return true;
     };
+
+    const intervalMs = (() => {
+      const now = new Date();
+      const minutes = now.getHours() * 60 + now.getMinutes();
+      return minutes < 15 * 60 ? 10 * 60 * 1000 : 30 * 60 * 1000;
+    })();
 
     if (!shouldRefresh()) return;
 
@@ -1072,7 +1098,7 @@ const StockScreeningPage: React.FC = () => {
       if (shouldRefresh()) {
         void loadSectorMoneyflow();
       }
-    }, 10 * 60 * 1000);
+    }, intervalMs);
     return () => window.clearInterval(timer);
   }, [isScreeningEnabled, loadSectorMoneyflow, sectorMarketState]);
 

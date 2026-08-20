@@ -22,6 +22,7 @@ from src.report_language import (
     localize_operation_advice,
     localize_trend_prediction,
     normalize_report_language,
+    sanitize_hallucinated_halt_text,
 )
 from src.market_phase_summary import extract_market_phase_summary
 from src.schemas.decision_action import build_action_fields
@@ -220,7 +221,7 @@ class AnalysisService:
                 "market_phase_summary": market_phase_summary,
             },
             "summary": {
-                "analysis_summary": result.analysis_summary,
+                "analysis_summary": sanitize_hallucinated_halt_text(result.analysis_summary),
                 "capital_flow_summary": result.capital_flow_summary or "",
                 "operation_advice": localize_operation_advice(result.operation_advice, report_language),
                 "action": action_fields["action"],

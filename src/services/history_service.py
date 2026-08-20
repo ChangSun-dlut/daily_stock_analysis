@@ -34,6 +34,7 @@ from src.report_language import (
     localize_trend_prediction,
     normalize_report_language,
     normalize_strategy_synthesis_payload,
+    sanitize_hallucinated_halt_text,
     strategy_invalid_opinion_count,
 )
 from src.storage import DatabaseManager
@@ -79,28 +80,6 @@ class HistoryService:
     Encapsulates query logic for historical analysis records.
     """
 
-    # 已知 LLM 幻觉模式：market_phase=盘前/盘后时被误读为"临时停牌"或"停牌原因未明"。
-    # 实际盘前/盘后是正常交易时段外，并非交易所停牌。下列文本在历史展示时自动改写，
-    # 不修改数据库。匹配时保持长度相近，避免破坏排版。
-    # 顺序敏感：更具体（更长）的 phrase 必须先匹配，否则会被短 phrase 先吃掉。
-    _HALT_MISREADING_REWRITES: List[Tuple[str, str]] = [
-        ("盘中临时停牌原因未明", "未检索到盘中停牌公告"),
-        ("盘前临时停牌原因未明", "盘前成交，价格仅作撮合参考"),
-        ("盘中临时停牌增加不确定性", "未检索到盘中停牌信息"),
-        ("临时停牌增加不确定性", "盘前/盘后成交，无停牌信息"),
-        ("临时停牌原因未明", "盘前/盘后成交，未检索到停牌公告"),
-    ]
-
-    @classmethod
-    def _rewrite_halt_misreading(cls, text: Optional[str]) -> Optional[str]:
-        if not text:
-            return text
-        out = str(text)
-        for src, dst in cls._HALT_MISREADING_REWRITES:
-            if src in out:
-                out = out.replace(src, dst)
-        return out
-    
     def __init__(self, db_manager: Optional[DatabaseManager] = None):
         """
         Initialize the history query service.
@@ -367,7 +346,7 @@ class HistoryService:
                 getattr(record, "context_snapshot", None)
             ),
             "trend_prediction": record.trend_prediction,
-            "analysis_summary": self._rewrite_halt_misreading(record.analysis_summary),
+            "analysis_summary": sanitize_hallucinated_halt_text(record.analysis_summary),
             "sentiment_score": record.sentiment_score,
             "operation_advice": record.operation_advice,
             "action": action_fields["action"],
@@ -625,7 +604,7 @@ class HistoryService:
             "report_type": record.report_type,
             "created_at": self._serialize_created_at(record.created_at),
             "model_used": model_used,
-            "analysis_summary": self._rewrite_halt_misreading(
+            "analysis_summary": sanitize_hallucinated_halt_text(
                 market_review_content or record.analysis_summary
             ),
             "operation_advice": record.operation_advice,
@@ -919,7 +898,7 @@ class HistoryService:
                 news_summary=raw_result.get("news_summary", record.news_content or ""),
                 market_sentiment=raw_result.get("market_sentiment", ""),
                 hot_topics=raw_result.get("hot_topics", ""),
-                analysis_summary=self._rewrite_halt_misreading(
+                analysis_summary=sanitize_hallucinated_halt_text(
                     raw_result.get("analysis_summary", record.analysis_summary or "")
                 ),
                 key_points=raw_result.get("key_points", ""),

@@ -12,6 +12,8 @@
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from typing import Optional
 import re
 
@@ -25,6 +27,9 @@ from api.v1.schemas.stocks import (
     KLineData,
     StockHistoryResponse,
     StockQuote,
+    WatchlistSpotQuotesRequest,
+    WatchlistSpotQuotesResponse,
+    WatchlistSpotQuoteItem,
 )
 from api.v1.schemas.history import WatchlistRequest, WatchlistResponse
 from api.v1.schemas.common import ErrorResponse
@@ -370,6 +375,89 @@ def add_to_watchlist(
         )
 
 
+def _quote_dict_to_model(result: dict, fallback_code: str) -> StockQuote:
+    """把 StockService.get_realtime_quote 返回的 dict 统一映射到 StockQuote。"""
+    return StockQuote(
+        stock_code=result.get("stock_code", fallback_code),
+        stock_name=result.get("stock_name"),
+        current_price=result.get("current_price", 0.0),
+        change=result.get("change"),
+        change_percent=result.get("change_percent"),
+        open=result.get("open"),
+        high=result.get("high"),
+        low=result.get("low"),
+        prev_close=result.get("prev_close"),
+        volume=result.get("volume"),
+        amount=result.get("amount"),
+        volume_ratio=result.get("volume_ratio"),
+        update_time=result.get("update_time"),
+    )
+
+
+def _fetch_single_quote(code: str) -> WatchlistSpotQuoteItem:
+    """拉取单只股票实时行情；失败时返回仅含 code + error 的 item，不抛异常。"""
+    try:
+        service = StockService()
+        result = service.get_realtime_quote(code)
+    except Exception as e:  # noqa: BLE001 — 单股失败不应拖垮整批
+        logger.warning("批量拉取 %s 实时行情异常: %s", code, e)
+        return WatchlistSpotQuoteItem(stock_code=code, quote=None, error="internal_error")
+
+    if not result:
+        return WatchlistSpotQuoteItem(
+            stock_code=code, quote=None, error="not_found"
+        )
+    return WatchlistSpotQuoteItem(
+        stock_code=code,
+        quote=_quote_dict_to_model(result, code),
+        error=None,
+    )
+
+
+@router.post(
+    "/watchlist/spot-quotes",
+    response_model=WatchlistSpotQuotesResponse,
+    responses={
+        200: {"description": "批量实时行情（每只独立成功/失败）"},
+        422: {"description": "参数校验失败", "model": ErrorResponse},
+    },
+    summary="批量获取自选股实时行情",
+    description=(
+        "为首页自选股放量预警等场景提供一次拉取多只股票实时行情的接口。"
+        "内部并发拉取，单股失败不影响其它股票。"
+    ),
+)
+def get_watchlist_spot_quotes(
+    request: WatchlistSpotQuotesRequest,
+) -> WatchlistSpotQuotesResponse:
+    """批量返回每只股票的实时行情与量比（用于放量预警）。"""
+    # 去重 + 保留顺序 + 跳过空串
+    seen: set = set()
+    codes: list = []
+    for raw in request.codes:
+        if not raw:
+            continue
+        code = raw.strip()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        codes.append(code)
+
+    if not codes:
+        return WatchlistSpotQuotesResponse(
+            quotes=[], fetched_at=datetime.now().isoformat()
+        )
+
+    # 线程池大小：不超过股票数，也不超过 8（避免瞬时高并发打爆上游）
+    worker_count = min(len(codes), 8)
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        items = list(executor.map(_fetch_single_quote, codes))
+
+    return WatchlistSpotQuotesResponse(
+        quotes=items, fetched_at=datetime.now().isoformat()
+    )
+
+
 @router.post(
     "/watchlist/remove",
     response_model=WatchlistResponse,
@@ -446,20 +534,7 @@ def get_stock_quote(stock_code: str) -> StockQuote:
                 }
             )
         
-        return StockQuote(
-            stock_code=result.get("stock_code", stock_code),
-            stock_name=result.get("stock_name"),
-            current_price=result.get("current_price", 0.0),
-            change=result.get("change"),
-            change_percent=result.get("change_percent"),
-            open=result.get("open"),
-            high=result.get("high"),
-            low=result.get("low"),
-            prev_close=result.get("prev_close"),
-            volume=result.get("volume"),
-            amount=result.get("amount"),
-            update_time=result.get("update_time")
-        )
+        return _quote_dict_to_model(result, stock_code)
         
     except HTTPException:
         raise

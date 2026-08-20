@@ -74,6 +74,12 @@ screening:
     max_drawdown_20d_pct_min: null
     max_drawdown_20d_pct_max: null
     atr_20_pct_min: null
+    # ---- 累积破位硬过滤（防"立昂技术"类已放量破位票进候选）----
+    # 5 日累跌 > 5% 淘汰（连续下跌破位） / 收盘价已下穿 > 1 条均线淘汰（均线已发散）
+    # / 5 日主力净流入 < 0 淘汰（主力持续净流出）
+    change_5d_min: -5.0
+    ma_breakdown_count_max: 1
+    mf_net_inflow_5d_min: 0.0
 
   tech_weight: 0.60
   factor_weights:

@@ -36,6 +36,10 @@ _DAILY_FILTER_DEFAULTS = {
     "max_drawdown_20d_pct_max": None,
     "atr_20_pct_min": None,
     "atr_20_pct_max": None,
+    # 累积破位硬过滤（防"立昂技术"类已放量破位票进候选）
+    "change_5d_min": None,
+    "ma_breakdown_count_max": None,
+    "mf_net_inflow_5d_min": None,
 }
 
 
@@ -111,6 +115,12 @@ def apply_hard_filters(df: pd.DataFrame, filters: HardFilterConfig) -> pd.DataFr
     mask = _filter_max(result, mask, ["max_drawdown_20d_pct"], filters.max_drawdown_20d_pct_max)
     mask = _filter_min(result, mask, ["atr_20_pct"], filters.atr_20_pct_min)
     mask = _filter_max(result, mask, ["atr_20_pct"], filters.atr_20_pct_max)
+
+    # 累积破位硬过滤（防"立昂技术"类已放量破位票进候选）
+    mask = _filter_min(result, mask, ["change_5d"], filters.change_5d_min)
+    # ma_breakdown_count_max 语义：收盘价已下穿均线数 > 该值时淘汰（即 > max）
+    mask = _filter_max(result, mask, ["ma_breakdown_count"], filters.ma_breakdown_count_max)
+    mask = _filter_min(result, mask, ["mf_net_inflow_5d"], filters.mf_net_inflow_5d_min)
 
     return result.loc[mask].copy()
 
@@ -216,6 +226,11 @@ def hard_filter_rejection_summary(
     record_max("max_drawdown_20d_pct_max", ["max_drawdown_20d_pct"], filters.max_drawdown_20d_pct_max)
     record_min("atr_20_pct_min", ["atr_20_pct"], filters.atr_20_pct_min)
     record_max("atr_20_pct_max", ["atr_20_pct"], filters.atr_20_pct_max)
+
+    # 累积破位硬过滤 rejection summary
+    record_min("change_5d_min", ["change_5d"], filters.change_5d_min)
+    record_max("ma_breakdown_count_max", ["ma_breakdown_count"], filters.ma_breakdown_count_max)
+    record_min("mf_net_inflow_5d_min", ["mf_net_inflow_5d"], filters.mf_net_inflow_5d_min)
 
     return diagnostics
 

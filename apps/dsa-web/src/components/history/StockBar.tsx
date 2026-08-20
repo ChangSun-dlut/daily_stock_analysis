@@ -4,7 +4,9 @@ import { Badge, Button, ScrollArea } from '../common';
 import { DashboardPanelHeader, DashboardStateBlock } from '../dashboard';
 import { StockBarItemComponent } from './StockBarItem';
 import type { StockBarItem as StockBarItemType } from '../../types/analysis';
+import type { WatchlistSpotQuoteView } from '../../api/systemConfig';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
+import { Zap, Loader2 } from 'lucide-react';
 
 interface StockBarProps {
   items: StockBarItemType[];
@@ -19,6 +21,11 @@ interface StockBarProps {
    * share-image button rendered elsewhere on the page) can react.
    */
   onSelectionChange?: (recordIds: number[]) => void;
+  /** 实时量比 / 涨跌幅映射，用于在每行渲染放量预警徽标（与 watchlist 复用同一来源）。 */
+  spotQuotesByCode?: Map<string, WatchlistSpotQuoteView>;
+  spotQuotesLoading?: boolean;
+  /** 手动触发历史栏目实时量比刷新（闪电按钮）。 */
+  onRefreshSpotQuotes?: () => Promise<void> | void;
   className?: string;
 }
 
@@ -35,6 +42,9 @@ export const StockBar: React.FC<StockBarProps> = ({
   onDeleteStock,
   isDeleting = false,
   onSelectionChange,
+  spotQuotesByCode,
+  spotQuotesLoading = false,
+  onRefreshSpotQuotes,
   className = '',
 }) => {
   const { t } = useUiLanguage();
@@ -120,7 +130,27 @@ export const StockBar: React.FC<StockBarProps> = ({
                   {t('common.selectedCount', { count: selectedCount })}
                 </Badge>
               ) : items.length > 0 ? (
-                <span className="text-[11px] text-muted-text">{t('common.itemsCount', { count: items.length })}</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] text-muted-text">{t('common.itemsCount', { count: items.length })}</span>
+                  {onRefreshSpotQuotes ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="xsm"
+                      className="h-7 w-7 px-0"
+                      disabled={spotQuotesLoading}
+                      onClick={() => void onRefreshSpotQuotes()}
+                      aria-label={t('history.refreshSpotQuotesAria')}
+                      title={t('history.refreshSpotQuotesAria')}
+                    >
+                      {spotQuotesLoading ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                      ) : (
+                        <Zap className="h-3.5 w-3.5" aria-hidden="true" />
+                      )}
+                    </Button>
+                  ) : null}
+                </div>
               ) : undefined
             }
           />
@@ -180,6 +210,8 @@ export const StockBar: React.FC<StockBarProps> = ({
               const isMarket = isMarketReview(code);
               const isSelected = selectedRecordId === item.id || selectedStockCode === code;
               const isChecked = selectedCodes.has(code);
+              const spotQuote = spotQuotesByCode?.get(code);
+              const isVolumeLoading = !spotQuote && spotQuotesLoading;
 
               return (
                 <div key={`${code}-${item.id}`} className="flex items-start gap-2 group">
@@ -201,6 +233,9 @@ export const StockBar: React.FC<StockBarProps> = ({
                     onDelete={onDeleteStock}
                     isDeleting={isDeleting}
                     isMarketReview={isMarket}
+                    volumeRatio={spotQuote?.volumeRatio ?? null}
+                    volumeChangePercent={spotQuote?.changePercent ?? null}
+                    isVolumeRatioLoading={isVolumeLoading}
                   />
                 </div>
               );

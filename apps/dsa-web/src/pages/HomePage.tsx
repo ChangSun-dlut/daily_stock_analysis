@@ -7,6 +7,7 @@ import { analysisApi, DuplicateTaskError } from '../api/analysis';
 import { historyApi } from '../api/history';
 import { agentApi, type SkillInfo } from '../api/agent';
 import { systemConfigApi } from '../api/systemConfig';
+import type { WatchlistSpotQuoteView } from '../api/systemConfig';
 import { ApiErrorAlert, Button, Drawer, EmptyState, InlineAlert } from '../components/common';
 import { DashboardStateBlock } from '../components/dashboard';
 import { StockAutocomplete } from '../components/StockAutocomplete';
@@ -268,6 +269,10 @@ const HomePage: React.FC = () => {
   const [isBatchAnalyzingWatchlist, setIsBatchAnalyzingWatchlist] = useState(false);
   const [batchAnalyzeStatus, setBatchAnalyzeStatus] = useState<BatchAnalyzeStatus>(null);
   const [watchlistHistoryItemsByCode, setWatchlistHistoryItemsByCode] = useState<Map<string, StockBarItem>>(new Map());
+  const [watchlistSpotQuotesByCode, setWatchlistSpotQuotesByCode] = useState<Map<string, WatchlistSpotQuoteView>>(new Map());
+  const [watchlistSpotQuotesLoading, setWatchlistSpotQuotesLoading] = useState(false);
+  const [historySpotQuotesByCode, setHistorySpotQuotesByCode] = useState<Map<string, WatchlistSpotQuoteView>>(new Map());
+  const [historySpotQuotesLoading, setHistorySpotQuotesLoading] = useState(false);
   const [watchlistHistoryLookupState, setWatchlistHistoryLookupState] = useState<WatchlistHistoryLookupState>({
     signature: '',
     settledKeys: new Set(),
@@ -788,6 +793,89 @@ const HomePage: React.FC = () => {
     };
   }, [canLookupWatchlistHistory, watchlistHistoryRetryVersion, watchlistMissingHistoryEntries, watchlistMissingHistorySignature]);
 
+  // 首页 watchlist 当日放量预警：仅在早盘 9:00（Asia/Shanghai）自动拉一次 + 用户手动触发；
+  // codes 变化 / 页面切回前台都不再自动拉，避免白天反复打数据源。
+  const watchlistSpotQuoteAbortRef = useRef<AbortController | null>(null);
+  const refreshWatchlistSpotQuotes = useCallback(async () => {
+    const codes = watchlistState.watchlistCodes;
+    if (!codes.length) {
+      setWatchlistSpotQuotesByCode(new Map());
+      setWatchlistSpotQuotesLoading(false);
+      return;
+    }
+    const abortController = new AbortController();
+    watchlistSpotQuoteAbortRef.current?.abort();
+    watchlistSpotQuoteAbortRef.current = abortController;
+    setWatchlistSpotQuotesLoading(true);
+    try {
+      const map = await systemConfigApi.fetchWatchlistSpotQuotes(codes);
+      if (!abortController.signal.aborted) {
+        setWatchlistSpotQuotesByCode(map);
+      }
+    } finally {
+      if (!abortController.signal.aborted) {
+        setWatchlistSpotQuotesLoading(false);
+      }
+    }
+  }, [watchlistState.watchlistCodes]);
+
+  // 每日 9:00（Asia/Shanghai）定时拉一次。组件首次挂载 / 用户点击刷新 / 9 点触发都会
+  // 调用 refreshWatchlistSpotQuotes；用 setTimeout 自递归实现每日触发，依赖项变化时自动清理。
+  useEffect(() => {
+    let timeoutId: number | undefined;
+    let cancelled = false;
+
+    const computeMsUntilNextShanghai9Am = (): number => {
+      const now = new Date();
+      const fmt = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Shanghai',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      });
+      const parts = fmt.formatToParts(now);
+      const valueOf = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0);
+      const year = valueOf('year');
+      const month = valueOf('month');
+      const day = valueOf('day');
+      const hour = valueOf('hour');
+      let targetYear = year;
+      let targetMonth = month;
+      let targetDay = day;
+      if (hour >= 9) {
+        const tomorrow = new Date(Date.UTC(year, month - 1, day + 1));
+        targetYear = tomorrow.getUTCFullYear();
+        targetMonth = tomorrow.getUTCMonth() + 1;
+        targetDay = tomorrow.getUTCDate();
+      }
+      // 9:00 Asia/Shanghai = 1:00 UTC（上海为 UTC+8，无夏令时）
+      const targetUtcMs = Date.UTC(targetYear, targetMonth - 1, targetDay, 1, 0, 0);
+      return Math.max(0, targetUtcMs - now.getTime());
+    };
+
+    const schedule = () => {
+      if (cancelled) return;
+      const delay = computeMsUntilNextShanghai9Am();
+      timeoutId = window.setTimeout(() => {
+        void refreshWatchlistSpotQuotes();
+        schedule();
+      }, delay);
+    };
+
+    schedule();
+
+    return () => {
+      cancelled = true;
+      if (timeoutId !== undefined) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [refreshWatchlistSpotQuotes]);
+
   const clearMarketReviewState = useCallback(() => {
     stopMarketReviewPolling();
     setMarketReviewReport(null);
@@ -1166,6 +1254,7 @@ const HomePage: React.FC = () => {
       const latestItem = isTodayStatusLoading || isTodayStatusUnknown
         ? undefined
         : latestItemCandidate;
+      const spotQuote = key ? watchlistSpotQuotesByCode.get(key) : undefined;
       return {
         code,
         latestItem,
@@ -1173,6 +1262,9 @@ const HomePage: React.FC = () => {
         isTodayStatusLoading,
         isTodayStatusUnknown,
         activeTask: key ? activeTaskByCode.get(key) : undefined,
+        volumeRatio: spotQuote?.volumeRatio ?? null,
+        volumeChangePercent: spotQuote?.changePercent ?? null,
+        isVolumeRatioLoading: watchlistSpotQuotesLoading && !spotQuote,
       };
     })
   ), [
@@ -1186,6 +1278,8 @@ const HomePage: React.FC = () => {
     watchlistHistoryItemsByCode,
     watchlistHistoryLookupState,
     watchlistMissingHistorySignature,
+    watchlistSpotQuotesByCode,
+    watchlistSpotQuotesLoading,
     watchlistState.watchlistCodes,
   ]);
 
@@ -1379,6 +1473,93 @@ const HomePage: React.FC = () => {
     });
   }, [marketReviewHistoryItems, stockBarItems, t]);
 
+  // 历史栏目放量预警：仅在早盘 9:00（Asia/Shanghai）自动拉一次 + 用户手动触发；
+  // codes 变化不再自动拉，与 watchlist 保持一致。
+  const historySpotCodes = useMemo(
+    () => mergedStockBarItems
+      .map((item) => item.stockCode)
+      .filter((code): code is string => Boolean(code) && code !== 'MARKET'),
+    [mergedStockBarItems],
+  );
+  const historySpotQuoteAbortRef = useRef<AbortController | null>(null);
+  const refreshHistorySpotQuotes = useCallback(async () => {
+    const codes = historySpotCodes;
+    if (!codes.length) {
+      setHistorySpotQuotesByCode(new Map());
+      setHistorySpotQuotesLoading(false);
+      return;
+    }
+    const abortController = new AbortController();
+    historySpotQuoteAbortRef.current?.abort();
+    historySpotQuoteAbortRef.current = abortController;
+    setHistorySpotQuotesLoading(true);
+    try {
+      const map = await systemConfigApi.fetchWatchlistSpotQuotes(codes);
+      if (!abortController.signal.aborted) {
+        setHistorySpotQuotesByCode(map);
+      }
+    } finally {
+      if (!abortController.signal.aborted) {
+        setHistorySpotQuotesLoading(false);
+      }
+    }
+  }, [historySpotCodes]);
+
+  // 每日 9:00（Asia/Shanghai）定时拉一次，逻辑与 watchlist 完全一致。
+  useEffect(() => {
+    let timeoutId: number | undefined;
+    let cancelled = false;
+
+    const computeMsUntilNextShanghai9Am = (): number => {
+      const now = new Date();
+      const fmt = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Shanghai',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      });
+      const parts = fmt.formatToParts(now);
+      const valueOf = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0);
+      const year = valueOf('year');
+      const month = valueOf('month');
+      const day = valueOf('day');
+      const hour = valueOf('hour');
+      let targetYear = year;
+      let targetMonth = month;
+      let targetDay = day;
+      if (hour >= 9) {
+        const tomorrow = new Date(Date.UTC(year, month - 1, day + 1));
+        targetYear = tomorrow.getUTCFullYear();
+        targetMonth = tomorrow.getUTCMonth() + 1;
+        targetDay = tomorrow.getUTCDate();
+      }
+      const targetUtcMs = Date.UTC(targetYear, targetMonth - 1, targetDay, 1, 0, 0);
+      return Math.max(0, targetUtcMs - now.getTime());
+    };
+
+    const schedule = () => {
+      if (cancelled) return;
+      const delay = computeMsUntilNextShanghai9Am();
+      timeoutId = window.setTimeout(() => {
+        void refreshHistorySpotQuotes();
+        schedule();
+      }, delay);
+    };
+
+    schedule();
+
+    return () => {
+      cancelled = true;
+      if (timeoutId !== undefined) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [refreshHistorySpotQuotes]);
+
   const handleBatchAnalyze = useCallback(async () => {
     if (isBatchAnalyzing) return;
     if (selectedHistoryRecordIds.length < 2) return;
@@ -1453,6 +1634,11 @@ const HomePage: React.FC = () => {
           watchlistAnalyzedTodayCount={watchlistAnalyzedTodayCount}
           historyItems={mergedStockBarItems}
           isLoadingHistory={isLoadingStockBar}
+          historySpotQuotesByCode={historySpotQuotesByCode}
+          historySpotQuotesLoading={historySpotQuotesLoading}
+          onRefreshHistorySpotQuotes={refreshHistorySpotQuotes}
+          onRefreshWatchlistSpotQuotes={refreshWatchlistSpotQuotes}
+          watchlistSpotQuotesLoading={watchlistSpotQuotesLoading}
           selectedStockCode={selectedReport?.meta.stockCode}
           selectedRecordId={selectedReport?.meta.id}
           onHistoryItemClick={handleHistoryItemClick}

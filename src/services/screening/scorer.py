@@ -132,6 +132,16 @@ _DEFAULT_SCORING_PROFILE = {
     "consolidation_quality_bear_penalty_each": 6.0,
     "consolidation_quality_bear_penalty_all_extra": 7.0,
     "consolidation_quality_bear_penalty_cap": 25.0,
+    # 累积破位惩罚（横盘蓄势相关）：多日主力净流出 / 持续大幅回撤 / 60 日深跌破底
+    "consolidation_quality_cum_mf_negative_5d_threshold": 0.0,
+    "consolidation_quality_cum_prolonged_decline_20d_pct": -15.0,
+    "consolidation_quality_cum_deep_break_60d_pct": -50.0,
+    "consolidation_quality_cum_penalty_each": 4.0,
+    "consolidation_quality_cum_penalty_cap": 20.0,
+    # 强信号组合：均线已发散 + 5 日持续下行 + 当日仍跌（结构性破位）
+    "consolidation_quality_cum_strong_ma_breakdown_min": 2,
+    "consolidation_quality_cum_strong_prolonged_decline_5d_pct": -5.0,
+    "consolidation_quality_cum_strong_penalty": 14.0,
     # --- bottom_accumulation_quality ---
     "bottom_accumulation_decline_sweet_min": 15.0,
     "bottom_accumulation_decline_sweet_max": 40.0,
@@ -160,6 +170,16 @@ _DEFAULT_SCORING_PROFILE = {
     "bottom_accumulation_bear_penalty_each": 6.0,
     "bottom_accumulation_bear_penalty_all_extra": 7.0,
     "bottom_accumulation_bear_penalty_cap": 25.0,
+    # 累积破位惩罚（底部吸筹相关）：多日主力净流出 / 持续大幅回撤 / 60 日深跌破底
+    "bottom_accumulation_cum_mf_negative_5d_threshold": 0.0,
+    "bottom_accumulation_cum_prolonged_decline_20d_pct": -15.0,
+    "bottom_accumulation_cum_deep_break_60d_pct": -50.0,
+    "bottom_accumulation_cum_penalty_each": 4.0,
+    "bottom_accumulation_cum_penalty_cap": 20.0,
+    # 强信号组合：均线已发散 + 5 日持续下行 + 当日仍跌（结构性破位）
+    "bottom_accumulation_cum_strong_ma_breakdown_min": 2,
+    "bottom_accumulation_cum_strong_prolonged_decline_5d_pct": -5.0,
+    "bottom_accumulation_cum_strong_penalty": 14.0,
     "consolidation_mf_inflow_5d_min": 300.0,
     "consolidation_mf_inflow_5d_max": 3000.0,
     "consolidation_mf_outflow_5d_min": -300.0,
@@ -671,6 +691,12 @@ def _compute_consolidation_quality_score(df: pd.DataFrame, profile: dict[str, fl
     bear_penalty = _compute_bearish_breakdown_penalty(df, profile, "consolidation_quality_bear_")
     score = score - bear_penalty
 
+    # 12. 累积破位惩罚：当日形态未触发破位但近 N 日已下行 / 主力净流出的票也应减分。
+    cum_bear = _compute_cumulative_breakdown_penalty(
+        df, profile, "consolidation_quality_cum_"
+    )
+    score = score - cum_bear
+
     # --- Money Flow Confirmation (0-10 pts, consolidation-breakout overlay) ---
     #     Rewards sustained main-force accumulation; penalises outflow.
     mf_score = pd.Series(5.0, index=df.index)
@@ -1107,7 +1133,96 @@ def _compute_bottom_accumulation_quality_score(df: pd.DataFrame, profile: dict[s
     bear_penalty = _compute_bearish_breakdown_penalty(df, profile, "bottom_accumulation_bear_")
     score = score - bear_penalty
 
+    # --- 10. 累积破位惩罚（0 至 -cum_penalty_cap 分）---
+    # 当日形态可能只是缩量回踩，但若近 20 日 / 60 日已经处于"持续下行 + 主力净流出"，
+    # 也不应被识别为吸筹。该维度补充"当日未触发破位但多日已破位"的情况。
+    cum_bear = _compute_cumulative_breakdown_penalty(
+        df, profile, "bottom_accumulation_cum_"
+    )
+    score = score - cum_bear
+
     return score.clip(lower=0, upper=100.0)
+
+
+def _compute_cumulative_breakdown_penalty(
+    df: pd.DataFrame, profile: dict[str, float], prefix: str
+) -> pd.Series:
+    """补齐"累积破位"维度（只用已有列），与 _compute_bearish_breakdown_penalty 互补。
+
+    三个互相独立的累积信号，每个命中扣 `prefix_penalty_each` 分：
+      1. mf_negative_5d：mf_net_inflow_5d < `prefix_mf_negative_5d_threshold`（默认 0）
+         → 5 日主力资金累计净流出，与"底部吸筹 / 横盘蓄势"逻辑相悖。
+      2. prolonged_decline：change_20d <= `prefix_prolonged_decline_20d_pct`（默认 -15%）
+         且当日 change_pct <= 0 → 持续大幅回撤且今日仍跌。
+      3. deep_break：change_60d < `prefix_deep_break_60d_pct`（默认 -50%）
+         → 60 日已深跌破底（不是吸筹的 sweet spot，而是趋势性破位）。
+      4.【主信号，强烈】ma_breakdown_strong：ma_breakdown_count >= `prefix_strong_ma_breakdown_min`
+         且 change_5d <= `prefix_strong_prolonged_decline_5d_pct`（默认 -5%）且当日
+         change_pct <= 0 → "均线已发散 + 5 日持续下行 + 当日仍跌"的结构性破位
+         （如立昂技术式「多日主力流出 + 跌破多根均线 + 持续阴跌」）。
+         该信号单独扣 `prefix_strong_penalty`（默认 14），与弱信号叠加，
+         共同受 `prefix_penalty_cap`（默认 20）封顶。
+
+    最终 clip 到 [0, `prefix_penalty_cap`]，避免过分扣分。
+    所有信号在数据缺失（NaN）时按"未触发"处理，避免误伤上游数据不全的票。
+    """
+    penalty_each = float(profile.get(f"{prefix}penalty_each", 4.0))
+    penalty_cap = float(profile.get(f"{prefix}penalty_cap", 20.0))
+
+    if penalty_each <= 0 or penalty_cap <= 0:
+        # 配置关闭累积破位（任意参数 ≤ 0 视为禁用）
+        return pd.Series(0.0, index=df.index)
+
+    score = pd.Series(0.0, index=df.index)
+
+    # 1. 5 日主力累计净流出
+    if "mf_net_inflow_5d" in df.columns:
+        inflow5d = pd.to_numeric(df["mf_net_inflow_5d"], errors="coerce")
+        threshold = float(profile.get(f"{prefix}mf_negative_5d_threshold", 0.0))
+        mf_negative_mask = inflow5d.notna() & (inflow5d < threshold)
+        score = score + mf_negative_mask.astype(float) * penalty_each
+
+    # 2. 持续大幅回撤且今日仍跌
+    decline_threshold = float(profile.get(f"{prefix}prolonged_decline_20d_pct", -15.0))
+    if "change_20d" in df.columns and "change_pct" in df.columns:
+        c20 = pd.to_numeric(df["change_20d"], errors="coerce")
+        c0 = pd.to_numeric(df["change_pct"], errors="coerce")
+        prolonged_mask = c20.notna() & c0.notna() & (c20 <= decline_threshold) & (c0 <= 0)
+        score = score + prolonged_mask.astype(float) * penalty_each
+
+    # 3. 60 日深跌破底（非吸筹的 sweet spot，而是趋势性破位）
+    deep_threshold = float(profile.get(f"{prefix}deep_break_60d_pct", -50.0))
+    if "change_60d" in df.columns:
+        c60 = pd.to_numeric(df["change_60d"], errors="coerce")
+        deep_mask = c60.notna() & (c60 < deep_threshold)
+        score = score + deep_mask.astype(float) * penalty_each
+
+    # 4. 强信号组合：均线已发散 + 5 日持续下行 + 当日仍跌。
+    # 仅当 ma_breakdown_count / change_5d / change_pct 三列都齐备且非 NaN 时触发。
+    if {"ma_breakdown_count", "change_5d", "change_pct"}.issubset(df.columns):
+        ma_break_min = int(profile.get(f"{prefix}strong_ma_breakdown_min", 2))
+        decline_5d_threshold = float(
+            profile.get(f"{prefix}strong_prolonged_decline_5d_pct", -5.0)
+        )
+        strong_penalty = float(profile.get(f"{prefix}strong_penalty", 14.0))
+
+        ma_break = pd.to_numeric(df["ma_breakdown_count"], errors="coerce")
+        c5 = pd.to_numeric(df["change_5d"], errors="coerce")
+        c0 = pd.to_numeric(df["change_pct"], errors="coerce")
+
+        strong_mask = (
+            ma_break.notna() & (ma_break >= ma_break_min)
+            & c5.notna() & (c5 <= decline_5d_threshold)
+            & c0.notna() & (c0 <= 0)
+        )
+        # 强信号单独按 strong_penalty 累加；与弱信号叠加后受 cap 限制。
+        # 避免一条票因为"恰好两项弱信号 + 一项强信号"就触发 cap，所以用 max(弱累加, 强信号)。
+        weak_score = score.copy()
+        score = pd.concat(
+            [weak_score, strong_mask.astype(float) * strong_penalty], axis=1
+        ).max(axis=1)
+
+    return score.clip(lower=0, upper=penalty_cap)
 
 
 def _compute_capital_heat_quality_score(

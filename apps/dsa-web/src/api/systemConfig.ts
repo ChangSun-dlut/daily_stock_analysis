@@ -1,6 +1,25 @@
 import apiClient from './index';
 import { createParsedApiError, getParsedApiError, type ParsedApiError } from './error';
 import { toCamelCase } from './utils';
+
+/** /stocks/watchlist/spot-quotes 返回的单股行情载荷（仅取前端需要的字段） */
+export interface WatchlistQuotePayload {
+  stockCode?: string;
+  stockName?: string;
+  currentPrice?: number | null;
+  changePercent?: number | null;
+  amount?: number | null;
+  volumeRatio?: number | null;
+  updateTime?: string | null;
+}
+
+/** 前端 watchlist 行使用的视图（去重失败字段） */
+export interface WatchlistSpotQuoteView {
+  volumeRatio: number | null;
+  changePercent: number | null;
+  amount: number | null;
+  error: string | null;
+}
 import type {
   AgentBackendStatusPreviewRequest,
   AgentBackendStatusResponse,
@@ -367,5 +386,43 @@ export const systemConfigApi = {
     });
     const data = toCamelCase<{ stockCodes: string[] }>(response.data);
     return data.stockCodes || [];
+  },
+
+  /**
+   * 批量获取自选股的实时行情（含量比），用于首页放量预警。
+   * 服务端使用 ThreadPoolExecutor 并发拉取，单股失败不影响其它股票。
+   *
+   * 返回 Map<code, { volumeRatio, changePercent, amount, error? }>。
+   */
+  fetchWatchlistSpotQuotes: async (
+    codes: string[],
+  ): Promise<Map<string, WatchlistSpotQuoteView>> => {
+    const result = new Map<string, WatchlistSpotQuoteView>();
+    if (!codes.length) return result;
+    try {
+      const response = await apiClient.post<Record<string, unknown>>(
+        '/api/v1/stocks/watchlist/spot-quotes',
+        { codes },
+      );
+      const data = toCamelCase<{
+        quotes: Array<{
+          stockCode: string;
+          quote: WatchlistQuotePayload | null;
+          error: string | null;
+        }>;
+      }>(response.data);
+      for (const item of data.quotes || []) {
+        if (!item || !item.stockCode) continue;
+        result.set(item.stockCode, {
+          volumeRatio: item.quote?.volumeRatio ?? null,
+          changePercent: item.quote?.changePercent ?? null,
+          amount: item.quote?.amount ?? null,
+          error: item.error ?? null,
+        });
+      }
+    } catch {
+      // 整批失败：返回空 map，调用方按无数据渲染（不阻塞页面）
+    }
+    return result;
   },
 };

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 - [新功能] 新增 `bottom_accumulation` 底部吸筹反转策略：当底部吸筹信号达标（60日跌幅≥15%、量能扩张≥1.3倍、RSI从超卖恢复、MACD底部金叉、价格从60日低点反弹——满足任意3项），自动跳过 `range_20d_pct_max`/`volatility_20d_pct_max`/`consolidation_days_20d_min` 三条硬过滤约束，使底部反转型股票（如再升科技、天下秀）不被错误排除；评分采用加性五维模型（跌幅深度25 + RSI恢复20 + 量能扩张20 + MACD结构15 + 价格企稳20），因子权重0.65
+- [改进] 首页「自选」+「历史」两个栏目的放量预警量比改为**每日早盘 9:00（Asia/Shanghai）自动拉取一次 + 白天改为手动刷新**：`codes` 变化不再自动触发；两个栏目 panel header 都新增闪电图标按钮触发批量拉取 `/api/v1/stocks/watchlist/spot-quotes`；前端用 `setTimeout` 自递归实现每日定时（无后台依赖、不阻塞页面）
 - [改进] consolidation_quality 因子的 `near_high` 阈值从 0% 放宽至 -5%，使箱体上沿附近的股票不会因微小回调丢失突破评分
 - [修复] Web 分享图改为用户点击"分享"后才按需生成，不再在报告加载时自动请求
 - [修复] 将 `SCREENING_ENABLED` 及 Web 选股功能开关归入"基础设置"，选股导航入口继续由该开关控制

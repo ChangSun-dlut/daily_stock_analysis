@@ -7,6 +7,7 @@ import { formatDateTime } from '../../utils/format';
 import { getMarketPhaseSummaryLabel } from '../../utils/marketPhase';
 import { truncateStockName } from '../../utils/stockName';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
+import { VolumeSpikeBadge } from '../watchlist/VolumeSpikeBadge';
 
 interface StockBarItemProps {
   item: StockBarItemType;
@@ -15,6 +16,10 @@ interface StockBarItemProps {
   onDelete?: (stockCode: string) => void;
   isDeleting?: boolean;
   isMarketReview?: boolean;
+  /** 实时量比 / 涨跌幅（用于渲染放量预警徽标）。大盘复盘时也会传入，但通过 testIdPrefix 区分命名空间。 */
+  volumeRatio?: number | null;
+  volumeChangePercent?: number | null;
+  isVolumeRatioLoading?: boolean;
 }
 
 export const StockBarItemComponent: React.FC<StockBarItemProps> = ({
@@ -24,6 +29,9 @@ export const StockBarItemComponent: React.FC<StockBarItemProps> = ({
   onDelete,
   isDeleting = false,
   isMarketReview = false,
+  volumeRatio = null,
+  volumeChangePercent = null,
+  isVolumeRatioLoading = false,
 }) => {
   const { language, t } = useUiLanguage();
   const sentimentScore = typeof item.sentimentScore === 'number' ? item.sentimentScore : null;
@@ -123,6 +131,14 @@ export const StockBarItemComponent: React.FC<StockBarItemProps> = ({
             <span className="text-[11px] text-secondary-text font-mono">
               {item.stockCode}
             </span>
+            {!isMarketReview ? (
+              <VolumeSpikeBadge
+                ratio={volumeRatio}
+                changePercent={volumeChangePercent}
+                loading={isVolumeRatioLoading}
+                testIdPrefix="history-volume"
+              />
+            ) : null}
             {item.lastAnalysisTime && (
               <>
                 <span className="w-1 h-1 rounded-full bg-subtle-hover" />

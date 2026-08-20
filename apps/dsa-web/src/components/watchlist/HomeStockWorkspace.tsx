@@ -12,6 +12,7 @@ import {
   RefreshCw,
   Star,
   Trash2,
+  Zap,
 } from 'lucide-react';
 import { Badge, Button, InlineAlert, Input, ScrollArea, StatusDot } from '../common';
 import { DashboardPanelHeader, DashboardStateBlock } from '../dashboard';
@@ -24,6 +25,8 @@ import { areStockCodesEquivalent } from '../../utils/stockCode';
 import { truncateStockName } from '../../utils/stockName';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import type { UiTextKey, UiTextParams } from '../../i18n/uiText';
+import { VolumeSpikeBadge } from './VolumeSpikeBadge';
+import type { WatchlistSpotQuoteView } from '../../api/systemConfig';
 
 export type HomeWorkspaceTab = 'watchlist' | 'today' | 'history';
 export type WatchlistAnalyzeMode = 'all' | 'pending';
@@ -35,6 +38,12 @@ export interface HomeWatchlistRow {
   isTodayStatusLoading?: boolean;
   isTodayStatusUnknown?: boolean;
   activeTask?: TaskInfo;
+  /** 当日实时量比；null/undefined 表示暂无数据。>=5 = 巨量，>=2 = 放量。 */
+  volumeRatio?: number | null;
+  /** 当日涨跌幅（百分比），用于在放量预警里辅助显示幅度。 */
+  volumeChangePercent?: number | null;
+  /** 当日放量数据是否正在加载。 */
+  isVolumeRatioLoading?: boolean;
 }
 
 interface BatchStatus {
@@ -61,6 +70,17 @@ interface HomeStockWorkspaceProps {
   watchlistAnalyzedTodayCount: number;
   historyItems: StockBarItem[];
   isLoadingHistory: boolean;
+  historySpotQuotesByCode?: Map<string, WatchlistSpotQuoteView>;
+  historySpotQuotesLoading?: boolean;
+  /**
+   * 手动触发首页 watchlist 实时量比刷新。白天不再自动拉，依赖用户点击；
+   * 每日早盘 9:00 由 HomePage 内部 setTimeout 自动触发一次。
+   */
+  onRefreshWatchlistSpotQuotes?: () => Promise<void> | void;
+  /** watchlist 实时量比是否正在拉取（用于按钮 spinner / 禁用）。 */
+  watchlistSpotQuotesLoading?: boolean;
+  /** 手动触发历史栏目实时量比刷新，规则同上。 */
+  onRefreshHistorySpotQuotes?: () => Promise<void> | void;
   selectedStockCode?: string;
   selectedRecordId?: number;
   onHistoryItemClick: (recordId: number) => void;
@@ -77,6 +97,8 @@ function getTaskStatusLabel(task: TaskInfo | undefined, t: (key: UiTextKey, para
   if (task.status === 'cancel_requested') return t('taskPanel.cancelRequested');
   return task.status;
 }
+
+
 
 const ScoreBadge: React.FC<{ item?: StockBarItem }> = ({ item }) => {
   const { t } = useUiLanguage();
@@ -167,7 +189,7 @@ const WatchlistRowItem: React.FC<{
               <Clock3 className="h-3.5 w-3.5 shrink-0 text-muted-text" aria-label={t('watchlist.notAnalyzedToday')} />
             )}
           </div>
-          <div className="mt-1 flex flex-wrap items-center gap-2">
+          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className="font-mono text-[11px] text-secondary-text">{row.code}</span>
             {item?.lastAnalysisTime ? (
               <>
@@ -175,6 +197,11 @@ const WatchlistRowItem: React.FC<{
                 <span className="text-[11px] text-muted-text">{formatDateTime(item.lastAnalysisTime)}</span>
               </>
             ) : null}
+            <VolumeSpikeBadge
+              ratio={row.volumeRatio}
+              changePercent={row.volumeChangePercent}
+              loading={row.isVolumeRatioLoading}
+            />
           </div>
           <div className="flex min-w-0 items-center justify-between gap-2 text-[11px]">
             <span className={`truncate ${canOpenDetail ? 'text-primary' : isLatestDetailLoading ? 'text-muted-text' : 'text-warning'}`}>
@@ -258,6 +285,11 @@ export const HomeStockWorkspace: React.FC<HomeStockWorkspaceProps> = ({
   watchlistAnalyzedTodayCount,
   historyItems,
   isLoadingHistory,
+  historySpotQuotesByCode,
+  historySpotQuotesLoading = false,
+  onRefreshWatchlistSpotQuotes,
+  watchlistSpotQuotesLoading = false,
+  onRefreshHistorySpotQuotes,
   selectedStockCode,
   selectedRecordId,
   onHistoryItemClick,
@@ -363,6 +395,9 @@ export const HomeStockWorkspace: React.FC<HomeStockWorkspaceProps> = ({
           onDeleteStock={onDeleteStock}
           isDeleting={isDeleting}
           onSelectionChange={onHistorySelectionChange}
+          spotQuotesByCode={historySpotQuotesByCode}
+          spotQuotesLoading={historySpotQuotesLoading}
+          onRefreshSpotQuotes={onRefreshHistorySpotQuotes}
           className="flex-1 overflow-hidden"
         />
       </div>
@@ -387,6 +422,24 @@ export const HomeStockWorkspace: React.FC<HomeStockWorkspaceProps> = ({
               actions={(
                 <div className="flex items-center gap-1.5">
                   <span className="text-[11px] text-muted-text">{t('common.itemsCount', { count: watchlistRows.length })}</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xsm"
+                    className="h-7 w-7 px-0"
+                    disabled={watchlistSpotQuotesLoading}
+                    onClick={() => {
+                      void onRefreshWatchlistSpotQuotes?.();
+                    }}
+                    aria-label={t('watchlist.refreshSpotQuotesAria')}
+                    title={t('watchlist.refreshSpotQuotesAria')}
+                  >
+                    {watchlistSpotQuotesLoading ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Zap className="h-3.5 w-3.5" aria-hidden="true" />
+                    )}
+                  </Button>
                   <Button
                     type="button"
                     variant="ghost"

@@ -28,6 +28,10 @@ class StockQuote(BaseModel):
     prev_close: Optional[float] = Field(None, description="昨收价")
     volume: Optional[float] = Field(None, description="成交量（股）")
     amount: Optional[float] = Field(None, description="成交额（元）")
+    # 量比：当日累计成交 / 近 N 日同时段均量（>2 通常表示放量）
+    volume_ratio: Optional[float] = Field(
+        None, description="量比（>2 表示放量，数据源不可用时为 None）"
+    )
     update_time: Optional[str] = Field(None, description="更新时间")
     
     model_config = ConfigDict(json_schema_extra={
@@ -92,7 +96,7 @@ class ExtractFromImageResponse(BaseModel):
 
 class StockHistoryResponse(BaseModel):
     """股票历史行情响应"""
-    
+
     stock_code: str = Field(..., description="股票代码")
     stock_name: Optional[str] = Field(None, description="股票名称")
     period: str = Field(..., description="K 线周期")
@@ -106,3 +110,34 @@ class StockHistoryResponse(BaseModel):
             "data": []
         }
     })
+
+
+class WatchlistSpotQuotesRequest(BaseModel):
+    """批量实时行情请求（用于首页自选股放量预警等场景）。"""
+
+    codes: List[str] = Field(
+        ...,
+        max_length=50,
+        description="股票代码列表，0~50 只；空字符串或重复会被跳过；空 list 直接返回空结果",
+    )
+
+
+class WatchlistSpotQuoteItem(BaseModel):
+    """批量行情单条结果：成功返回完整 StockQuote，失败仅返回 code + error。"""
+
+    stock_code: str = Field(..., description="股票代码")
+    quote: Optional["StockQuote"] = Field(
+        None, description="成功时为 StockQuote；失败时为 None"
+    )
+    error: Optional[str] = Field(
+        None, description="失败时的错误描述（如 'not_found' / 'data_unavailable'）"
+    )
+
+
+class WatchlistSpotQuotesResponse(BaseModel):
+    """批量实时行情响应。"""
+
+    quotes: List[WatchlistSpotQuoteItem] = Field(
+        default_factory=list, description="逐只股票的结果（含成功/失败）"
+    )
+    fetched_at: str = Field(..., description="本次批量拉取的服务端时间戳 ISO8601")
