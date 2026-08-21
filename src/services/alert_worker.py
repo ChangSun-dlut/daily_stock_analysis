@@ -140,6 +140,10 @@ class AlertWorker:
             logger.info("[AlertWorker] No active alert rules loaded")
             return stats
 
+        # Refresh realtime volume-ratio for any ``volume_spike_rt`` rules so
+        # the slope window has fresh samples even when the web UI is idle.
+        self._refresh_realtime_volume_cache(config, runtime_rules)
+
         monitor = EventMonitor()
         daily_cache: Dict[Any, Any] = {}
         self._analysis_visibility_cache = {}
@@ -613,6 +617,56 @@ class AlertWorker:
             self._trigger_fingerprint_ttls.pop(rule_key, None)
         else:
             self._trigger_fingerprint_ttls[rule_key] = max(1, int(ttl_seconds))
+
+    def _refresh_realtime_volume_cache(
+        self, config: Any, runtime_rules: List["RuntimeAlertRule"]
+    ) -> None:
+        """Refresh realtime volume-ratio snapshots for any ``volume_spike_rt`` rules.
+
+        Calling ``DataFetcherManager().get_realtime_quote`` triggers the
+        ``_enrich_intraday_volume_ratio`` hook in ``data_provider/base.py``,
+        which writes to the realtime volume cache automatically. We only call
+        this for stocks that actually have a realtime rule, and respect the
+        configured minimum refresh interval to avoid hammering the data source.
+        """
+        if not getattr(config, "enable_volume_spike_rt_cache", True):
+            return
+        from src.services.alert_indicators import REALTIME_ALERT_TYPES
+
+        targets: Dict[str, str] = {}
+        for runtime_rule in runtime_rules:
+            rule = runtime_rule.rule
+            if rule.alert_type not in REALTIME_ALERT_TYPES:
+                continue
+            if not rule.is_active:
+                continue
+            stock = getattr(rule, "stock_code", None) or getattr(rule, "symbol", None)
+            if stock:
+                targets[stock] = runtime_rule.rule_id_key()
+
+        if not targets:
+            return
+
+        refresh_interval = max(60, int(
+            getattr(config, "volume_spike_rt_refresh_interval_seconds", 300)
+        ))
+        last_run = getattr(self, "_last_volume_spike_rt_refresh", 0.0)
+        now = self.now_provider()
+        if last_run and now - last_run < refresh_interval:
+            return
+
+        from data_provider.base import DataFetcherManager
+
+        manager = DataFetcherManager()
+        for stock_code in targets:
+            try:
+                manager.get_realtime_quote(stock_code)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug(
+                    "[AlertWorker] realtime refresh failed for %s: %s",
+                    stock_code, exc,
+                )
+        self._last_volume_spike_rt_refresh = now
 
     def _prune_fingerprints(self) -> None:
         now = self.now_provider()

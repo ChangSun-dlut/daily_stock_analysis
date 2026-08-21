@@ -364,4 +364,92 @@ describe('systemConfigApi', () => {
     expect(result.errorCode).toBe('unsupported_agent_arch');
     expect(result.message).toBe('single only');
   });
+
+  describe('fetchWatchlistSpotQuotes', () => {
+    it('keys the spot-quote map by the normalized stock code', async () => {
+      post.mockResolvedValueOnce({
+        data: {
+          success: true,
+          message: 'ok',
+          error: null,
+          error_code: null,
+          stage: null,
+          retryable: false,
+          details: {},
+          resolved_protocol: null,
+          resolved_model: null,
+          latency_ms: 0,
+          capability_results: {},
+          quotes: [
+            {
+              stockCode: '000966.SZ',
+              quote: {
+                stockCode: '000966',
+                stockName: '长源电力',
+                currentPrice: 3.96,
+                change: 0.0,
+                changePercent: 0.0,
+                volumeRatio: 0.74,
+                amount: 46396844.92,
+              },
+              error: null,
+            },
+            {
+              stockCode: '600459.SH',
+              quote: {
+                stockCode: '600459',
+                stockName: '贵州茅台',
+                currentPrice: 1380.0,
+                change: 0.0,
+                changePercent: 0.0,
+                volumeRatio: 1.09,
+                amount: 0,
+              },
+              error: null,
+            },
+          ],
+        },
+      });
+
+      const map = await systemConfigApi.fetchWatchlistSpotQuotes([
+        '000966.SZ',
+        '600459.SH',
+      ]);
+
+      // Lookup must work with the canonical 6-digit form (matching what
+      // HomePage.getStockCodeKey() returns) so the UI badge resolves.
+      expect(map.get('000966')?.volumeRatio).toBe(0.74);
+      expect(map.get('600459')?.volumeRatio).toBe(1.09);
+      expect(map.size).toBe(2);
+    });
+
+    it('records per-item error messages even when volume ratio is missing', async () => {
+      post.mockResolvedValueOnce({
+        data: {
+          success: true,
+          message: 'ok',
+          error: null,
+          error_code: null,
+          stage: null,
+          retryable: false,
+          details: {},
+          resolved_protocol: null,
+          resolved_model: null,
+          latency_ms: 0,
+          capability_results: {},
+          quotes: [
+            {
+              stockCode: '002092.SZ',
+              quote: null,
+              error: 'realtime_fetch_failed',
+            },
+          ],
+        },
+      });
+
+      const map = await systemConfigApi.fetchWatchlistSpotQuotes(['002092.SZ']);
+      expect(map.get('002092')?.volumeRatio).toBeNull();
+      expect(map.get('002092')?.error).toBe('realtime_fetch_failed');
+    });
+  });
 });

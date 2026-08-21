@@ -70,6 +70,7 @@ from src.utils.data_processing import (
 )
 from src.notification_sender import (
     AstrbotSender,
+    OpenclawWechatSender,
     CustomWebhookSender,
     DingtalkSender,
     DiscordSender,
@@ -198,6 +199,7 @@ class NotificationChannel(Enum):
     DISCORD = "discord"    # Discord 机器人 (Bot)
     SLACK = "slack"        # Slack
     ASTRBOT = "astrbot"
+    OPENCLAW_WECHAT = "openclaw_wechat"
     UNKNOWN = "unknown"    # 未知
 
 
@@ -249,6 +251,7 @@ class ChannelDetector:
             NotificationChannel.DISCORD: "Discord机器人",
             NotificationChannel.SLACK: "Slack",
             NotificationChannel.ASTRBOT: "ASTRBOT机器人",
+            NotificationChannel.OPENCLAW_WECHAT: "微信(OpenClaw)",
             NotificationChannel.UNKNOWN: "未知渠道",
         }
         return names.get(channel, "未知渠道")
@@ -268,7 +271,8 @@ class NotificationService(
     Serverchan3Sender,
     SlackSender,
     TelegramSender,
-    WechatSender
+    WechatSender,
+    OpenclawWechatSender
 ):
     """
     通知服务
@@ -314,6 +318,7 @@ class NotificationService(
 
         # 初始化各渠道
         AstrbotSender.__init__(self, config)
+        OpenclawWechatSender.__init__(self, config)
         CustomWebhookSender.__init__(self, config)
         DiscordSender.__init__(self, config)
         EmailSender.__init__(self, config)
@@ -536,6 +541,8 @@ class NotificationService(
 
         if getattr(config, "astrbot_url", None):
             channels.append(NotificationChannel.ASTRBOT)
+        if getattr(config, "openclaw_wechat_account", None) and getattr(config, "openclaw_wechat_target", None):
+            channels.append(NotificationChannel.OPENCLAW_WECHAT)
 
         return channels
 
@@ -2576,6 +2583,10 @@ class NotificationService(
             if use_image:
                 return self._send_slack_image(image_bytes, fallback_content=content)
             return self.send_to_slack(content)
+        if channel == NotificationChannel.OPENCLAW_WECHAT:
+            if use_image:
+                return self._send_openclaw_wechat_image(image_bytes)
+            return self.send_to_openclaw_wechat(sanitized_content)
         if channel == NotificationChannel.ASTRBOT:
             return self.send_to_astrbot(sanitized_content)
         logger.warning(f"不支持的通知渠道: {channel}")

@@ -19,7 +19,7 @@ import random
 import time
 from threading import BoundedSemaphore, RLock, Thread
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Callable, Optional, List, Tuple, Dict, Any
 
 import pandas as pd
@@ -600,7 +600,77 @@ class BaseFetcher(ABC):
         time.sleep(sleep_time)
 
 
+# A 股每日交易时段（Asia/Shanghai，无夏令时）：09:30-11:30 + 13:00-15:00 = 240 分钟
+_SHANGHAI_TZ = timezone(timedelta(hours=8))  # Asia/Shanghai = UTC+8
+_TOTAL_A_SHARE_TRADING_MINUTES = 240
+_MORNING_SESSION_END_MINUTES = 120  # 09:30 起 120 分钟即 11:30
+_LUNCH_START_HOUR = 11
+_LUNCH_START_MINUTE = 30
+_AFTERNOON_START_HOUR = 13
+_AFTERNOON_START_MINUTE = 0
+_CLOSE_HOUR = 15
+_CLOSE_MINUTE = 0
+_OPEN_HOUR = 9
+_OPEN_MINUTE = 30
+
+
+def _trading_minutes_elapsed(*, now: Optional[datetime] = None) -> float:
+    """
+    计算 A 股当前已开盘分钟数（Asia/Shanghai 时区，按 09:30-11:30 + 13:00-15:00 累计）。
+
+    返回值范围 0 ~ 240。非交易日 / 盘前 / 盘后 / 午休分别按以下规则返回：
+    - 09:30 之前（含开盘瞬间之前）：0
+    - 11:30-13:00 之间（午休）：视为 120 分钟（已累计上午 120）
+    - 15:00 之后：240
+    """
+    tz_shanghai = _SHANGHAI_TZ
+    if now is None:
+        now = datetime.now(tz_shanghai)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=tz_shanghai)
+    else:
+        now = now.astimezone(tz_shanghai)
+
+    minutes_since_midnight = now.hour * 60 + now.minute
+    morning_end = _OPEN_HOUR * 60 + _OPEN_MINUTE + _MORNING_SESSION_END_MINUTES  # 11:30
+    lunch_start = _LUNCH_START_HOUR * 60 + _LUNCH_START_MINUTE                   # 11:30
+    afternoon_start = _AFTERNOON_START_HOUR * 60 + _AFTERNOON_START_MINUTE        # 13:00
+    market_close = _CLOSE_HOUR * 60 + _CLOSE_MINUTE                               # 15:00
+    open_at = _OPEN_HOUR * 60 + _OPEN_MINUTE                                      # 09:30
+
+    if minutes_since_midnight <= open_at:
+        return 0.0
+    if minutes_since_midnight >= market_close:
+        return float(_TOTAL_A_SHARE_TRADING_MINUTES)
+    if morning_end <= minutes_since_midnight < afternoon_start:
+        return float(_MORNING_SESSION_END_MINUTES)
+    if minutes_since_midnight < morning_end:
+        return float(minutes_since_midnight - open_at)
+    # afternoon session
+    return float(_MORNING_SESSION_END_MINUTES + (minutes_since_midnight - afternoon_start))
+
+
 class DataFetcherManager:
+    # 启动 banner：让运维 / 用户一眼确认「盘中分时量比自算」是否生效。
+    # 故意走模块加载而不是 __init__，避免每次实例化都打。
+    _BANNER_PRINTED = False
+
+    def _maybe_print_volume_ratio_banner(self) -> None:
+        try:
+            from src.config import get_config
+            cfg = get_config()
+            enabled = getattr(cfg, "enable_intraday_volume_ratio", True)
+            lookback = getattr(cfg, "intraday_volume_ratio_lookback_days", 5)
+            ttl = getattr(cfg, "intraday_volume_ratio_cache_ttl", 300)
+            logger.info(
+                "[放量预警后端增强] 盘中分时量比自算 = %s（回看 %d 日 / 缓存 TTL %ds / 配置：ENABLE_INTRADAY_VOLUME_RATIO、INTRADAY_VOLUME_RATIO_LOOKBACK_DAYS、INTRADAY_VOLUME_RATIO_CACHE_TTL）",
+                "已启用" if enabled else "已关闭（volume_ratio 保持 None）",
+                lookback,
+                ttl,
+            )
+        except Exception as exc:  # banner 不应影响主流程
+            logger.debug("放量预警 banner 打印失败: %s", exc)
+
     """
     数据源策略管理器
     
@@ -634,6 +704,9 @@ class DataFetcherManager:
     _CONCEPT_RANKINGS_EMPTY_CACHE_TTL_SECONDS = 30.0
     _concept_rankings_cache_lock = RLock()
     _concept_rankings_cache: Dict[int, Tuple[float, List[Dict], List[Dict]]] = {}
+    # 盘中分时量比：每只股票 5 日均量的内存缓存。key=normalized code，value=(avg_vol, expires_at_epoch)
+    _volume_ratio_5d_cache_lock = RLock()
+    _volume_ratio_5d_cache: Dict[str, Tuple[Optional[float], float]] = {}
 
     def __init__(self, fetchers: Optional[List[BaseFetcher]] = None):
         """
@@ -649,6 +722,9 @@ class DataFetcherManager:
         self._fetcher_call_locks_lock = RLock()
         self._stock_name_cache: Dict[str, str] = {}
         self._stock_name_cache_lock = RLock()
+        if not DataFetcherManager._BANNER_PRINTED:
+            DataFetcherManager._BANNER_PRINTED = True
+            self._maybe_print_volume_ratio_banner()
         
         if fetchers:
             # 按优先级排序
@@ -1723,6 +1799,7 @@ class DataFetcherManager:
             setattr(quote, "provider_timestamp", None)
             setattr(quote, "stale_seconds", None)
             setattr(quote, "is_stale", None)
+            self._enrich_intraday_volume_ratio(quote)
             return quote
 
         setattr(quote, "provider_timestamp", provider_dt.isoformat())
@@ -1731,8 +1808,137 @@ class DataFetcherManager:
         ttl = realtime_cache_ttl if realtime_cache_ttl is not None else 600
         setattr(quote, "stale_seconds", stale_seconds)
         setattr(quote, "is_stale", stale_seconds > int(ttl))
+        self._enrich_intraday_volume_ratio(quote)
         return quote
-    
+
+    def _enrich_intraday_volume_ratio(self, quote):
+        """
+        盘中分时量比自算：volume_ratio = 当前累计成交量 / (过去 N 日均成交量 × 已开盘分钟 / 240)。
+
+        设计要点：
+        - 仅在 quote.volume_ratio 已为 None 时计算（保留上游显式值）；
+        - 非 A 股（HK/US/JP/KR/TW）跳过，量比语义以 A 股分时为标准；
+        - 非交易时段 / 数据缺失时直接 return，不污染字段；
+        - 5 日均量走 self.get_daily_data()，享受现有 fallback 链；带 TTL 内存缓存，避免每次都打日 K 接口。
+        """
+        if quote is None:
+            return quote
+        _qcode = getattr(quote, "code", "?")
+        try:
+            existing = getattr(quote, "volume_ratio", None)
+            from src.config import get_config  # 延迟导入，避免循环依赖
+            cfg = get_config()
+            if existing is not None:
+                logger.info("[volume_ratio 自算] %s 已有上游值 %s，跳过", _qcode, existing)
+                # Upstream-provided ratios still feed the realtime cache so the
+                # ``volume_spike_rt`` indicator sees every spot-quote reading.
+                code = getattr(quote, "code", None)
+                if code and getattr(cfg, "enable_volume_spike_rt_cache", True):
+                    try:
+                        from src.services.realtime_volume_cache import get_default_cache
+                        get_default_cache().record(code, existing)
+                    except Exception as cache_exc:  # pragma: no cover - defensive
+                        logger.debug("[volume_ratio 缓存] %s 写入失败: %s", _qcode, cache_exc)
+                return quote
+            if not getattr(cfg, "enable_intraday_volume_ratio", True):
+                logger.info("[volume_ratio 自算] %s 功能已禁用，跳过", _qcode)
+                return quote
+            market = getattr(quote, "market", None)
+            if market not in (None, "cn"):  # 只算 A 股
+                logger.info("[volume_ratio 自算] %s 非 A 股(market=%s)，跳过", _qcode, market)
+                return quote
+            current_volume = getattr(quote, "volume", None)
+            if current_volume is None or current_volume <= 0:
+                logger.info("[volume_ratio 自算] %s volume=%s 无效，跳过", _qcode, current_volume)
+                return quote
+            code = getattr(quote, "code", None)
+            if not code:
+                logger.info("[volume_ratio 自算] code 为空，跳过")
+                return quote
+
+            elapsed_minutes = _trading_minutes_elapsed()
+            if elapsed_minutes <= 0:
+                logger.info("[volume_ratio 自算] %s 非交易时段(elapsed=%s)，跳过", _qcode, elapsed_minutes)
+                return quote
+            elapsed_ratio = min(1.0, elapsed_minutes / float(_TOTAL_A_SHARE_TRADING_MINUTES))
+
+            lookback_days = int(getattr(cfg, "intraday_volume_ratio_lookback_days", 5) or 5)
+            avg_vol = self._get_volume_ratio_5d_avg(code, lookback_days)
+            if avg_vol is None or avg_vol <= 0:
+                logger.info("[volume_ratio 自算] %s 5日均量不可用(avg_vol=%s)，跳过", _qcode, avg_vol)
+                return quote
+
+            ratio = current_volume / (avg_vol * elapsed_ratio)
+            # 极端值钳制（异常数据不应让徽标蹦到 999x）
+            if ratio < 0:
+                ratio = 0.0
+            elif ratio > 50:
+                ratio = 50.0
+            setattr(quote, "volume_ratio", float(round(ratio, 4)))
+            logger.info("[volume_ratio 自算] %s 计算成功: vol=%s avg_5d=%s elapsed=%s → ratio=%s",
+                        _qcode, current_volume, avg_vol, elapsed_minutes, round(ratio, 4))
+            # Feed the realtime volume-ratio cache so the ``volume_spike_rt``
+            # alert can compute slope across successive spot-quote fetches.
+            # Failure here is best-effort and must never block the main flow.
+            if getattr(cfg, "enable_volume_spike_rt_cache", True):
+                try:
+                    from src.services.realtime_volume_cache import get_default_cache
+                    get_default_cache().record(code, ratio)
+                except Exception as cache_exc:  # pragma: no cover - defensive
+                    logger.debug("[volume_ratio 缓存] %s 写入失败: %s", _qcode, cache_exc)
+            return quote
+        except Exception as exc:  # 增强是 best-effort，绝不能影响主流程
+            logger.warning("[volume_ratio 自算] %s 异常: %s", _qcode, exc)
+            return quote
+
+    def _get_volume_ratio_5d_avg(self, stock_code: str, lookback_days: int) -> Optional[float]:
+        """读取 / 写入 5 日均量缓存。返回 None 表示无数据可用。"""
+        from src.config import get_config
+        cfg = get_config()
+        ttl = int(getattr(cfg, "intraday_volume_ratio_cache_ttl", 300) or 300)
+        now_epoch = time.time()
+        cache_key = stock_code
+        with DataFetcherManager._volume_ratio_5d_cache_lock:
+            cached = DataFetcherManager._volume_ratio_5d_cache.get(cache_key)
+            if cached is not None:
+                cached_avg, expires_at = cached
+                if expires_at > now_epoch:
+                    return cached_avg
+
+        try:
+            # 取 lookback_days * 2 个日历日，确保覆盖 N 个交易日（含周末 / 节假日冗余）
+            calendar_days = max(7, lookback_days * 2 + 2)
+            df, _source = self.get_daily_data(stock_code, days=calendar_days)
+        except Exception as exc:
+            logger.warning("[volume_ratio 自算] %s 取日 K 失败: %s", stock_code, exc)
+            with DataFetcherManager._volume_ratio_5d_cache_lock:
+                DataFetcherManager._volume_ratio_5d_cache[cache_key] = (None, now_epoch + ttl)
+            return None
+
+        if df is None or df.empty:
+            with DataFetcherManager._volume_ratio_5d_cache_lock:
+                DataFetcherManager._volume_ratio_5d_cache[cache_key] = (None, now_epoch + ttl)
+            return None
+
+        # 兼容不同 fetcher 的列名：vol / volume
+        vol_col = "volume" if "volume" in df.columns else ("vol" if "vol" in df.columns else None)
+        if vol_col is None:
+            with DataFetcherManager._volume_ratio_5d_cache_lock:
+                DataFetcherManager._volume_ratio_5d_cache[cache_key] = (None, now_epoch + ttl)
+            return None
+
+        recent = df.tail(lookback_days)
+        recent_volumes = pd.to_numeric(recent[vol_col], errors="coerce").dropna()
+        if recent_volumes.empty:
+            with DataFetcherManager._volume_ratio_5d_cache_lock:
+                DataFetcherManager._volume_ratio_5d_cache[cache_key] = (None, now_epoch + ttl)
+            return None
+        avg_vol = float(recent_volumes.mean())
+
+        with DataFetcherManager._volume_ratio_5d_cache_lock:
+            DataFetcherManager._volume_ratio_5d_cache[cache_key] = (avg_vol, now_epoch + ttl)
+        return avg_vol
+
     def get_realtime_quote(self, stock_code: str, *, log_final_failure: bool = True):
         """
         获取实时行情数据（自动故障切换）

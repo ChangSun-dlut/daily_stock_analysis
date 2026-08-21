@@ -28,6 +28,7 @@ function getChannelOptions(language: 'zh' | 'en'): Array<{ value: NotificationTe
     { value: 'discord', label: 'Discord' },
     { value: 'slack', label: 'Slack' },
     { value: 'astrbot', label: 'AstrBot' },
+    { value: 'openclaw_wechat', label: language === 'en' ? 'WeChat (OpenClaw)' : '微信(OpenClaw)' },
   ];
 }
 

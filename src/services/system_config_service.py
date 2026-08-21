@@ -221,6 +221,7 @@ class SystemConfigService:
         "discord",
         "slack",
         "astrbot",
+        "openclaw_wechat",
     )
     _NOTIFICATION_TEST_KEY_MAP: Dict[str, Tuple[str, str]] = {
         "WECHAT_WEBHOOK_URL": ("wechat_webhook_url", "string"),
@@ -268,6 +269,9 @@ class SystemConfigService:
         "SLACK_CHANNEL_ID": ("slack_channel_id", "string"),
         "ASTRBOT_URL": ("astrbot_url", "string"),
         "ASTRBOT_TOKEN": ("astrbot_token", "string"),
+        "OPENCLAW_WECHAT_ACCOUNT": ("openclaw_wechat_account", "string"),
+        "OPENCLAW_WECHAT_TARGET": ("openclaw_wechat_target", "string"),
+        "OPENCLAW_CLI_BIN": ("openclaw_cli_bin", "string"),
     }
     _NOTIFICATION_REQUIRED_KEY_GROUPS: Dict[str, Tuple[Tuple[str, ...], ...]] = {
         "wechat": (("WECHAT_WEBHOOK_URL",),),
@@ -284,6 +288,7 @@ class SystemConfigService:
         "discord": (("DISCORD_WEBHOOK_URL",), ("DISCORD_BOT_TOKEN", "DISCORD_MAIN_CHANNEL_ID"), ("DISCORD_BOT_TOKEN", "DISCORD_CHANNEL_ID")),
         "slack": (("SLACK_WEBHOOK_URL",), ("SLACK_BOT_TOKEN", "SLACK_CHANNEL_ID")),
         "astrbot": (("ASTRBOT_URL",),),
+        "openclaw_wechat": (("OPENCLAW_WECHAT_ACCOUNT", "OPENCLAW_WECHAT_TARGET"),),
     }
     _NOTIFICATION_TEST_TARGET_KEYS: Dict[str, Tuple[str, ...]] = {
         "wechat": ("WECHAT_WEBHOOK_URL",),
@@ -300,6 +305,7 @@ class SystemConfigService:
         "discord": ("DISCORD_WEBHOOK_URL", "DISCORD_MAIN_CHANNEL_ID", "DISCORD_CHANNEL_ID"),
         "slack": ("SLACK_WEBHOOK_URL", "SLACK_CHANNEL_ID"),
         "astrbot": ("ASTRBOT_URL",),
+        "openclaw_wechat": ("OPENCLAW_WECHAT_TARGET",),
     }
 
     def __init__(self, manager: Optional[ConfigManager] = None, runtime_scheduler: Optional[Any] = None):
@@ -3016,6 +3022,7 @@ class SystemConfigService:
             TelegramSender,
             WechatSender,
             DingtalkSender,
+            OpenclawWechatSender,
         )
 
         started_at = time.perf_counter()
@@ -3061,6 +3068,7 @@ class SystemConfigService:
             "discord": lambda: DiscordSender(config).send_to_discord(titled_content, timeout_seconds=timeout_seconds),
             "slack": lambda: SlackSender(config).send_to_slack(titled_content, timeout_seconds=timeout_seconds),
             "astrbot": lambda: AstrbotSender(config).send_to_astrbot(titled_content, timeout_seconds=timeout_seconds),
+            "openclaw_wechat": lambda: OpenclawWechatSender(config).send_to_openclaw_wechat(titled_content, timeout_seconds=timeout_seconds),
         }
 
         ok = bool(dispatch[channel]())

@@ -181,6 +181,14 @@ CHANNEL_SPECS: Tuple[NotificationChannelSpec, ...] = (
         advanced_keys=("ASTRBOT_TOKEN", "WEBHOOK_VERIFY_SSL"),
     ),
     NotificationChannelSpec(
+        channel=NotificationChannel.OPENCLAW_WECHAT.value,
+        display_name=ChannelDetector.get_channel_name(NotificationChannel.OPENCLAW_WECHAT),
+        kind="configured",
+        minimal_keys=("OPENCLAW_WECHAT_ACCOUNT", "OPENCLAW_WECHAT_TARGET"),
+        advanced_keys=("OPENCLAW_CLI_BIN", "WEBHOOK_VERIFY_SSL"),
+        note="通过本地 openclaw gateway + iLink 微信 bot 推送；需先 `npx openclaw channels login --channel openclaw-weixin` 配对。",
+    ),
+    NotificationChannelSpec(
         channel=NotificationChannel.UNKNOWN.value,
         display_name=ChannelDetector.get_channel_name(NotificationChannel.UNKNOWN),
         kind="fallback",

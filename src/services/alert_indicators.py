@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import datetime, time, timezone
 from math import isfinite
 from typing import Any, Dict, Optional
 
@@ -18,6 +18,27 @@ TECHNICAL_ALERT_TYPES = frozenset({
     "kdj_cross",
     "cci_threshold",
 })
+
+# Realtime alert types: depend on intraday snapshots rather than daily K-line.
+# These are evaluated against ``src.services.realtime_volume_cache`` (and any
+# future realtime indicator caches) instead of the daily DataFetcher path.
+REALTIME_ALERT_TYPES = frozenset({
+    "volume_spike_rt",
+})
+
+# Defaults for ``volume_spike_rt`` rules. Min ratio floor guards against
+# illiquid names with structurally low volume triggering on noise; min slope
+# matches the "30-min window rising 1.0x → 2.5x" pattern observed in early-
+# morning surges (e.g. 生益科技 600183 intraday 09:30-10:00 spike).
+DEFAULT_VOLUME_SPIKE_RT_WINDOW_MINUTES = 30
+DEFAULT_VOLUME_SPIKE_RT_MIN_RATIO = 1.5
+DEFAULT_VOLUME_SPIKE_RT_MIN_SLOPE = 0.25  # volume_ratio per 5 minutes
+MIN_VOLUME_SPIKE_RT_WINDOW_MINUTES = 5
+MAX_VOLUME_SPIKE_RT_WINDOW_MINUTES = 120
+MIN_VOLUME_SPIKE_RT_MIN_RATIO = 0.5
+MAX_VOLUME_SPIKE_RT_MIN_RATIO = 20.0
+MIN_VOLUME_SPIKE_RT_MIN_SLOPE = 0.0
+MAX_VOLUME_SPIKE_RT_MIN_SLOPE = 5.0
 
 ABOVE_BELOW_DIRECTIONS = frozenset({"above", "below"})
 CROSS_DIRECTIONS = frozenset({"bullish_cross", "bearish_cross"})
@@ -88,6 +109,42 @@ def normalize_indicator_parameters(alert_type: str, parameters: Dict[str, Any]) 
     raise ValueError(f"unsupported technical alert_type: {alert_type}")
 
 
+def normalize_realtime_indicator_parameters(
+    alert_type: str, parameters: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Validate and normalize parameters for ``REALTIME_ALERT_TYPES``.
+
+    Separate from :func:`normalize_indicator_parameters` because realtime
+    indicators do not require any daily bars and have different defaults.
+    """
+    if not isinstance(parameters, dict):
+        raise ValueError("parameters must be an object")
+
+    if alert_type == "volume_spike_rt":
+        return {
+            "window_minutes": _int_in_range(
+                parameters.get("window_minutes"),
+                "window_minutes",
+                default=DEFAULT_VOLUME_SPIKE_RT_WINDOW_MINUTES,
+                minimum=MIN_VOLUME_SPIKE_RT_WINDOW_MINUTES,
+                maximum=MAX_VOLUME_SPIKE_RT_WINDOW_MINUTES,
+            ),
+            "min_ratio": _float_in_range(
+                parameters.get("min_ratio"),
+                "min_ratio",
+                minimum=MIN_VOLUME_SPIKE_RT_MIN_RATIO,
+                maximum=MAX_VOLUME_SPIKE_RT_MIN_RATIO,
+            ) if parameters.get("min_ratio") is not None else DEFAULT_VOLUME_SPIKE_RT_MIN_RATIO,
+            "min_slope": _float_in_range(
+                parameters.get("min_slope"),
+                "min_slope",
+                minimum=MIN_VOLUME_SPIKE_RT_MIN_SLOPE,
+                maximum=MAX_VOLUME_SPIKE_RT_MIN_SLOPE,
+            ) if parameters.get("min_slope") is not None else DEFAULT_VOLUME_SPIKE_RT_MIN_SLOPE,
+        }
+    raise ValueError(f"unsupported realtime alert_type: {alert_type}")
+
+
 def compute_required_bars(alert_type: str, params: Dict[str, Any]) -> int:
     if alert_type == "ma_price_cross":
         return int(params["window"]) + 1
@@ -112,6 +169,19 @@ def threshold_for_indicator(alert_type: str, params: Dict[str, Any]) -> Optional
         return float(params["threshold"])
     if alert_type in {"macd_cross", "kdj_cross"}:
         return 0.0
+    return None
+
+
+def threshold_for_realtime_indicator(
+    alert_type: str, params: Dict[str, Any]
+) -> Optional[float]:
+    """Display threshold for realtime indicators.
+
+    ``volume_spike_rt`` returns ``min_ratio`` (the floor) so the UI can show
+    "above 1.5x" rather than nothing.
+    """
+    if alert_type == "volume_spike_rt":
+        return float(params.get("min_ratio", DEFAULT_VOLUME_SPIKE_RT_MIN_RATIO))
     return None
 
 
@@ -512,3 +582,86 @@ def _latest_timestamp(df: pd.DataFrame) -> Optional[datetime]:
         return parsed.to_pydatetime().replace(tzinfo=None)
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------- realtime
+@dataclass(frozen=True)
+class RealtimeIndicatorOutcome:
+    """Result of evaluating a realtime indicator rule.
+
+    ``triggered`` mirrors ``IndicatorOutcome.triggered``; ``summary`` is a
+    short string the notification template can use directly (e.g.
+    "量比 1.82x，30分钟斜率 +0.31/5min")."""
+
+    triggered: bool
+    summary: str
+    latest_value: Optional[float] = None
+    slope: Optional[float] = None
+    window_points: int = 0
+    evaluated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+def evaluate_realtime_indicator_alert(
+    alert_type: str,
+    stock_code: str,
+    params: Dict[str, Any],
+    cache: Any,
+    *,
+    now: Optional[datetime] = None,
+) -> RealtimeIndicatorOutcome:
+    """Evaluate a realtime indicator against the supplied cache.
+
+    ``cache`` is expected to expose ``current_ratio`` and ``slope`` (both
+    accept ``window_minutes`` and ``now`` kwargs). The default singleton from
+    :mod:`src.services.realtime_volume_cache` satisfies this contract.
+    """
+    if alert_type not in REALTIME_ALERT_TYPES:
+        raise ValueError(f"unsupported realtime alert_type: {alert_type}")
+
+    if alert_type == "volume_spike_rt":
+        window = int(params["window_minutes"])
+        min_ratio = float(params["min_ratio"])
+        min_slope = float(params["min_slope"])
+        now_dt = now or datetime.now(timezone.utc)
+        current = cache.current_ratio(stock_code, now=now_dt)
+        if current is None or current < min_ratio:
+            return RealtimeIndicatorOutcome(
+                triggered=False,
+                summary=f"量比 {current:.2f}x，未达阈值 {min_ratio:.2f}x" if current is not None else "量比数据不足",
+                latest_value=current,
+                slope=None,
+                window_points=0,
+                evaluated_at=now_dt,
+            )
+        slope = cache.slope(stock_code, window_minutes=window, now=now_dt)
+        if slope is None:
+            return RealtimeIndicatorOutcome(
+                triggered=False,
+                summary=f"量比 {current:.2f}x，窗口 {window} 分钟采样不足",
+                latest_value=current,
+                slope=None,
+                window_points=cache.size(stock_code),
+                evaluated_at=now_dt,
+            )
+        # slope units = volume_ratio per minute; convert to per-5-min for display
+        slope_per_5min = slope * 5.0
+        # Tiny epsilon absorbs float-precision drift (e.g. 0.05 vs 0.0499999).
+        triggered = slope >= (min_slope / 5.0) - 1e-9
+        if triggered:
+            summary = (
+                f"放量预警：{stock_code} 量比 {current:.2f}x，"
+                f"{window} 分钟窗口斜率 +{slope_per_5min:.2f}/5min（阈值 {min_slope:.2f}）"
+            )
+        else:
+            summary = (
+                f"量比 {current:.2f}x，斜率 +{slope_per_5min:.2f}/5min（未达阈值 {min_slope:.2f}）"
+            )
+        return RealtimeIndicatorOutcome(
+            triggered=triggered,
+            summary=summary,
+            latest_value=current,
+            slope=slope,
+            window_points=cache.size(stock_code),
+            evaluated_at=now_dt,
+        )
+    raise ValueError(f"unsupported realtime alert_type: {alert_type}")

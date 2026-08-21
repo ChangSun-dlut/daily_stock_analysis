@@ -238,4 +238,15 @@ describe('NotificationTestPanel', () => {
     expect(screen.getByText('https://qyapi.example.com/cgi-bin/webhook/send?key=***')).toBeInTheDocument();
     expect(timeoutEntries[0]).toHaveClass('text-warning');
   });
+
+  it('includes the OpenClaw WeChat channel option', () => {
+    render(
+      <NotificationTestPanel
+        items={[{ key: 'OPENCLAW_WECHAT_ACCOUNT', value: 'f4add82e8cf4-im-bot' }]}
+        maskToken="******"
+      />,
+    );
+    // zh 默认标签为「微信(OpenClaw)」，en 为「WeChat (OpenClaw)」；用子串匹配两者。
+    expect(screen.getByRole('option', { name: /OpenClaw/ })).toBeInTheDocument();
+  });
 });

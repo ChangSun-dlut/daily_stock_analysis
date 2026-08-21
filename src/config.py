@@ -1124,6 +1124,12 @@ class Config:
     astrbot_token: Optional[str] = None
     astrbot_url: Optional[str] = None
 
+    # OpenClaw 微信通知配置（本地 openclaw gateway + iLink 微信）
+    openclaw_wechat_account: str = ""  # openclaw 微信机器人账号 ID，如 f4add82e8cf4-im-bot
+    openclaw_wechat_target: str = ""   # 接收人微信 userId（iLink 平台），如 o9cq803K8OvJ6mTb0qsWMDB9dtfM@im.wechat
+    openclaw_cli_bin: str = ""         # openclaw CLI 可执行文件路径；留空自动探测（which openclaw / npx openclaw）
+    openclaw_gateway_port: int = 18789  # openclaw gateway 端口；默认 18789（loopback-only）
+
     # 通知路由策略（Issue #1200 P3）：留空表示该类型使用全部已配置渠道
     notification_report_channels: List[str] = field(default_factory=list)
     notification_alert_channels: List[str] = field(default_factory=list)
@@ -1248,6 +1254,23 @@ class Config:
     realtime_cache_ttl: int = 600
     # 熔断器冷却时间（秒）
     circuit_breaker_cooldown: int = 300
+    # 盘中分时量比增强（放量预警用）：基于「当日累计量 / (过去 N 日均量 × 已开盘分钟占比)」自算。
+    # 默认开启；关闭后 volume_ratio 字段保持 None（与改造前行为一致）。
+    enable_intraday_volume_ratio: bool = True
+    # 计算盘中分时量比时回看的日 K 天数（默认 5 个交易日）。
+    intraday_volume_ratio_lookback_days: int = 5
+    # 5 日均量的内存缓存 TTL（秒）。盘中不会突变，5 分钟足够避免每次都打日 K 接口。
+    intraday_volume_ratio_cache_ttl: int = 300
+
+    # === 盘中实时量比告警（volume_spike_rt）===
+    # 是否在 _enrich_intraday_volume_ratio 之后把 ratio 写到 realtime_volume_cache。
+    # 关闭后 volume_spike_rt 告警会因采样不足而保持沉默，但 UI 量比徽标不受影响。
+    enable_volume_spike_rt_cache: bool = True
+    # realtime_volume_cache 单只股票最长保留多久的历史采样（分钟）。
+    # 30 分钟窗口对应默认斜率判断；超过窗口的旧采样会被惰性裁剪。
+    volume_spike_rt_cache_retention_minutes: int = 60
+    # AlertWorker 在每次轮询时主动拉一次实时量比，确保斜率采样新鲜；最小间隔（秒）。
+    volume_spike_rt_refresh_interval_seconds: int = 300
 
     # === 基本面聚合开关与降级保护 ===
     # 全局总开关；关闭时返回 not_supported 并保持主流程无变化
@@ -2080,6 +2103,15 @@ class Config:
             slack_channel_id=os.getenv('SLACK_CHANNEL_ID'),
             astrbot_url=os.getenv('ASTRBOT_URL'),
             astrbot_token=os.getenv('ASTRBOT_TOKEN'),
+            openclaw_wechat_account=os.getenv('OPENCLAW_WECHAT_ACCOUNT', ''),
+            openclaw_wechat_target=os.getenv('OPENCLAW_WECHAT_TARGET', ''),
+            openclaw_cli_bin=os.getenv('OPENCLAW_CLI_BIN', ''),
+            openclaw_gateway_port=parse_env_int(
+                os.getenv('OPENCLAW_GATEWAY_PORT'),
+                18789,
+                field_name='OPENCLAW_GATEWAY_PORT',
+                minimum=1,
+            ),
             notification_report_channels=parse_notification_route_channels(
                 os.getenv('NOTIFICATION_REPORT_CHANNELS')
             ),
@@ -2243,6 +2275,35 @@ class Config:
             realtime_source_priority=cls._resolve_realtime_source_priority(),
             realtime_cache_ttl=parse_env_int(os.getenv('REALTIME_CACHE_TTL'), 600, field_name='REALTIME_CACHE_TTL', minimum=0),
             circuit_breaker_cooldown=parse_env_int(os.getenv('CIRCUIT_BREAKER_COOLDOWN'), 300, field_name='CIRCUIT_BREAKER_COOLDOWN', minimum=0),
+            enable_intraday_volume_ratio=os.getenv('ENABLE_INTRADAY_VOLUME_RATIO', 'true').lower() == 'true',
+            intraday_volume_ratio_lookback_days=parse_env_int(
+                os.getenv('INTRADAY_VOLUME_RATIO_LOOKBACK_DAYS'),
+                5,
+                field_name='INTRADAY_VOLUME_RATIO_LOOKBACK_DAYS',
+                minimum=1,
+                maximum=20,
+            ),
+            intraday_volume_ratio_cache_ttl=parse_env_int(
+                os.getenv('INTRADAY_VOLUME_RATIO_CACHE_TTL'),
+                300,
+                field_name='INTRADAY_VOLUME_RATIO_CACHE_TTL',
+                minimum=0,
+            ),
+            enable_volume_spike_rt_cache=os.getenv('ENABLE_VOLUME_SPIKE_RT_CACHE', 'true').lower() == 'true',
+            volume_spike_rt_cache_retention_minutes=parse_env_int(
+                os.getenv('VOLUME_SPIKE_RT_CACHE_RETENTION_MINUTES'),
+                60,
+                field_name='VOLUME_SPIKE_RT_CACHE_RETENTION_MINUTES',
+                minimum=5,
+                maximum=240,
+            ),
+            volume_spike_rt_refresh_interval_seconds=parse_env_int(
+                os.getenv('VOLUME_SPIKE_RT_REFRESH_INTERVAL_SECONDS'),
+                300,
+                field_name='VOLUME_SPIKE_RT_REFRESH_INTERVAL_SECONDS',
+                minimum=60,
+                maximum=1800,
+            ),
             enable_fundamental_pipeline=os.getenv('ENABLE_FUNDAMENTAL_PIPELINE', 'true').lower() == 'true',
             fundamental_stage_timeout_seconds=parse_env_float(
                 os.getenv('FUNDAMENTAL_STAGE_TIMEOUT_SECONDS'),
@@ -3463,6 +3524,7 @@ class Config:
             or self.serverchan3_sendkey
             or self.custom_webhook_urls
             or self.astrbot_url
+            or self.openclaw_wechat_account
             or (self.discord_bot_token and self.discord_main_channel_id)
             or self.discord_webhook_url
             or self.slack_webhook_url

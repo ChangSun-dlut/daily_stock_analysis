@@ -8,6 +8,7 @@
 """
 
 from .astrbot_sender import AstrbotSender
+from .openclaw_wechat_sender import OpenclawWechatSender
 from .custom_webhook_sender import CustomWebhookSender
 from .discord_sender import DiscordSender
 from .email_sender import EmailSender

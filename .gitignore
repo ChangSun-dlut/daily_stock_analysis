@@ -89,3 +89,22 @@ static/
 /apps/dsa-desktop/node_modules/
 /node_modules/
 docs/specs/
+
+# 临时调试脚本（仅仓库根目录）
+/_tmp_*.py
+
+# CodeBuddy IDE 工作空间
+/.codebuddy/
+
+# 本地未纳入版本控制的测试文件
+/tests/test_bearish_breakdown_penalty.py
+/tests/test_daily_enrichment_cell_serialization.py
+/tests/test_golden_pit_crash_guard.py
+/tests/test_hard_filter_breakdown.py
+/tests/test_history_halt_misreading_rewrite.py
+/tests/test_screen_cache_selected_days.py
+/tests/test_screening_sector_limitup_ladder.py
+/tests/test_sector_moneyflow_realtime_fallback.py
+/tests/test_sector_rotation.py
+/tests/test_sideways_breakout.py
+/tests/test_watchlist_spot_quotes.py

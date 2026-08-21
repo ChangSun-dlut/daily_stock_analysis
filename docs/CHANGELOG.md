@@ -10,7 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 - [新功能] 新增 `bottom_accumulation` 底部吸筹反转策略：当底部吸筹信号达标（60日跌幅≥15%、量能扩张≥1.3倍、RSI从超卖恢复、MACD底部金叉、价格从60日低点反弹——满足任意3项），自动跳过 `range_20d_pct_max`/`volatility_20d_pct_max`/`consolidation_days_20d_min` 三条硬过滤约束，使底部反转型股票（如再升科技、天下秀）不被错误排除；评分采用加性五维模型（跌幅深度25 + RSI恢复20 + 量能扩张20 + MACD结构15 + 价格企稳20），因子权重0.65
-- [改进] 首页「自选」+「历史」两个栏目的放量预警量比改为**每日早盘 9:00（Asia/Shanghai）自动拉取一次 + 白天改为手动刷新**：`codes` 变化不再自动触发；两个栏目 panel header 都新增闪电图标按钮触发批量拉取 `/api/v1/stocks/watchlist/spot-quotes`；前端用 `setTimeout` 自递归实现每日定时（无后台依赖、不阻塞页面）
+- [改进] 首页「自选」+「历史」两个栏目的放量预警量比改为**盘中 9:00-15:00（Asia/Shanghai）每 5 分钟自动刷新**：`setInterval` 每 5 分钟批量拉取 `/api/v1/stocks/watchlist/spot-quotes`；盘前/盘后自动排下次 9:00 触发；15:00 收盘后自动停止 interval；用户可随时手动点击闪电按钮触发即时刷新
+- [修复] 放量预警量比「量比暂无」回归 bug：`systemConfigApi.fetchWatchlistSpotQuotes()` 把后端返回的原始 code（如 `"000966.SZ"`）直接当 Map key，但 `HomePage.getStockCodeKey()` 通过 `normalizeStockCode` 标准化成 `"000966"` 再查表，导致 `.SZ`/`.SH` 股票永远查不到值、徽标一直显示"暂无"。统一以 `normalizeStockCode(...)` 作为 Map key，与 HomePage 查找键一致；新增 2 项 vitest 回归测试覆盖 `000966.SZ`/`600459.SH` 两种格式
+- [新功能] 盘中分时量比自算（放量预警后端增强）：当任意 fetcher（Hithink/Tencent/Akshare 等）返回的实时行情 `volume_ratio` 为空时，`DataFetcherManager._enrich_intraday_volume_ratio()` 按 `当前累计成交量 / (过去 N 日均成交量 × 已开盘分钟 / 240)` 自动计算并写入 `UnifiedRealtimeQuote.volume_ratio`；仅作用于 A 股；新增配置 `ENABLE_INTRADAY_VOLUME_RATIO` / `INTRADAY_VOLUME_RATIO_LOOKBACK_DAYS` / `INTRADAY_VOLUME_RATIO_CACHE_TTL`；新增 17 项单元测试覆盖盘前/午休/非 A 股/上游已给值/日 K 失败/极端值钳制等路径
+- [新功能] **放量预警新增 `volume_spike_rt` 实时量比斜率告警**：在已有日线 `volume_spike` 之外，基于盘中实时量比时间序列计算"加速放量"。`DataFetcherManager.get_realtime_quote()` 写入 `RealtimeVolumeCache`（线程安全、分钟桶去重、按窗口惰性裁剪），`AlertService._evaluate_volume_spike_rt()` 读取缓存计算线性回归斜率（默认 30 分钟窗口，最低 ratio 1.5x、最低斜率 0.25/5 分钟），触发后走原有 14 个通知渠道；`AlertWorker` 每轮询主动调用 `get_realtime_quote` 刷新缓存（受 `VOLUME_SPIKE_RT_REFRESH_INTERVAL_SECONDS` 节流，UI 关着也能跑）；新增配置 `ENABLE_VOLUME_SPIKE_RT_CACHE` / `VOLUME_SPIKE_RT_CACHE_RETENTION_MINUTES` / `VOLUME_SPIKE_RT_REFRESH_INTERVAL_SECONDS`；新增 24 项单元测试覆盖缓存/归一化/触发阈值/无数据/平稳/下行等路径
 - [改进] consolidation_quality 因子的 `near_high` 阈值从 0% 放宽至 -5%，使箱体上沿附近的股票不会因微小回调丢失突破评分
 - [修复] Web 分享图改为用户点击"分享"后才按需生成，不再在报告加载时自动请求
 - [修复] 将 `SCREENING_ENABLED` 及 Web 选股功能开关归入"基础设置"，选股导航入口继续由该开关控制
@@ -25,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] 刷新热点榜单并保留当前题材时同步绕过详情缓存重拉该题材，避免新榜单继续搭配旧路线与成分股；详情质量可用且字段完整时不再展示底层数据源尝试失败
 - [改进] 热点成分股并行获取东方财富与同花顺数据，并按固定数据源优先级合并；AkShare 调用复用 DSA 的可终止子进程 timeout，同花顺 HTTP 调用设置 connect/read timeout，并以进程级并发槽限制活跃任务、在返回前回收 worker；题材详情可按需复用 DSA 原生搜索服务的数据源优先级、时效过滤、缓存与同请求合并补充安全且带链接的近期消息，真实供应商调用使用限流且可终止回收的子进程，并在本地压缩摘要以避免额外 LLM 等待与降级提示；显式搜索增强不写入热点详情共享缓存或 Web 页面缓存
 - [修复] 选股尾部轮换以分析器输入顺序为权威并保留并列分候选顺序；热点消息增强分别追加 `route` 与原始 `timeline`，同键搜索只允许缓存 owner 启动供应商链，子进程启动或清理失败也会释放全局容量；热点默认 provider 的正数超时配置覆盖板块、成分股及直接详情 fallback 并传递剩余硬截止，关闭外层预算仍保留单源安全上限；主动新闻搜索以同一绝对 deadline 覆盖缓存等待、重新竞争和 provider 执行，并区分有效空结果与运行失败
+- [新功能] 新增 OpenClaw 微信通知渠道：复用已配对的本地 openclaw gateway + iLink 微信 bot，将告警/分析推送到微信。新增配置 `OPENCLAW_WECHAT_ACCOUNT`（机器人账号 ID）、`OPENCLAW_WECHAT_TARGET`（接收人微信 userId）、`OPENCLAW_CLI_BIN`（可选 CLI 路径，留空自动探测）；支持文本与图片（Markdown 转图）推送；DSA 通知测试面板与配置页新增「微信(OpenClaw)」渠道，可在线发送测试消息
+- [改进] OpenClaw 微信渠道增加 gateway 未运行时的自动重启兜底：发送前 TCP 探测本地 gateway（默认 127.0.0.1:18789，可用 `OPENCLAW_GATEWAY_PORT` 覆盖），未在线则自动后台拉起 `openclaw gateway run --force`（未安装为系统服务场景）并等待就绪后重试；已安装为系统服务时回退到 `gateway restart`/`start`。新增可选配置 `OPENCLAW_GATEWAY_PORT`（默认 18789）。重启失败不影响其他通知渠道
 - [改进] 精简选股页面的重复说明，将任务标识、快照统计和排序诊断折叠到运行详情
 - [新功能] SkillAggregator 基于独立满足 30 条 evaluated 门槛的真实 Skill Outcome bucket，使用 Beta 先验收缩、unable 惩罚和多周期证据加权生成有界运行时权重；缺失、低样本或异常统计保持中性。
 - [改进] 将参考 AlphaSift 实现的选股核心与策略正式纳入 DSA，统一使用 `ScreeningService`、`SCREENING_ENABLED` 和 `/api/v1/screening`，并保留 Apache-2.0 归因与来源版本记录。

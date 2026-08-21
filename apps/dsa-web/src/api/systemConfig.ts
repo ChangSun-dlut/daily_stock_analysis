@@ -1,6 +1,7 @@
 import apiClient from './index';
 import { createParsedApiError, getParsedApiError, type ParsedApiError } from './error';
 import { toCamelCase } from './utils';
+import { normalizeStockCode } from '../utils/stockCode';
 
 /** /stocks/watchlist/spot-quotes 返回的单股行情载荷（仅取前端需要的字段） */
 export interface WatchlistQuotePayload {
@@ -413,7 +414,12 @@ export const systemConfigApi = {
       }>(response.data);
       for (const item of data.quotes || []) {
         if (!item || !item.stockCode) continue;
-        result.set(item.stockCode, {
+        // Use a normalized key so the Map can be looked up by either the
+        // raw backend value (``000966.SZ``) or any other canonicalization
+        // the caller passes through ``HomePage.getStockCodeKey()``.
+        const key = normalizeStockCode(item.stockCode).toUpperCase();
+        if (!key) continue;
+        result.set(key, {
           volumeRatio: item.quote?.volumeRatio ?? null,
           changePercent: item.quote?.changePercent ?? null,
           amount: item.quote?.amount ?? null,

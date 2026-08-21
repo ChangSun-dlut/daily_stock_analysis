@@ -20,12 +20,16 @@ from src.agent.events import (
 )
 from src.repositories.alert_repo import AlertRepository
 from src.services.alert_indicators import (
+    REALTIME_ALERT_TYPES,
     TECHNICAL_ALERT_TYPES,
     TechnicalIndicatorAlert,
     compute_requested_days,
     evaluate_indicator_alert,
+    evaluate_realtime_indicator_alert,
     normalize_indicator_parameters,
+    normalize_realtime_indicator_parameters,
     threshold_for_indicator,
+    threshold_for_realtime_indicator,
 )
 from src.services.portfolio_alerts import (
     DRY_RUN_TARGET_TIMEOUT_SECONDS,
@@ -73,7 +77,7 @@ from src.utils.sanitize import sanitize_diagnostic_text
 
 
 LEGACY_RUNTIME_ALERT_TYPES = frozenset({"price_cross", "price_change_percent", "volume_spike"})
-SYMBOL_ALERT_TYPES = LEGACY_RUNTIME_ALERT_TYPES | TECHNICAL_ALERT_TYPES
+SYMBOL_ALERT_TYPES = LEGACY_RUNTIME_ALERT_TYPES | TECHNICAL_ALERT_TYPES | REALTIME_ALERT_TYPES
 SUPPORTED_ALERT_TYPES = SYMBOL_ALERT_TYPES | PORTFOLIO_ALERT_TYPES | MARKET_ALERT_TYPES
 SUPPORTED_TARGET_SCOPES = frozenset({"single_symbol", "watchlist", "portfolio_holdings", "portfolio_account", "market"})
 SUPPORTED_SEVERITIES = frozenset({"info", "warning", "critical"})
@@ -521,12 +525,78 @@ class AlertService:
             data_timestamp=data_timestamp,
         )
 
+    async def _evaluate_volume_spike_rt(
+        self, rule: TechnicalIndicatorAlert
+    ) -> Dict[str, Any]:
+        """Evaluate ``volume_spike_rt`` against the realtime volume cache.
+
+        The cache is populated passively by ``DataFetcherManager.get_realtime_quote``
+        every time the web UI's ⚡ button (or the alert worker) hits the
+        spot-quote endpoint, so this method is sync-fast — it only reads.
+        """
+        from src.services.realtime_volume_cache import get_default_cache
+
+        if rule.alert_type not in REALTIME_ALERT_TYPES:
+            return self._evaluation_error(
+                rule,
+                ValueError(f"unsupported realtime alert_type: {rule.alert_type}"),
+                data_source="realtime_quote",
+            )
+        try:
+            params = normalize_realtime_indicator_parameters(
+                rule.alert_type, dict(rule.indicator_params or {})
+            )
+        except ValueError as exc:
+            return self._evaluation_error(
+                rule, exc, data_source="realtime_quote"
+            )
+
+        def _run_evaluation():
+            return evaluate_realtime_indicator_alert(
+                rule.alert_type,
+                rule.stock_code,
+                params,
+                get_default_cache(),
+            )
+
+        try:
+            outcome = await asyncio.to_thread(_run_evaluation)
+        except Exception as exc:
+            return self._evaluation_error(
+                rule, exc, data_source="realtime_quote"
+            )
+
+        threshold = threshold_for_realtime_indicator(rule.alert_type, params)
+        common_kwargs = {
+            "data_source": "realtime_quote",
+            "data_timestamp": outcome.evaluated_at,
+        }
+        if outcome.triggered:
+            return self._triggered(
+                rule,
+                outcome.latest_value,
+                outcome.summary,
+                threshold=threshold,
+                **common_kwargs,
+            )
+        return self._not_triggered(
+            rule,
+            outcome.latest_value,
+            outcome.summary,
+            threshold=threshold,
+            **common_kwargs,
+        )
+
     async def _evaluate_technical_indicator(
         self,
         rule: TechnicalIndicatorAlert,
         *,
         daily_cache: Optional[Dict[tuple[str, int], Any]] = None,
     ) -> Dict[str, Any]:
+        # Realtime alert types bypass the daily-data fetch entirely.
+        if rule.alert_type in REALTIME_ALERT_TYPES:
+            return await self._evaluate_volume_spike_rt(rule)
+
         requested_days = compute_requested_days(rule.alert_type, rule.indicator_params)
         cache_key = (rule.stock_code, requested_days)
 
@@ -970,6 +1040,12 @@ class AlertService:
 
         if alert_type == "volume_spike":
             return {"multiplier": self._positive_float(parameters.get("multiplier"), "multiplier")}
+
+        if alert_type in REALTIME_ALERT_TYPES:
+            try:
+                return normalize_realtime_indicator_parameters(alert_type, parameters)
+            except ValueError as exc:
+                raise AlertServiceError(str(exc)) from exc
 
         if alert_type in TECHNICAL_ALERT_TYPES:
             try:

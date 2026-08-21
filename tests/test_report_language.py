@@ -15,6 +15,7 @@ from src.report_language import (
     localize_trend_prediction,
     localize_bias_status,
     normalize_report_language,
+    sanitize_hallucinated_halt_text,
 )
 
 
@@ -85,6 +86,28 @@ class ReportLanguageTestCase(unittest.TestCase):
             infer_decision_type_from_advice("不破支撑后仍可持有"),
             "hold",
         )
+
+    def test_sanitize_hallucinated_halt_text_rewrites_screenshot_phrase(self) -> None:
+        raw = (
+            "三孚股份昨日盘中临时停牌，股价暴跌6.67%，放量下跌，短期趋势转弱。"
+            "均线虽仍为多头排列，但股价已跌破MA5/MA10，同时筹码集中度偏高、获利比例低，"
+            "加上动态PE高达180倍，风险显著。建议观望，等待复牌后方向选择。"
+        )
+        sanitized = sanitize_hallucinated_halt_text(raw)
+        self.assertNotIn("临时停牌", sanitized)
+        self.assertNotIn("复牌", sanitized)
+        self.assertIn("昨日盘中大幅调整", sanitized)
+        self.assertIn("等待企稳后方向选择", sanitized)
+
+    def test_sanitize_hallucinated_halt_text_keeps_length_similar(self) -> None:
+        raw = "盘中临时停牌原因未明，建议观望。"
+        sanitized = sanitize_hallucinated_halt_text(raw)
+        self.assertNotIn("临时停牌", sanitized)
+        self.assertIn("未检索到盘中停牌公告", sanitized)
+
+    def test_sanitize_hallucinated_halt_text_returns_none_and_empty_unchanged(self) -> None:
+        self.assertIsNone(sanitize_hallucinated_halt_text(None))
+        self.assertEqual(sanitize_hallucinated_halt_text(""), "")
 
 
 class KoreanReportLanguageTestCase(unittest.TestCase):

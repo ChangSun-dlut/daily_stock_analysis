@@ -181,6 +181,15 @@ CHANNEL_PROFILES: Dict[str, ChannelProfile] = {
         default_mode="plain_fallback",
         supports_link=True,
     ),
+    "openclaw_wechat": ChannelProfile(
+        channel="openclaw_wechat",
+        markdown="markdown",
+        default_mode="full_report",
+        max_text_bytes=4000,
+        supports_image=True,
+        supports_link=True,
+        notes="OpenClaw 微信通道复用本地 iLink 配对 bot，支持文本与 Markdown 转图。",
+    ),
     "unknown": ChannelProfile(
         channel="unknown",
         markdown="plain_text",

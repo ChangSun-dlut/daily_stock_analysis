@@ -292,7 +292,8 @@ export type NotificationTestChannel =
   | 'custom'
   | 'discord'
   | 'slack'
-  | 'astrbot';
+  | 'astrbot'
+  | 'openclaw_wechat';
 
 export interface NotificationTestAttempt {
   channel: NotificationTestChannel;

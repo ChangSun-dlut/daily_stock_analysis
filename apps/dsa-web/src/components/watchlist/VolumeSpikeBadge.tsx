@@ -1,18 +1,7 @@
 import type React from 'react';
 import { Loader2 } from 'lucide-react';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
-
-const VOLUME_RATIO_SPIKE_THRESHOLD = 2;
-const VOLUME_RATIO_SURGE_THRESHOLD = 5;
-
-export type VolumeRatioLevel = 'surge' | 'spike' | 'normal' | 'unavailable';
-
-export function classifyVolumeRatio(ratio: number | null | undefined): VolumeRatioLevel {
-  if (ratio === null || ratio === undefined || !Number.isFinite(ratio)) return 'unavailable';
-  if (ratio >= VOLUME_RATIO_SURGE_THRESHOLD) return 'surge';
-  if (ratio >= VOLUME_RATIO_SPIKE_THRESHOLD) return 'spike';
-  return 'normal';
-}
+import { classifyVolumeRatio } from './volumeRatio';
 
 /**
  * 放量预警徽标：在自选股列表和历史列表中复用。
