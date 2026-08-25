@@ -23,6 +23,12 @@ export interface GetHistoryListOptions {
   signal?: AbortSignal;
 }
 
+export interface BatchShareImagePushResult {
+  success: boolean;
+  message: string;
+  pushed: boolean;
+}
+
 export const historyApi = {
   /**
    * 获取历史分析列表
@@ -97,6 +103,7 @@ export const historyApi = {
   getShareImage: async (recordId: number): Promise<Blob> => {
     const response = await apiClient.get<Blob>(`/api/v1/history/${recordId}/share-image`, {
       responseType: 'blob',
+      timeout: 60000,
     });
     return response.data;
   },
@@ -110,9 +117,28 @@ export const historyApi = {
     const response = await apiClient.post<Blob>(
       '/api/v1/history/share-image/batch',
       { record_ids: recordIds, cards_per_row: cardsPerRow },
-      { responseType: 'blob' },
+      { responseType: 'blob', timeout: 120000 },
     );
     return response.data;
+  },
+
+  /**
+   * 批量生成分享图并通过 OpenClaw 推送到微信
+   * @param recordIds 要合成的历史报告 ID 列表（≥2）
+   * @param cardsPerRow 单行卡片数（1–6）
+   * @param channel 推送渠道，目前仅支持 openclaw_wechat
+   */
+  pushBatchShareImage: async (
+    recordIds: number[],
+    cardsPerRow = 3,
+    channel = 'openclaw_wechat',
+  ): Promise<BatchShareImagePushResult> => {
+    const response = await apiClient.post<BatchShareImagePushResult>(
+      '/api/v1/history/share-image/batch/push',
+      { record_ids: recordIds, cards_per_row: cardsPerRow, channel },
+      { timeout: 240000 },
+    );
+    return toCamelCase<BatchShareImagePushResult>(response.data);
   },
 
   /**
@@ -152,6 +178,23 @@ export const historyApi = {
   deleteByCode: async (stockCode: string): Promise<{ deleted: number }> => {
     const response = await apiClient.delete<Record<string, unknown>>(`/api/v1/history/by-code/${encodeURIComponent(stockCode)}`);
     return toCamelCase<{ deleted: number }>(response.data);
+  },
+
+  /**
+   * 推送单条历史报告分享图到微信
+   * @param recordId 分析历史记录主键 ID
+   * @param channel 推送渠道，默认 openclaw_wechat
+   */
+  pushShareImage: async (
+    recordId: number,
+    channel = 'openclaw_wechat'
+  ): Promise<{ success: boolean; message: string; pushed: boolean }> => {
+    const response = await apiClient.post<Record<string, unknown>>(
+      `/api/v1/history/${recordId}/share-image/push`,
+      undefined,
+      { params: { channel }, timeout: 180000 }
+    );
+    return toCamelCase<{ success: boolean; message: string; pushed: boolean }>(response.data);
   },
 
   /**

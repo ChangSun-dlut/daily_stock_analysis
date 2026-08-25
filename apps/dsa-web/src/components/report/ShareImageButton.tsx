@@ -20,6 +20,7 @@ interface ShareImageButtonProps {
   reportTitle: string;
   reportLanguage?: ReportLanguage;
   className?: string;
+  autoPushToWechat?: boolean;
 }
 
 const safeFilenamePart = (value: string): string => {
@@ -32,6 +33,7 @@ export const ShareImageButton: React.FC<ShareImageButtonProps> = ({
   reportTitle,
   reportLanguage = 'zh',
   className = '',
+  autoPushToWechat = false,
 }) => {
   const desktopRuntime = typeof window !== 'undefined' ? (window as DesktopWindow).dsaDesktop : undefined;
   const renderDesktopShareImage = desktopRuntime?.renderShareImage;
@@ -48,6 +50,7 @@ export const ShareImageButton: React.FC<ShareImageButtonProps> = ({
   const loadTokenRef = useRef(0);
   const cachedImageRef = useRef<{ recordId: number; blob: Blob } | null>(null);
   const imageUrlRef = useRef<string | null>(null);
+  const pushedToWechatRef = useRef<Set<number>>(new Set());
   const state = stateSnapshot.recordId === activeRecordId ? stateSnapshot.state : 'idle';
   const setState = useCallback((nextState: ShareState) => {
     setStateSnapshot({ recordId: activeRecordId, state: nextState });
@@ -89,6 +92,7 @@ export const ShareImageButton: React.FC<ShareImageButtonProps> = ({
     clearResetTimer();
     loadTokenRef.current += 1;
     cachedImageRef.current = null;
+    pushedToWechatRef.current.clear();
     cleanupImageUrl();
 
     return () => {
@@ -143,10 +147,22 @@ export const ShareImageButton: React.FC<ShareImageButtonProps> = ({
       && typeof navigator.canShare === 'function'
       && navigator.canShare({ files: [file] });
 
+    // 在图片已生成后自动同步到微信；失败不影响本地下载/原生分享的成功状态。
+    // 用 ref 去重，避免同一记录二次点击原生分享时重复推送。
+    const triggerAutoPush = () => {
+      if (!autoPushToWechat) return;
+      if (pushedToWechatRef.current.has(activeRecordId)) return;
+      pushedToWechatRef.current.add(activeRecordId);
+      historyApi.pushShareImage(activeRecordId).catch((error: unknown) => {
+        console.warn('Auto push share image to WeChat failed:', error);
+      });
+    };
+
     // A file cannot be shared before it exists, while navigator.share() must run
     // inside a transient user-activation event. Prepare on the first click and
     // let the next click invoke native sharing synchronously.
     if (generatedNow && canShareFile) {
+      triggerAutoPush();
       setState('ready');
       return;
     }
@@ -173,6 +189,7 @@ export const ShareImageButton: React.FC<ShareImageButtonProps> = ({
 
       setState('success');
       scheduleReset();
+      triggerAutoPush();
     } catch (error) {
       console.error('Generate share image failed:', error);
       setState('error');
@@ -180,7 +197,7 @@ export const ShareImageButton: React.FC<ShareImageButtonProps> = ({
       // moves on (matches the existing success-state behaviour).
       scheduleReset();
     }
-  }, [activeRecordId, clearResetTimer, ensureImageUrl, renderDesktopShareImage, reportTitle, scheduleReset, setState, state]);
+  }, [activeRecordId, autoPushToWechat, clearResetTimer, ensureImageUrl, renderDesktopShareImage, reportTitle, scheduleReset, setState, state]);
 
   if (activeRecordId === undefined) return null;
 

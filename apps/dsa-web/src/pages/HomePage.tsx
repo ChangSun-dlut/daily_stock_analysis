@@ -286,6 +286,9 @@ const HomePage: React.FC = () => {
   const [isStockBarInitialLoadSettled, setIsStockBarInitialLoadSettled] = useState(false);
   const [selectedHistoryRecordIds, setSelectedHistoryRecordIds] = useState<number[]>([]);
   const [isBatchSharing, setIsBatchSharing] = useState(false);
+  const [batchSharePushStatus, setBatchSharePushStatus] = useState<
+    { variant: 'success' | 'warning' | 'danger'; message: string } | null
+  >(null);
   const [isBatchAnalyzing, setIsBatchAnalyzing] = useState(false);
   const [completedTaskRefreshPendingCounts, setCompletedTaskRefreshPendingCounts] = useState<Map<string, number>>(
     new Map(),
@@ -963,20 +966,45 @@ const HomePage: React.FC = () => {
     setSelectedHistoryRecordIds(recordIds);
   }, []);
 
+  // 批量生成分享图并自动通过 OpenClaw 推送到微信。下载后自动推送，
+  // 推送失败时仍在页面给出明确提示，不影响其他操作。
   const handleBatchShare = useCallback(async () => {
     if (isBatchSharing) return;
     if (selectedHistoryRecordIds.length < 2) return;
     setIsBatchSharing(true);
+    setBatchSharePushStatus(null);
     try {
       const blob = await historyApi.batchShareImage(selectedHistoryRecordIds, 3);
       const filename = `dsa-batch-share-${selectedHistoryRecordIds.length}stocks.png`;
       downloadBlob(blob, filename);
-    } catch (err) {
+
+      const result = await historyApi.pushBatchShareImage(
+        selectedHistoryRecordIds,
+        3,
+        'openclaw_wechat',
+      );
+      if (result.success) {
+        setBatchSharePushStatus({
+          variant: 'success',
+          message: t('home.batchSharePushSuccess'),
+        });
+      } else {
+        setBatchSharePushStatus({
+          variant: 'danger',
+          message: result.message || t('home.batchSharePushFailed'),
+        });
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
       console.error('Batch share image failed:', err);
+      setBatchSharePushStatus({
+        variant: 'danger',
+        message: `${t('home.batchSharePushFailed')}: ${message}`,
+      });
     } finally {
       setIsBatchSharing(false);
     }
-  }, [isBatchSharing, selectedHistoryRecordIds]);
+  }, [isBatchSharing, selectedHistoryRecordIds, t]);
 
   const handleSubmitAnalysis = useCallback(
     (
@@ -2106,6 +2134,7 @@ const HomePage: React.FC = () => {
                     disabled={selectedHistoryRecordIds.length < 2 || isBatchSharing}
                     isLoading={isBatchSharing}
                     loadingText={t('home.batchShareLoading')}
+                    title={t('home.batchSharePushTooltip')}
                     onClick={() => void handleBatchShare()}
                   >
                     <Layers className="h-4 w-4" />
@@ -2117,6 +2146,19 @@ const HomePage: React.FC = () => {
                     ) : null}
                   </Button>
                 </div>
+                {batchSharePushStatus ? (
+                  <div
+                    className={`mt-2 rounded-xl border px-3 py-2 text-xs ${
+                      batchSharePushStatus.variant === 'danger'
+                        ? 'border-danger/30 bg-danger/10 text-danger'
+                        : batchSharePushStatus.variant === 'warning'
+                          ? 'border-warning/30 bg-warning/10 text-warning'
+                          : 'border-success/30 bg-success/10 text-success'
+                    }`}
+                  >
+                    {batchSharePushStatus.message}
+                  </div>
+                ) : null}
                 {isHistoryTrendOpen ? (
                   <StockHistoryTrendDrawer
                     key={`stock-history-${selectedReport.meta.id}`}

@@ -1526,7 +1526,7 @@ class AlphaSiftService:
         except Exception as exc:
             raise HTTPException(
                 status_code=424,
-                detail={"error": "alphasift_screen_failed", "message": f"AlphaSift 选股运行失败：{exc}"},
+                detail={"error": "screening_screen_failed", "message": f"AlphaSift 选股运行失败：{exc}"},
             ) from exc
 
         raw_data = _to_plain(raw)

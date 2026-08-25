@@ -3963,6 +3963,25 @@ class StockAnalysisPipeline:
                             channel_success,
                             channel_error,
                         )
+                    elif channel == NotificationChannel.OPENCLAW_WECHAT:
+                        def _send_openclaw_wechat_report() -> bool:
+                            use_image = self.notifier._should_use_image_for_channel(
+                                channel, image_bytes
+                            )
+                            if use_image:
+                                return self.notifier._send_openclaw_wechat_image(image_bytes)
+                            return self.notifier.send_to_openclaw_wechat(report)
+
+                        channel_success, channel_error = _send_channel_safely(
+                            channel.value,
+                            _send_openclaw_wechat_report,
+                        )
+                        non_wechat_success = channel_success or non_wechat_success
+                        _record_channel_result(
+                            channel.value,
+                            channel_success,
+                            channel_error,
+                        )
                     elif channel == NotificationChannel.SLACK:
                         def _send_slack_report() -> bool:
                             use_image = self.notifier._should_use_image_for_channel(

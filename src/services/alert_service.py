@@ -1209,7 +1209,7 @@ class AlertService:
                 multiplier=float(parameters["multiplier"]),
                 metadata=metadata,
             )
-        if data["alert_type"] in TECHNICAL_ALERT_TYPES:
+        if data["alert_type"] in TECHNICAL_ALERT_TYPES or data["alert_type"] in REALTIME_ALERT_TYPES:
             return TechnicalIndicatorAlert(
                 stock_code=data["target"],
                 alert_type=data["alert_type"],

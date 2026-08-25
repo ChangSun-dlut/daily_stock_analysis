@@ -54,7 +54,40 @@ def test_send_text_success_nested_payload(monkeypatch):
 
 def test_send_text_failure_returncode(monkeypatch):
     svc = _make_sender(monkeypatch, run_returncode=1, run_stderr="boom")
+    # 失败后会自动修复并重试；mock 掉修复动作避免真实拉起 gateway。
+    monkeypatch.setattr(svc, "_repair_service", lambda: None)
     assert svc.send_to_openclaw_wechat("你好微信") is False
+
+
+def test_send_text_self_heals_after_repair(monkeypatch):
+    svc = _make_sender(monkeypatch)
+    attempts = {"n": 0}
+    real_run = svc._run_cli
+
+    def flaky(extra_args, timeout_seconds=None):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return False  # 首次失败（如 iLink bot 离线）
+        return real_run(extra_args, timeout_seconds)  # 修复后成功
+
+    monkeypatch.setattr(svc, "_run_cli", flaky)
+    monkeypatch.setattr(svc, "_repair_service", lambda: None)
+    monkeypatch.setattr(svc, "_gateway_reachable", lambda: True)
+    assert svc.send_to_openclaw_wechat("hi") is True
+    assert attempts["n"] == 2
+
+
+def test_send_text_no_repair_when_auto_repair_false(monkeypatch):
+    svc = _make_sender(monkeypatch)
+    calls = {"run": 0}
+
+    def noop_run(extra_args, timeout_seconds=None):
+        calls["run"] += 1
+        return False
+
+    monkeypatch.setattr(svc, "_run_cli", noop_run)
+    assert svc.send_to_openclaw_wechat("hi", auto_repair=False) is False
+    assert calls["run"] == 1
 
 
 def test_send_text_unconfigured():
@@ -234,3 +267,49 @@ def test_send_image_false_when_gateway_cannot_restart(monkeypatch):
     monkeypatch.setattr(svc, "_gateway_reachable", lambda: False)
     monkeypatch.setattr(svc, "_restart_gateway", lambda: False)
     assert svc._send_openclaw_wechat_image(b"\x89PNG") is False
+
+
+def test_send_image_self_heals_after_repair(monkeypatch):
+    svc = _make_sender(monkeypatch)
+    attempts = {"n": 0}
+    real_run = svc._run_cli
+
+    def flaky(extra_args, timeout_seconds=None):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return False  # 首次失败（如 iLink bot 未在线）
+        return real_run(extra_args, timeout_seconds)  # 自动修复后成功
+
+    monkeypatch.setattr(svc, "_run_cli", flaky)
+    monkeypatch.setattr(svc, "_restart_gateway", lambda: True)
+    monkeypatch.setattr(svc, "_gateway_reachable", lambda: True)
+    assert svc._send_openclaw_wechat_image(b"\x89PNG") is True
+    assert attempts["n"] == 2
+    assert svc.last_repair_info is not None
+    assert svc.last_repair_info["gateway_restarted"] is True
+
+
+def test_send_image_reports_bot_login_required(monkeypatch):
+    svc = _make_sender(monkeypatch)
+    monkeypatch.setattr(svc, "_run_cli", lambda extra_args, timeout_seconds=None: False)
+    monkeypatch.setattr(svc, "_restart_gateway", lambda: True)
+    monkeypatch.setattr(svc, "_gateway_reachable", lambda: True)
+    monkeypatch.setattr(svc, "_bot_healthy", lambda timeout_seconds=10: False)
+    assert svc._send_openclaw_wechat_image(b"\x89PNG") is False
+    assert svc.last_repair_info is not None
+    assert svc.last_repair_info["bot_healthy"] is False
+    assert svc.last_repair_info["gateway_restarted"] is True
+
+
+def test_send_image_no_repair_when_auto_repair_false(monkeypatch):
+    svc = _make_sender(monkeypatch)
+    calls = {"run": 0}
+
+    def noop_run(extra_args, timeout_seconds=None):
+        calls["run"] += 1
+        return False
+
+    monkeypatch.setattr(svc, "_run_cli", noop_run)
+    assert svc._send_openclaw_wechat_image(b"\x89PNG", auto_repair=False) is False
+    assert calls["run"] == 1
+    assert svc.last_repair_info is None

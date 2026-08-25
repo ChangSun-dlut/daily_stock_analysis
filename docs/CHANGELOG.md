@@ -30,6 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] 选股尾部轮换以分析器输入顺序为权威并保留并列分候选顺序；热点消息增强分别追加 `route` 与原始 `timeline`，同键搜索只允许缓存 owner 启动供应商链，子进程启动或清理失败也会释放全局容量；热点默认 provider 的正数超时配置覆盖板块、成分股及直接详情 fallback 并传递剩余硬截止，关闭外层预算仍保留单源安全上限；主动新闻搜索以同一绝对 deadline 覆盖缓存等待、重新竞争和 provider 执行，并区分有效空结果与运行失败
 - [新功能] 新增 OpenClaw 微信通知渠道：复用已配对的本地 openclaw gateway + iLink 微信 bot，将告警/分析推送到微信。新增配置 `OPENCLAW_WECHAT_ACCOUNT`（机器人账号 ID）、`OPENCLAW_WECHAT_TARGET`（接收人微信 userId）、`OPENCLAW_CLI_BIN`（可选 CLI 路径，留空自动探测）；支持文本与图片（Markdown 转图）推送；DSA 通知测试面板与配置页新增「微信(OpenClaw)」渠道，可在线发送测试消息
 - [改进] OpenClaw 微信渠道增加 gateway 未运行时的自动重启兜底：发送前 TCP 探测本地 gateway（默认 127.0.0.1:18789，可用 `OPENCLAW_GATEWAY_PORT` 覆盖），未在线则自动后台拉起 `openclaw gateway run --force`（未安装为系统服务场景）并等待就绪后重试；已安装为系统服务时回退到 `gateway restart`/`start`。新增可选配置 `OPENCLAW_GATEWAY_PORT`（默认 18789）。重启失败不影响其他通知渠道
+- [改进] 大盘复盘报告图片支持推送到微信(OpenClaw)：将 `openclaw_wechat` 加入 `MARKDOWN_TO_IMAGE_CHANNELS`（并在 `NOTIFICATION_REPORT_CHANNELS` 含 `openclaw_wechat` 或留空广播）即可，与每日/单股报告共用同一条 `notifier.send(route_type="report")` 图片推送链路
+- [改进] 首页移除独立的「推送到微信」按钮；点击「批量生成分享图」后，图片下载到本地的同时自动通过 OpenClaw 推送到微信，推送结果在页面内显示
+- [改进] 批量生成分享图后端改为并行加载各记录 poster，缩短大盘复盘/多股内容较多时的分享图合成总耗时
+- [改进] 大盘复盘卡片点击「分享」生成图片后，立即自动通过 OpenClaw 把分享图同步到微信；失败不影响本地下载/原生分享的成功状态
+- [改进] 前端分享图相关 API 超时从默认 30s 调整为单条 60s / 批量 120s，避免大盘复盘内容较多时触发上游连接超时
+- [改进] 在 apiClient request interceptor 中兜底为所有 `/share-image` 路径自动设置更长超时，避免旧构建缓存或遗漏 per-request timeout 时仍触发 30s 超时
+- [修复] 修复单条/批量分享图推送到微信时 `OpenclawWechatSender()` 缺少 `config` 参数导致的 TypeError
+- [改进] 分享图推送到微信(OpenClaw)失败时自动修复后重试：首次发送失败（锁屏/休眠导致 gateway 或 iLink bot 失活）即强制重启本地 gateway 并探测 bot 在线状态，再重试一次；诊断信息用于区分"已重启仍失败"与"iLink bot 未登录需重新扫码"并给出对应提示。修复路径刻意不含 `doctor --repair`，避免其旋转 hooks.token / 自动启用插件等副作用。前端推送超时同步放宽到单条 180s / 批量 240s 以容纳修复耗时
 - [改进] 精简选股页面的重复说明，将任务标识、快照统计和排序诊断折叠到运行详情
 - [新功能] SkillAggregator 基于独立满足 30 条 evaluated 门槛的真实 Skill Outcome bucket，使用 Beta 先验收缩、unable 惩罚和多周期证据加权生成有界运行时权重；缺失、低样本或异常统计保持中性。
 - [改进] 将参考 AlphaSift 实现的选股核心与策略正式纳入 DSA，统一使用 `ScreeningService`、`SCREENING_ENABLED` 和 `/api/v1/screening`，并保留 Apache-2.0 归因与来源版本记录。
@@ -91,6 +99,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] `markdown_to_image` m2f 引擎一旦失败会在进程内永久缓存为不健康，导致后续分享图请求一律 503：新增 `_M2F_HEALTH_TTL_SECONDS=60s` 超时重置机制，过期后自动重新探测引擎可用性；`.env.example` 推荐 `MD2IMG_ENGINE=markdown-to-file`（wkhtmltoimage 未安装时唯一可用方案）
 - [修复] 分享图失败后 `ShareImageButton` 卡在 error 状态显示"重试"，新增 `scheduleReset()` 让其 2.2s 后自动恢复 idle，避免用户转回其他报告时按钮一直显示为错误状态
 - [新功能] 个股报告新增"批量生成分享图"按钮（位于"完整分析报告"右侧）：左侧 StockBar 多选（≥2 只）股票后，后端 `POST /api/v1/history/share-image/batch` 将多份报告合成为单张并排 PNG；前端自动下载。新增 `build_batch_share_image_html` / `html_to_image` 引擎链；共享 `downloadBlob` 工具给单图与批量场景
+- [新功能] 批量分享图新增「推送到微信」按钮：复用已选中的历史报告（≥2 只），后端 `POST /api/v1/history/share-image/batch/push` 合成分享图后通过 OpenClaw 微信渠道（`OpenclawWechatSender._send_openclaw_wechat_image`）推送；`channel` 字段默认 `openclaw_wechat`（白名单 `_BATCH_SHARE_PUSH_CHANNELS`）。与下载按钮共用选中集，但推送失败在页面给出明确提示（success=false 仍返回 200，不抛 5xx）。前端 `historyApi.pushBatchShareImage` + `handleBatchSharePush` + 状态提示；新增 5 项后端测试 + 2 项前端测试。依赖 `OPENCLAW_WECHAT_ACCOUNT` 配置
 - [新功能] 大盘复盘新增「板块资金流」模块：Tushare `moneyflow_ind_dc` 拆分主力 / 中户 / 散户三档单量级净流入，配合 `block_trade` 按行业聚合暗盘（大宗交易）净流入；前端表格按主力净流入绝对值排序展示，红涨绿跌（A股惯例）；附带阅读提示，说明"主力↑/散户↓=吸筹洗盘"、"暗盘与主力同向=机构调仓"等典型场景。配套 `get_sector_money_flow()` 数据源 + `_build_sector_money_flow_block()` Markdown 段
 - [改进] 板块资金流暗盘数据升级——从 lead_stock 单股暗盘改为 lead_stock 整个申万行业的 block_trade 聚合（解决 moneyflow_ind_dc 东财行业~496 vs stock_basic 申万行业~110 分类体系不兼容，仅 7% 名称匹配的问题）；10/10 板块暗盘全部覆盖。新增主力意图识别（吸筹/出货/回流/观望），中英韩三语 i18n
 - [修复] 板块资金流行业选择策略：原按 `|主力净流入|` 排序，结果全是流出板块、看不到涨幅行业。改为**涨幅 top5 + 跌幅 top5** 组合，覆盖涨跌两极，与同页"行业板块"展示保持一致

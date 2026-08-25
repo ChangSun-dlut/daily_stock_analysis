@@ -2404,7 +2404,7 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
             progress=100,
             message="任务执行完成",
             result={"enabled": True, "candidates": [], "candidate_count": 0},
-            report_type="screening_screen",
+            report_type="alphasift_screen",
         )
         fake_queue = MagicMock()
         fake_queue.get_task.return_value = task

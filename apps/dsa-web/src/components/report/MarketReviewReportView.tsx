@@ -774,6 +774,7 @@ export const MarketReviewReportView: React.FC<MarketReviewReportViewProps> = ({
               recordId={recordId}
               reportTitle={displayTitle}
               reportLanguage={reportLanguage}
+              autoPushToWechat
             />
             {canOpenRunFlow ? (
               <Tooltip content={runFlowText['runFlow.open']}>

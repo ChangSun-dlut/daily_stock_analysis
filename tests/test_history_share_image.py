@@ -170,3 +170,184 @@ def test_history_share_image_returns_not_found(monkeypatch):
         asyncio.run(history_endpoint.get_history_share_image("missing", db_manager=object()))
 
     assert exc_info.value.status_code == 404
+
+
+# --- 批量分享图推送到微信（OpenClaw） ---
+
+class _FakePoster:
+    code = "000657"
+    name = "中钨高新"
+
+
+class _FakeSender:
+    def __init__(self, config=None):
+        self.config = config
+        self.sent = None
+
+    def _send_openclaw_wechat_image(self, image_bytes):
+        self.sent = image_bytes
+        return True
+
+
+def _patch_push_service(monkeypatch, sender_cls=_FakeSender):
+    monkeypatch.setattr(
+        history_endpoint,
+        "_batch_poster_from_history",
+        lambda *args, **kwargs: _FakePoster(),
+    )
+    monkeypatch.setattr(
+        history_endpoint,
+        "build_batch_share_image_html",
+        lambda *args, **kwargs: "<html></html>",
+    )
+    monkeypatch.setattr(history_endpoint, "html_to_image", lambda *args, **kwargs: b"\x89PNG fake")
+    monkeypatch.setattr(history_endpoint, "HistoryService", lambda _db: object())
+    monkeypatch.setattr(
+        history_endpoint,
+        "get_config",
+        lambda: SimpleNamespace(md2img_engine="markdown-to-file"),
+    )
+    import src.notification_sender.openclaw_wechat_sender as ocw_mod
+
+    monkeypatch.setattr(ocw_mod, "OpenclawWechatSender", sender_cls)
+
+
+def test_batch_share_image_push_succeeds(monkeypatch):
+    sent = {}
+
+    class _Sender(_FakeSender):
+        def _send_openclaw_wechat_image(self, image_bytes):
+            sent["bytes"] = image_bytes
+            return True
+
+    _patch_push_service(monkeypatch, _Sender)
+    req = SimpleNamespace(record_ids=[1, 2], cards_per_row=3, channel="openclaw_wechat")
+
+    result = asyncio.run(history_endpoint.post_batch_share_image_push(req, db_manager=object()))
+
+    assert result.success is True
+    assert result.pushed is True
+    assert "OpenClaw" in result.message
+    assert sent["bytes"] == b"\x89PNG fake"
+
+
+def test_batch_share_image_push_requires_two_records(monkeypatch):
+    _patch_push_service(monkeypatch)
+    req = SimpleNamespace(record_ids=[1], cards_per_row=3, channel="openclaw_wechat")
+
+    result = asyncio.run(history_endpoint.post_batch_share_image_push(req, db_manager=object()))
+
+    assert result.success is False
+    assert result.pushed is False
+    assert "2" in result.message
+
+
+def test_batch_share_image_push_rejects_unsupported_channel(monkeypatch):
+    _patch_push_service(monkeypatch)
+    req = SimpleNamespace(record_ids=[1, 2], cards_per_row=3, channel="telegram")
+
+    result = asyncio.run(history_endpoint.post_batch_share_image_push(req, db_manager=object()))
+
+    assert result.success is False
+    assert result.pushed is False
+    assert "openclaw_wechat" in result.message
+
+
+def test_batch_share_image_push_fails_when_sender_returns_false(monkeypatch):
+    class _Sender(_FakeSender):
+        def _send_openclaw_wechat_image(self, image_bytes):
+            return False
+
+    _patch_push_service(monkeypatch, _Sender)
+    req = SimpleNamespace(record_ids=[1, 2], cards_per_row=3, channel="openclaw_wechat")
+
+    result = asyncio.run(history_endpoint.post_batch_share_image_push(req, db_manager=object()))
+
+    assert result.success is False
+    assert result.pushed is False
+    assert "OpenClaw" in result.message
+
+
+def test_batch_share_image_push_fails_when_render_fails(monkeypatch):
+    _patch_push_service(monkeypatch)
+    monkeypatch.setattr(history_endpoint, "html_to_image", lambda *args, **kwargs: None)
+    req = SimpleNamespace(record_ids=[1, 2], cards_per_row=3, channel="openclaw_wechat")
+
+    result = asyncio.run(history_endpoint.post_batch_share_image_push(req, db_manager=object()))
+
+    assert result.success is False
+    assert result.pushed is False
+
+
+# --- 单条分享图推送到微信（OpenClaw） ---
+
+def _patch_single_push_service(monkeypatch, sender_cls=_FakeSender, image_bytes=b"\x89PNG single"):
+    monkeypatch.setattr(
+        history_endpoint,
+        "get_config",
+        lambda: SimpleNamespace(
+            markdown_to_image_max_chars=15000,
+            md2img_engine="markdown-to-file",
+        ),
+    )
+    monkeypatch.setattr(
+        history_endpoint,
+        "_history_share_image_input",
+        lambda _record_id, _db: ({"code": "000657"}, "# 报告"),
+    )
+    monkeypatch.setattr(history_endpoint, "markdown_to_image", lambda *args, **kwargs: image_bytes)
+    import src.notification_sender.openclaw_wechat_sender as ocw_mod
+
+    monkeypatch.setattr(ocw_mod, "OpenclawWechatSender", sender_cls)
+
+
+def test_history_single_share_image_push_succeeds(monkeypatch):
+    sent = {}
+
+    class _Sender(_FakeSender):
+        def _send_openclaw_wechat_image(self, image_bytes):
+            sent["bytes"] = image_bytes
+            return True
+
+    _patch_single_push_service(monkeypatch, _Sender)
+
+    result = asyncio.run(history_endpoint.push_history_share_image("17", channel="openclaw_wechat", db_manager=object()))
+
+    assert result.success is True
+    assert result.pushed is True
+    assert "OpenClaw" in result.message
+    assert sent["bytes"] == b"\x89PNG single"
+
+
+def test_history_single_share_image_push_rejects_unsupported_channel(monkeypatch):
+    _patch_single_push_service(monkeypatch)
+
+    result = asyncio.run(history_endpoint.push_history_share_image("17", channel="telegram", db_manager=object()))
+
+    assert result.success is False
+    assert result.pushed is False
+    assert "openclaw_wechat" in result.message
+
+
+def test_history_single_share_image_push_fails_when_sender_returns_false(monkeypatch):
+    class _Sender(_FakeSender):
+        def _send_openclaw_wechat_image(self, image_bytes):
+            return False
+
+    _patch_single_push_service(monkeypatch, _Sender)
+
+    result = asyncio.run(history_endpoint.push_history_share_image("17", channel="openclaw_wechat", db_manager=object()))
+
+    assert result.success is False
+    assert result.pushed is False
+    assert "OpenClaw" in result.message
+
+
+def test_history_single_share_image_push_fails_when_render_fails(monkeypatch):
+    _patch_single_push_service(monkeypatch, image_bytes=None)
+
+    result = asyncio.run(history_endpoint.push_history_share_image("17", channel="openclaw_wechat", db_manager=object()))
+
+    assert result.success is False
+    assert result.pushed is False
+    assert "markdown-to-file" in result.message

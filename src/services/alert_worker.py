@@ -638,16 +638,16 @@ class AlertWorker:
             rule = runtime_rule.rule
             if rule.alert_type not in REALTIME_ALERT_TYPES:
                 continue
-            if not rule.is_active:
+            if not getattr(rule, "is_active", True):
                 continue
             stock = getattr(rule, "stock_code", None) or getattr(rule, "symbol", None)
             if stock:
-                targets[stock] = runtime_rule.rule_id_key()
+                targets[stock] = runtime_rule.key
 
         if not targets:
             return
 
-        refresh_interval = max(60, int(
+        refresh_interval = max(1, int(
             getattr(config, "volume_spike_rt_refresh_interval_seconds", 300)
         ))
         last_run = getattr(self, "_last_volume_spike_rt_refresh", 0.0)

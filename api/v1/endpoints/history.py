@@ -11,7 +11,7 @@
 
 import asyncio
 import logging
-from typing import Any, Mapping, Optional
+from typing import Any, List, Mapping, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Depends, Body
 from fastapi.responses import HTMLResponse, Response
@@ -23,6 +23,9 @@ from api.v1.schemas.history import (
     DeleteHistoryRequest,
     DeleteHistoryResponse,
     BatchShareImageRequest,
+    BatchShareImagePushRequest,
+    BatchShareImagePushResponse,
+    ShareImagePushResponse,
     NewsIntelItem,
     NewsIntelResponse,
     AnalysisReport,
@@ -1066,6 +1069,98 @@ def _batch_poster_from_history(
     )
 
 
+async def _render_batch_share_png(
+    service: HistoryService,
+    record_ids: List[int],
+    cards_per_row: int,
+) -> tuple[bytes, list]:
+    """Resolve history records into posters and render the batch share PNG.
+
+    Returns ``(image_bytes, missing_ids)``. Raises ``HTTPException`` when no
+    posters could be resolved or rendering fails (so callers can map the error
+    to either a download failure or a push failure).
+    """
+
+    async def _fetch_one(rid: int) -> tuple[int, Any]:
+        try:
+            poster = await asyncio.to_thread(
+                _batch_poster_from_history, str(rid), service
+            )
+            return rid, poster
+        except MarkdownReportGenerationError as exc:
+            logger.error(
+                "Batch share image report generation failed for %s: %s", rid, exc.message
+            )
+            raise
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("Batch share skipped for %s: %s", rid, exc, exc_info=True)
+            return rid, None
+
+    results = await asyncio.gather(
+        *[_fetch_one(rid) for rid in record_ids], return_exceptions=True
+    )
+
+    posters: list = []
+    missing: list = []
+    for rid, result in zip(record_ids, results):
+        if isinstance(result, MarkdownReportGenerationError):
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "generation_failed",
+                    "message": f"生成分享图片所需报告失败 (record_id={rid}): {result.message}",
+                },
+            ) from result
+        if isinstance(result, Exception):
+            logger.warning("Batch share skipped for %s: %s", rid, result, exc_info=True)
+            missing.append(rid)
+            continue
+        _, poster = result
+        if poster is None:
+            missing.append(rid)
+            continue
+        posters.append(poster)
+
+    if not posters:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "not_found",
+                "message": "所有传入的 record_ids 均未找到可用的报告",
+            },
+        )
+
+    try:
+        html_content = build_batch_share_image_html(
+            posters,
+            cards_per_row=cards_per_row,
+        )
+    except Exception as exc:
+        logger.exception("build_batch_share_image_html failed")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "generation_failed",
+                "message": f"批量分享图片生成失败: {exc}",
+            },
+        ) from exc
+
+    image_bytes = await asyncio.to_thread(html_to_image, html_content)
+    if image_bytes is None:
+        config = get_config()
+        engine = getattr(config, "md2img_engine", "wkhtmltoimage")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "share_image_unavailable",
+                "message": (
+                    f"批量分享图片生成失败，请检查 {engine} 转图工具是否已安装并可用"
+                ),
+            },
+        )
+    return image_bytes, missing
+
+
 @router.post(
     "/share-image/batch",
     response_class=Response,
@@ -1093,74 +1188,12 @@ async def post_batch_share_image(
         )
 
     service = HistoryService(db_manager)
-    posters: list = []
-    missing: list = []
+    image_bytes, missing = await _render_batch_share_png(
+        service, request.record_ids, request.cards_per_row
+    )
 
-    for rid in request.record_ids:
-        try:
-            poster = _batch_poster_from_history(str(rid), service)
-        except MarkdownReportGenerationError as exc:
-            logger.error("Batch share image report generation failed for %s: %s", rid, exc.message)
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "error": "generation_failed",
-                    "message": f"生成分享图片所需报告失败 (record_id={rid}): {exc.message}",
-                },
-            ) from exc
-        except Exception as exc:  # pragma: no cover — defensive
-            logger.warning("Batch share skipped for %s: %s", rid, exc, exc_info=True)
-            missing.append(rid)
-            continue
-        if poster is None:
-            missing.append(rid)
-            continue
-        posters.append(poster)
-
-    if not posters:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": "not_found",
-                "message": "所有传入的 record_ids 均未找到可用的报告",
-            },
-        )
-
-    try:
-        html_content = build_batch_share_image_html(
-            posters,
-            cards_per_row=request.cards_per_row,
-        )
-    except Exception as exc:
-        logger.exception("build_batch_share_image_html failed")
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "generation_failed",
-                "message": f"批量分享图片生成失败: {exc}",
-            },
-        ) from exc
-
-    image_bytes = await asyncio.to_thread(html_to_image, html_content)
-    if image_bytes is None:
-        config = get_config()
-        engine = getattr(config, "md2img_engine", "wkhtmltoimage")
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "share_image_unavailable",
-                "message": (
-                    f"批量分享图片生成失败，请检查 {engine} 转图工具是否已安装并可用"
-                ),
-            },
-        )
-
-    codes = "_".join(
-        f"{p.code}" for p in posters[:3] if getattr(p, "code", None)
-    ) or "batch"
-    if len(posters) > 3:
-        codes = f"{codes}_plus{len(posters) - 3}"
-    filename = f"dsa-batch-share-{codes}-{len(posters)}stocks.png"
+    codes = "_".join(str(x) for x in request.record_ids[:3])
+    filename = f"dsa-batch-share-{codes}-{len(request.record_ids)}stocks.png"
     return Response(
         content=image_bytes,
         media_type="image/png",
@@ -1168,9 +1201,163 @@ async def post_batch_share_image(
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
-            "X-Batch-Count": str(len(posters)),
+            "X-Batch-Count": str(len(request.record_ids)),
             "X-Batch-Missing": ",".join(str(x) for x in missing),
         },
+    )
+
+
+# 推送渠道白名单：目前仅支持通过 OpenClaw 推送到微信。
+_BATCH_SHARE_PUSH_CHANNELS = frozenset({"openclaw_wechat"})
+
+
+@router.post(
+    "/share-image/batch/push",
+    response_model=BatchShareImagePushResponse,
+    responses={
+        200: {"description": "推送结果（success=false 时仍返回 200，由前端提示）"},
+        400: {"description": "参数无效或不支持的渠道", "model": ErrorResponse},
+        404: {"description": "部分记录不存在", "model": ErrorResponse},
+        500: {"description": "批量生成失败", "model": ErrorResponse},
+        503: {"description": "图片渲染器不可用", "model": ErrorResponse},
+    },
+    summary="批量生成分享图并推送到微信（OpenClaw）",
+    description=(
+        "将多份历史报告（≥2）合成为单张并排 PNG 分享图，并通过 OpenClaw "
+        "推送到微信。渠道由 channel 字段指定，目前仅支持 openclaw_wechat。"
+    ),
+)
+
+async def post_batch_share_image_push(
+    request: BatchShareImagePushRequest,
+    db_manager: DatabaseManager = Depends(get_database_manager),
+) -> BatchShareImagePushResponse:
+    if len(request.record_ids) < 2:
+        return BatchShareImagePushResponse(
+            success=False,
+            message="批量分享需要至少 2 条历史报告",
+            pushed=False,
+        )
+
+    channel = request.channel
+    if channel not in _BATCH_SHARE_PUSH_CHANNELS:
+        return BatchShareImagePushResponse(
+            success=False,
+            message=f"不支持的推送渠道：{channel}（支持：{sorted(_BATCH_SHARE_PUSH_CHANNELS)}）",
+            pushed=False,
+        )
+
+    service = HistoryService(db_manager)
+    try:
+        image_bytes, _missing = await _render_batch_share_png(
+            service, request.record_ids, request.cards_per_row
+        )
+    except HTTPException as exc:
+        # 渲染/数据问题直接透传为失败结果，避免 5xx 打断前端交互。
+        detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+        message = detail.get("message") if isinstance(detail, dict) else str(detail)
+        return BatchShareImagePushResponse(
+            success=False,
+            message=f"生成分享图失败：{message}",
+            pushed=False,
+        )
+
+    from src.notification_sender.openclaw_wechat_sender import OpenclawWechatSender
+
+    sender = OpenclawWechatSender(get_config())
+    try:
+        ok = sender._send_openclaw_wechat_image(image_bytes)
+    except Exception as exc:  # pragma: no cover - network/permission errors
+        logger.error("[分享图] 推送到微信失败: %s", exc, exc_info=True)
+        return BatchShareImagePushResponse(
+            success=False,
+            message=f"推送到微信失败：{exc}",
+            pushed=False,
+        )
+
+    if not ok:
+        return BatchShareImagePushResponse(
+            success=False,
+            message=_openclaw_push_failure_message(sender),
+            pushed=False,
+        )
+
+    return BatchShareImagePushResponse(
+        success=True,
+        message="已通过 OpenClaw 推送分享图到微信",
+        pushed=True,
+    )
+
+
+_SINGLE_SHARE_PUSH_CHANNELS = {"openclaw_wechat"}
+
+
+@router.post(
+    "/{record_id}/share-image/push",
+    response_model=ShareImagePushResponse,
+    responses={
+        200: {"description": "推送结果"},
+        400: {"description": "参数错误", "model": ErrorResponse},
+        404: {"description": "报告不存在", "model": ErrorResponse},
+        500: {"description": "生成失败", "model": ErrorResponse},
+        503: {"description": "图片渲染器不可用", "model": ErrorResponse},
+    },
+    summary="推送单条历史报告分享图片到微信",
+    description="生成单条历史报告分享图片并自动通过 OpenClaw 推送到微信",
+)
+
+async def push_history_share_image(
+    record_id: str,
+    channel: str = Query("openclaw_wechat", description="推送渠道"),
+    db_manager: DatabaseManager = Depends(get_database_manager),
+) -> ShareImagePushResponse:
+    if channel not in _SINGLE_SHARE_PUSH_CHANNELS:
+        return ShareImagePushResponse(
+            success=False,
+            message=f"不支持的推送渠道：{channel}（支持：{sorted(_SINGLE_SHARE_PUSH_CHANNELS)}）",
+            pushed=False,
+        )
+
+    result, markdown_content = _history_share_image_input(record_id, db_manager)
+    config = get_config()
+    image_bytes = await asyncio.to_thread(
+        markdown_to_image,
+        markdown_content,
+        max_chars=getattr(config, "markdown_to_image_max_chars", 15000),
+        structured_payload=_history_share_image_payload(result),
+    )
+    if image_bytes is None:
+        engine = getattr(config, "md2img_engine", "wkhtmltoimage")
+        return ShareImagePushResponse(
+            success=False,
+            message=f"分享图片生成失败，请检查 {engine} 转图工具是否已安装并可用",
+            pushed=False,
+        )
+
+    from src.notification_sender.openclaw_wechat_sender import OpenclawWechatSender
+
+    sender = OpenclawWechatSender(get_config())
+    try:
+        ok = sender._send_openclaw_wechat_image(image_bytes)
+    except Exception as exc:  # pragma: no cover - network/permission errors
+        logger.error("[分享图] 推送到微信失败: %s", exc, exc_info=True)
+        return ShareImagePushResponse(
+            success=False,
+            message=f"推送到微信失败：{exc}",
+            pushed=False,
+        )
+
+    if not ok:
+        return ShareImagePushResponse(
+            success=False,
+            message=_openclaw_push_failure_message(sender),
+            pushed=False,
+        )
+
+    return ShareImagePushResponse(
+        success=True,
+        message="已通过 OpenClaw 推送分享图到微信",
+        pushed=True,
     )
 
 
@@ -1238,3 +1425,19 @@ def get_history_markdown(
         )
 
     return MarkdownReportResponse(content=markdown_content)
+
+
+def _openclaw_push_failure_message(sender) -> str:
+    """根据自动修复诊断生成更精确的推送失败提示。"""
+    info = getattr(sender, "last_repair_info", None)
+    if isinstance(info, dict) and info.get("bot_healthy") is False:
+        return (
+            "推送失败：OpenClaw iLink 微信机器人未登录或会话失效，"
+            "请重新扫码登录后重试（openclaw channels login --channel openclaw-weixin）"
+        )
+    if isinstance(info, dict):
+        return (
+            "推送失败：已自动尝试重启 gateway 修复，但仍未成功，"
+            "请检查 openclaw_wechat_account / token / 目标配置或服务状态"
+        )
+    return "推送失败：OpenClaw 微信接口未返回成功（请检查 openclaw_wechat_account / token / 目标配置）"

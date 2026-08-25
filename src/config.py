@@ -2301,7 +2301,7 @@ class Config:
                 os.getenv('VOLUME_SPIKE_RT_REFRESH_INTERVAL_SECONDS'),
                 300,
                 field_name='VOLUME_SPIKE_RT_REFRESH_INTERVAL_SECONDS',
-                minimum=60,
+                minimum=10,
                 maximum=1800,
             ),
             enable_fundamental_pipeline=os.getenv('ENABLE_FUNDAMENTAL_PIPELINE', 'true').lower() == 'true',

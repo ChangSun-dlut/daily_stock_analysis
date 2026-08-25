@@ -63,6 +63,8 @@ class OpenclawWechatSender:
         self._last_restart_attempt = 0.0
         # 解析 CLI（缓存，避免每次发送都走 npx 冷启动）。
         self._cli = self._resolve_cli()
+        # 最近一次自动修复的诊断信息（供调用方生成更精确的错误提示）。
+        self.last_repair_info: dict | None = None
 
     # ------------------------------------------------------------------
     # 内部工具
@@ -169,6 +171,18 @@ class OpenclawWechatSender:
             logger.error("OPENCLAW_WECHAT: 所有 gateway 重启尝试均失败: %s", last_err)
         return False
 
+    def _wait_for_gateway_ready(self, timeout=None) -> bool:
+        """轮询等待本地 gateway 就绪（TCP 可连通）。"""
+        deadline = time.time() + (timeout or _OPENCLAW_GATEWAY_MAX_STARTUP_WAIT)
+        while time.time() < deadline:
+            time.sleep(_OPENCLAW_GATEWAY_POLL_INTERVAL)
+            if self._gateway_reachable():
+                logger.info("OPENCLAW_WECHAT: gateway 已恢复")
+                return True
+        logger.error("OPENCLAW_WECHAT: 重启后 gateway 仍未就绪（>%ss）",
+                     timeout or _OPENCLAW_GATEWAY_MAX_STARTUP_WAIT)
+        return False
+
     def _ensure_gateway(self) -> bool:
         """确保 gateway 在线；若不在线则尝试重启一次并等待就绪。"""
         if self._gateway_reachable():
@@ -181,15 +195,7 @@ class OpenclawWechatSender:
         logger.warning("OPENCLAW_WECHAT: gateway 未运行，尝试重启兜底")
         if not self._restart_gateway():
             return False
-        deadline = now + _OPENCLAW_GATEWAY_MAX_STARTUP_WAIT
-        while time.time() < deadline:
-            time.sleep(_OPENCLAW_GATEWAY_POLL_INTERVAL)
-            if self._gateway_reachable():
-                logger.info("OPENCLAW_WECHAT: gateway 已恢复")
-                return True
-        logger.error("OPENCLAW_WECHAT: 重启后 gateway 仍未就绪（>%ss）",
-                     _OPENCLAW_GATEWAY_MAX_STARTUP_WAIT)
-        return False
+        return self._wait_for_gateway_ready()
 
     def _run_cli(self, extra_args: list, timeout_seconds) -> bool:
         cmd = [
@@ -248,33 +254,67 @@ class OpenclawWechatSender:
         return False
 
     # ------------------------------------------------------------------
-    # 公开接口
+    # 自动修复（gateway / iLink bot 自愈）
     # ------------------------------------------------------------------
-    def send_to_openclaw_wechat(
-        self, content, *, timeout_seconds=DEFAULT_SEND_TIMEOUT_SECONDS
-    ) -> bool:
-        """发送文本消息到微信。"""
-        if not self._enabled:
-            logger.warning("OPENCLAW_WECHAT: 未配置账号/接收人，跳过推送")
-            return False
-        if not self._ensure_gateway():
-            return False
-        text = (content or "").strip()
-        if not text:
-            return False
-        text = self._truncate(text, OPENCLAW_WECHAT_MAX_BYTES)
-        return self._run_cli(["--message", text], timeout_seconds)
+    def _bot_healthy(self, timeout_seconds: int = 10) -> bool | None:
+        """探测 iLink bot（openclaw-weixin 账号）是否在线。
 
-    def _send_openclaw_wechat_image(
-        self, image_bytes, *, timeout_seconds=DEFAULT_SEND_TIMEOUT_SECONDS
-    ) -> bool:
-        """发送图片消息到微信（via --media）。"""
-        if not self._enabled:
-            logger.warning("OPENCLAW_WECHAT: 未配置账号/接收人，跳过图片推送")
-            return False
+        返回 ``True``=在线, ``False``=未在线/需重新登录, ``None``=无法判定
+        （避免误杀重试，交由发送结果兜底）。
+        """
+        cli = self._cli
+        if not cli:
+            return None
+        try:
+            proc = subprocess.run(
+                [*cli, "channels", "status", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if proc.returncode != 0 or not (proc.stdout or "").strip():
+            return None
+        try:
+            data = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            return None
+        accounts = (data.get("channelAccounts") or {}).get("openclaw-weixin") or []
+        if not accounts:
+            return None
+        for acc in accounts:
+            if not isinstance(acc, dict):
+                continue
+            if acc.get("lastError"):
+                return False
+            if acc.get("running") is True:
+                return True
+        # 无 running=True 也无错误：视为未就绪
+        return False
+
+    def _repair_service(self) -> dict:
+        """自动修复 openclaw gateway / iLink bot：强制重启 gateway 后探测 bot 状态。
+
+        锁屏 / 休眠后最常见的是 gateway 进程失活，强制重启是最可靠的恢复手段，
+        且不会改动 openclaw 配置（避免 ``doctor --repair`` 旋转 token / 启用插件等副作用）。
+        若重启后仍失败，再探测 iLink bot 是否需要重新扫码登录，用于给出精确提示。
+
+        返回诊断信息 dict（供调用方生成更精确的错误提示）。
+        """
+        info: dict = {"gateway_restarted": False, "bot_healthy": None}
+        # 强制重启 gateway（绕过冷却），并等待就绪。
+        if self._restart_gateway():
+            info["gateway_restarted"] = True
+            self._wait_for_gateway_ready()
+        # 探测 iLink bot 是否在线（若需重新扫码登录则无法自动修复）。
+        info["bot_healthy"] = self._bot_healthy()
+        self.last_repair_info = info
+        return info
+
+    def _try_send_image(self, image_bytes, timeout_seconds) -> bool:
+        """单次尝试发送图片（不含自动修复）。"""
         if not self._ensure_gateway():
-            return False
-        if not image_bytes:
             return False
         try:
             with tempfile.NamedTemporaryFile(
@@ -292,3 +332,65 @@ class OpenclawWechatSender:
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
+    # ------------------------------------------------------------------
+    # 公开接口
+    # ------------------------------------------------------------------
+    def send_to_openclaw_wechat(
+        self,
+        content,
+        *,
+        timeout_seconds=DEFAULT_SEND_TIMEOUT_SECONDS,
+        auto_repair: bool = True,
+    ) -> bool:
+        """发送文本消息到微信。
+
+        首次发送失败后，若 ``auto_repair`` 为真，会自动修复 openclaw gateway /
+        iLink bot（强制重启 gateway 并探测 bot 在线状态）后重试一次，以应对锁屏、
+        休眠等导致的服务失活。
+        """
+        if not self._enabled:
+            logger.warning("OPENCLAW_WECHAT: 未配置账号/接收人，跳过推送")
+            return False
+        if not self._ensure_gateway():
+            return False
+        text = (content or "").strip()
+        if not text:
+            return False
+        text = self._truncate(text, OPENCLAW_WECHAT_MAX_BYTES)
+        args = ["--message", text]
+        if self._run_cli(args, timeout_seconds):
+            self.last_repair_info = None
+            return True
+        if not auto_repair:
+            return False
+        logger.warning(
+            "OPENCLAW_WECHAT: 文本推送首次失败，尝试自动修复 gateway / iLink bot 后重试"
+        )
+        self._repair_service()
+        return self._run_cli(args, timeout_seconds)
+
+    def _send_openclaw_wechat_image(
+        self, image_bytes, *, timeout_seconds=DEFAULT_SEND_TIMEOUT_SECONDS, auto_repair: bool = True
+    ) -> bool:
+        """发送图片消息到微信（via --media）。
+
+        首次发送失败后，若 ``auto_repair`` 为真，会自动修复 openclaw gateway /
+        iLink bot（强制重启 gateway 并探测 bot 在线状态）后重试一次，以应对锁屏、
+        休眠等导致的服务失活。
+        """
+        if not self._enabled:
+            logger.warning("OPENCLAW_WECHAT: 未配置账号/接收人，跳过图片推送")
+            return False
+        if not image_bytes:
+            return False
+        if self._try_send_image(image_bytes, timeout_seconds):
+            self.last_repair_info = None
+            return True
+        if not auto_repair:
+            return False
+        logger.warning(
+            "OPENCLAW_WECHAT: 图片推送首次失败，尝试自动修复 gateway / iLink bot 后重试"
+        )
+        self._repair_service()
+        return self._try_send_image(image_bytes, timeout_seconds)

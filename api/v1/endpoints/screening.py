@@ -73,7 +73,7 @@ def _service(config: Config) -> AlphaSiftService:
 def _screening_task_not_found(task_id: str) -> HTTPException:
     return api_error(
         404,
-        "alphasift_screen_task_not_found",
+        "screening_screen_task_not_found",
         f"选股任务 {task_id} 不存在或已过期",
     )
 
@@ -209,7 +209,7 @@ def alphasift_start_screen_task(
 
 
 @router.get("/screen/tasks/{task_id}", response_model=AlphaSiftScreenTaskStatus)
-def alphasift_screen_task_status(task_id: str) -> AlphaSiftScreenTaskStatus:
+def screening_screen_task_status(task_id: str) -> AlphaSiftScreenTaskStatus:
     task = get_task_queue().get_task(task_id)
     if task is None or task.report_type != "alphasift_screen":
         raise _screening_task_not_found(task_id)

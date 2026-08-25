@@ -112,6 +112,42 @@ class BatchShareImageRequest(BaseModel):
     )
 
 
+class BatchShareImagePushRequest(BaseModel):
+    """批量分享图片推送请求（目前仅支持 openclaw_wechat 渠道）"""
+
+    record_ids: List[int] = Field(
+        default_factory=list,
+        description="要合成为分享图片并推送的历史报告 ID 列表（≥2）",
+        min_length=2,
+    )
+    cards_per_row: int = Field(
+        3,
+        ge=1,
+        le=6,
+        description="单行卡片数；超过则自动换行（默认 3）",
+    )
+    channel: str = Field(
+        "openclaw_wechat",
+        description="推送渠道；目前仅支持 openclaw_wechat（通过 OpenClaw 推送到微信）",
+    )
+
+
+class BatchShareImagePushResponse(BaseModel):
+    """批量分享图片推送结果"""
+
+    success: bool = Field(..., description="是否推送成功")
+    message: str = Field("", description="结果说明（成功/失败原因）")
+    pushed: bool = Field(False, description="图片是否已推送到微信")
+
+
+class ShareImagePushResponse(BaseModel):
+    """单条分享图片推送结果"""
+
+    success: bool = Field(..., description="是否推送成功")
+    message: str = Field("", description="结果说明（成功/失败原因）")
+    pushed: bool = Field(False, description="图片是否已推送到微信")
+
+
 class NewsIntelItem(BaseModel):
     """新闻情报条目"""
 
