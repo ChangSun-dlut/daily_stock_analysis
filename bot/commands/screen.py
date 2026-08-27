@@ -24,7 +24,7 @@ from bot.models import BotMessage, BotResponse
 
 logger = logging.getLogger(__name__)
 
-STRATEGY = "sideways_breakout"
+STRATEGY = "consolidation_breakout"
 STRATEGY_LABEL = "横盘突破"
 
 

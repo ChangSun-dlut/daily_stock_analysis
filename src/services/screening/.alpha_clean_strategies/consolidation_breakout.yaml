@@ -41,7 +41,7 @@ screening:
     volume_ratio_20d_min: -999
   market_scope:
   - cn
-  max_output: 6
+  max_output: 10
   portfolio_profile:
     buckets:
       AI算力:
@@ -168,4 +168,4 @@ tags:
 - consolidation
 - concentration
 - low_volatility
-version: '2.0'
+version: '1.9'

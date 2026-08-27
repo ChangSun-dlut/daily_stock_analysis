@@ -94,14 +94,23 @@ print(",".join(out))
 import sys, json
 sys.path.insert(0, '$DSA_DIR')
 from src.services.screening_service import read_alphasift_screen_cache
-cache = read_alphasift_screen_cache('sideways_breakout')
+cache = read_alphasift_screen_cache('consolidation_breakout')
 if cache and cache.get('date') == '$(date +%Y-%m-%d)':
     print('HIT:' + json.dumps(cache, ensure_ascii=False, default=str))
 else:
     print('MISS')
 " 2>/dev/null)
     if [ -n "$REFRESH" ] || echo "$HIT" | grep -q '^MISS'; then
-      run_bg "screen" "--screen" "sideways_breakout" "$REFRESH"
+      # 经 DSA 网站接口（FastAPI）提交后台选股任务；任务完成后由 server 自动推送微信。
+      # 该端点立即返回 202（不阻塞），因此无需 nohup 后台包裹。
+      HTTP_CODE=$(curl -s -o "$LOG_PREFIX.screen_api.json" -w '%{http_code}' \
+        -X POST "http://127.0.0.1:8000/api/v1/screening/screen/tasks" \
+        -H 'Content-Type: application/json' \
+        -d '{"strategy":"consolidation_breakout","market":"cn","max_results":6,"push":true}' 2>/dev/null)
+      if [ "$HTTP_CODE" != "202" ]; then
+        echo "⚠️ 提交选股任务失败（HTTP ${HTTP_CODE:-无响应}），请确认 DSA 服务（localhost:8000）已启动。"
+        exit 1
+      fi
       echo "🔄 横盘突破选股已启动，正在扫描全市场 A 股（约 2–5 分钟）。完成后通过微信推送结果。"
     else
       # 提取缓存中的候选股列表，直接推送

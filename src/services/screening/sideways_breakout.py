@@ -34,14 +34,17 @@ logger = logging.getLogger(__name__)
 class SidewaysBreakoutParams:
     """横盘蓄势突破识别的可调参数。"""
 
-    lookback_days: int = 60                     # 回看交易日数
-    ma_spread_max_pct: float = 6.0              # MA5/10/20 粘合度上限（%）
-    amplitude_max_pct: float = 12.0             # 近 10 日收盘振幅上限（%）
+    # ---- 长周期平台约束（参考 华建集团 2025-01 ~ 2025-07：约 150 个交易日的横盘平台） ----
+    lookback_days: int = 150                    # 回看交易日数（识别长期横盘需要 ≥150 日）
+    long_term_amplitude_max_pct: float = 25.0   # lookback_days 内整体收盘振幅上限（%），超过=不是长期平台
+    long_term_trend_max_pct: float = 30.0       # lookback_days 内（收盘最高-最低）/ 最低 ≤ 该值；与上面互补
+    ma_spread_max_pct: float = 4.5              # MA5/10/20 粘合度上限（%），越紧越好
+    amplitude_max_pct: float = 8.0             # 近 10 日收盘振幅上限（%），排除短期躁动票
     volume_shrink_max: float = 0.6              # 缩量率上限（近5日均量/近60日峰值均量，越小越缩量；仅作评分加分，不作硬门槛）
-    bounce_from_low60_max_pct: float = 30.0     # 距 60 日低点累计涨幅上限（%），超过=已涨完
-    consecutive_min_days: int = 3               # 最少连续蓄势天数（低于此不匹配）
-    breakout_vol_ratio_min: float = 1.5         # 突破日量比（当日量 / 近 10 日均量）
-    breakout_gain_min_pct: float = 2.0          # 突破日涨幅下限（%）
+    bounce_from_low60_max_pct: float = 20.0     # 距 60 日低点累计涨幅上限（%），超过=已涨完/不再处于平台底部
+    consecutive_min_days: int = 5               # 最少连续蓄势天数（低于此不匹配）
+    breakout_vol_ratio_min: float = 1.3         # 突破日量比（当日量 / 近 10 日均量）
+    breakout_gain_min_pct: float = 1.5          # 突破日涨幅下限（%）
     breakout_gain_max_pct: float = 9.0          # 突破日涨幅上限（排除涨停一字板，不可参与）
     down_volume_break_threshold: float = 0.8    # 放量下跌阈值：收跌日近5日均量/峰值均量超过此值视为下跌中继，打断连续蓄势
 
@@ -64,6 +67,9 @@ class SidewaysBreakoutSignal:
     macd_dif: float = 0.0
     macd_dea: float = 0.0
     macd_dead_cross: bool = False             # DIF < DEA
+    platform_band_pct: float = 0.0           # 回看窗口分位带宽度（%，越小越窄）
+    platform_purity: float = 0.0              # 落在该带内的交易日占比
+    long_ma_spread_pct: float = 0.0           # MA60/MA120 间距（%）
     notes: list[str] = field(default_factory=list)
 
 
@@ -123,8 +129,32 @@ def detect_sideways_breakout(
     if n >= 2 and close.iloc[n - 2] > 0:
         sig.today_gain_pct = (close.iloc[n - 1] - close.iloc[n - 2]) / close.iloc[n - 2] * 100
 
+    # ---- 长周期平台约束：用分位带 + 平台纯度衡量"长期横盘"可信度 ----
+    # （不再只看尾部连续天数，而是对回看窗口做等间隔抽样，验证长期处于窄带）
+    lookback_close = close.iloc[max(0, n - p.lookback_days):]
+    if len(lookback_close) >= 60 and lookback_close.min() > 0:
+        q10, q50, q90 = lookback_close.quantile([0.10, 0.50, 0.90])
+        band = (q90 - q10) / q50 * 100 if q50 > 0 else 999.0
+        sig.platform_band_pct = round(band, 1)
+        # 平台纯度：落在"中位价 ±12%"窄带内的交易日占比（比分位带更严格，能区分真假横盘）
+        tight_lo, tight_hi = q50 * 0.88, q50 * 1.12
+        in_tight = float(((lookback_close >= tight_lo) & (lookback_close <= tight_hi)).mean())
+        sig.platform_purity = round(in_tight, 2)
+        if band > p.long_term_amplitude_max_pct:
+            sig.notes.append(f"长周期分位带过宽（{band:.1f}% > {p.long_term_amplitude_max_pct}%），不是横盘平台")
+            return sig
+        if in_tight < 0.55:
+            sig.notes.append(f"长期横盘纯度不足（{in_tight:.0%} < 55%），平台不稳")
+            return sig
+        # 长周期均线粘合：MA60 与 MA120 间距（有 120 日数据时）
+        if len(close) >= 120:
+            ma60 = close.rolling(60).mean().iloc[-1]
+            ma120 = close.rolling(120).mean().iloc[-1]
+            if ma60 > 0 and ma120 > 0:
+                sig.long_ma_spread_pct = round(abs(ma60 - ma120) / ma120 * 100, 1)
+
     # ---- 距 60 日低点累计涨幅（排除已涨完） ----
-    low60 = low.iloc[max(0, n - p.lookback_days):].min()
+    low60 = low.iloc[max(0, n - 60):].min()
     if low60 > 0:
         sig.bounce_from_low60_pct = (close.iloc[n - 1] - low60) / low60 * 100
     if sig.bounce_from_low60_pct > p.bounce_from_low60_max_pct:
@@ -164,7 +194,7 @@ def detect_sideways_breakout(
         sig.phase = "accumulation"
 
     sig.score = _score(sig, p)
-    sig.matched = sig.score >= 55.0
+    sig.matched = sig.score >= 65.0
     return sig
 
 
@@ -292,6 +322,19 @@ def _score(sig: SidewaysBreakoutSignal, p: SidewaysBreakoutParams) -> float:
         score += 5
     elif sig.ma_spread_pct < p.ma_spread_max_pct:
         score += 2
+
+    # ---- 长周期平台质量（核心：长期横盘的可信度） ----
+    # 纯度越高（长期落在窄带内）越像"半年横盘"；长均线间距越紧说明长期收敛
+    if sig.platform_purity >= 0.90:
+        score += 12
+    elif sig.platform_purity >= 0.80:
+        score += 8
+    elif sig.platform_purity >= 0.70:
+        score += 4
+    if sig.long_ma_spread_pct and sig.long_ma_spread_pct <= 8.0:
+        score += 6
+    elif sig.long_ma_spread_pct and sig.long_ma_spread_pct <= 12.0:
+        score += 3
 
     # ---- 缩量程度（越缩洗盘越充分；volume_ratio 为近5日均量/峰值均量） ----
     if sig.volume_ratio < 0.4:

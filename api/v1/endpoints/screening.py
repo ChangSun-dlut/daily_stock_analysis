@@ -24,6 +24,7 @@ from src.services.screening_service import (
 )
 from src.services.task_queue import TaskStatus as QueueTaskStatus
 from src.services.task_queue import get_task_queue
+from src.notification import NotificationService
 
 router = APIRouter()
 
@@ -34,6 +35,11 @@ class AlphaSiftScreenRequest(BaseModel):
     max_results: int = Field(20, ge=1, le=100)
     daily_enrich_max_candidates: Optional[int] = Field(None, ge=1, le=1000)
     explain_filters: bool = Field(False)
+    push: bool = Field(
+        False,
+        description="选股完成后是否通过默认通知渠道（如微信 OpenClaw）主动推送结果。"
+        "Web 前端触发时为 False（用户自行查看）；微信 bot 触发时为 True。",
+    )
 
 
 class AlphaSiftStrategyResponse(BaseModel):
@@ -70,6 +76,51 @@ class AlphaSiftScreenTaskStatus(BaseModel):
 
 def _service(config: Config) -> AlphaSiftService:
     return AlphaSiftService(config=config)
+
+
+def _format_screen_message(result: Dict[str, Any], strategy: str, market: str) -> str:
+    """把选股结果格式化为适合微信推送的纯文本/轻量 markdown。"""
+    from datetime import datetime, timezone
+
+    date_str = (result.get("date") or datetime.now(timezone.utc).astimezone().date().isoformat())
+    candidates: List[Dict[str, Any]] = result.get("candidates") or []
+    header = f"📊 **{strategy} 选股 · {date_str}**\n"
+    if not candidates:
+        return header + "\n今日未选出符合条件的个股。"
+
+    lines: List[str] = []
+    for idx, c in enumerate(candidates[:30], start=1):
+        rank = c.get("rank") or idx
+        name = c.get("name", "")
+        code = c.get("code", "")
+        price = c.get("price")
+        chg = c.get("change_pct")
+        score = c.get("final_score")
+
+        parts = [f"{rank}. {name}({code})"]
+        if price is not None and price != -1:
+            parts.append(f"¥{price}")
+        if chg is not None:
+            parts.append(f"{chg:+.2f}%")
+        if score is not None:
+            parts.append(f"分{score:.1f}")
+        line = " ".join(parts)
+        reason = (c.get("ranking_reason") or "").strip()
+        if reason:
+            line += f"\n   理由: {reason[:80]}"
+        lines.append(line)
+
+    body = "\n".join(lines)
+    return header + "\n" + body + f"\n\n共 {len(candidates)} 只。"
+
+
+def _push_screen_result(result: Dict[str, Any], strategy: str, market: str) -> None:
+    """选股完成后通过默认通知渠道主动推送（不依赖来源消息）。"""
+    from src.notification import NotificationService
+
+    message = _format_screen_message(result, strategy, market)
+    logger.info("选股完成，推送结果:\n%s", message)
+    NotificationService(source_message=None).send(message, route_type="report")
 
 
 def _screening_task_not_found(task_id: str) -> HTTPException:
@@ -171,13 +222,26 @@ def alphasift_start_screen_task(
             20,
             "正在执行 AlphaSift 选股，外部数据源较慢时会持续后台运行",
         )
-        result = _service(config).screen(
-            strategy=request.strategy,
-            market=request.market,
-            max_results=request.max_results,
-            daily_enrich_max_candidates=request.daily_enrich_max_candidates,
-            explain_filters=request.explain_filters,
-        )
+        try:
+            result = _service(config).screen(
+                strategy=request.strategy,
+                market=request.market,
+                max_results=request.max_results,
+                daily_enrich_max_candidates=request.daily_enrich_max_candidates,
+                explain_filters=request.explain_filters,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface failure to caller/notify
+            logger.error("选股任务 %s 失败: %s", task_id, exc, exc_info=True)
+            if request.push:
+                try:
+                    NotificationService(source_message=None).send(
+                        f"⚠️ {request.strategy} 选股失败：{exc}",
+                        route_type="report",
+                    )
+                except Exception:  # noqa: BLE001 - never mask the original error
+                    pass
+            raise
+
         write_alphasift_screen_cache(
             strategy=request.strategy,
             market=request.market,
@@ -188,6 +252,11 @@ def alphasift_start_screen_task(
             90,
             f"选股已完成，正在整理 {result.get('candidate_count', 0)} 条候选",
         )
+        if request.push:
+            try:
+                _push_screen_result(result, request.strategy, request.market)
+            except Exception as exc:  # noqa: BLE001 - push failure must not fail the task
+                logger.error("选股任务 %s 结果推送失败: %s", task_id, exc, exc_info=True)
         return result
 
     task = task_queue.submit_background_task(

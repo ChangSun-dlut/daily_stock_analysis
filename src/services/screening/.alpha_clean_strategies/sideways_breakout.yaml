@@ -1,7 +1,7 @@
 name: sideways_breakout
 display_name: 横盘蓄势突破
 description: 参考澳洋健康标准横盘突破模式：长期窄幅横盘 + 均线高度粘合 + 缩量蓄势，等待放量突破。核心加权"连续蓄势天数"，蓄势越久突破越可靠。
-version: '1.0'
+version: '2.0'
 category: trend
 tags:
 - breakout

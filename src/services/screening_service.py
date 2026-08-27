@@ -76,7 +76,7 @@ DSA_ALPHASIFT_DAILY_FETCH_RETRIES = 3
 DSA_ALPHASIFT_SNAPSHOT_SOURCE_PRIORITY = "sina,efinance,akshare_em,em_datacenter"
 DSA_ALPHASIFT_SNAPSHOT_SOURCE_PRIORITY_WITH_TUSHARE = "tushare,sina,efinance,akshare_em,em_datacenter"
 DSA_ALPHASIFT_CANDIDATE_CONTEXT_PROVIDERS = "news,fund_flow,announcement,quote"
-DSA_ALPHASIFT_DATA_DIR = Path("data") / "alphasift"
+DSA_ALPHASIFT_DATA_DIR = Path(__file__).parent.parent.parent / "data" / "alphasift"
 DSA_ALPHASIFT_HOTSPOT_CACHE_PATH = DSA_ALPHASIFT_DATA_DIR / "hotspots.json"
 DSA_ALPHASIFT_HOTSPOT_HISTORY_PATH = DSA_ALPHASIFT_DATA_DIR / "hotspot.history.jsonl"
 DSA_ALPHASIFT_MIN_HOTSPOT_CACHE_COUNT = 3
@@ -1537,7 +1537,7 @@ class AlphaSiftService:
         if strategy == "golden_pit":
             return _screen_golden_pit_specialized(self.config, max_results)
         # 横盘蓄势突破走专用形态识别器，绕过 AlphaSift 通用因子评分
-        if strategy == "sideways_breakout":
+        if strategy == "consolidation_breakout":
             return _screen_sideways_breakout_specialized(self.config, max_results)
         _ensure_alphasift_enabled(self.config)
         _ensure_alphasift_available_for_use()
@@ -4064,7 +4064,7 @@ def _screen_sideways_breakout_specialized(config: Config, max_results: int) -> D
         "candidates": [],
         "candidate_count": 0,
         "run_id": run_id,
-        "strategy": "sideways_breakout",
+        "strategy": "consolidation_breakout",
         "market": "cn",
         "snapshot_count": 0,
         "snapshot_source": "",
@@ -4117,17 +4117,18 @@ def _screen_sideways_breakout_specialized(config: Config, max_results: int) -> D
         if col:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # 初筛（snapshot 免费列，收窄到 200-400 只，减少拉日线的 API 消耗）
+    # 初筛（snapshot 免费列，收窄到 200-600 只，减少拉日线的 API 消耗）
+    # 参考 华建集团 2025-01~2025-07 长周期横盘：流通盘适中、股性不活跃、当日振幅温和。
     if price_col:
-        df = df[(df[price_col] >= 3) & (df[price_col] <= 150)]      # 价格 3-150
+        df = df[(df[price_col] >= 3) & (df[price_col] <= 100)]      # 价格 3-100
     if mcap_col:
-        df = df[(df[mcap_col] >= 2000000000) & (df[mcap_col] <= 15000000000)]  # 20-150 亿中小盘
+        df = df[(df[mcap_col] >= 3000000000) & (df[mcap_col] <= 12000000000)]  # 30-120 亿中小盘
     if amount_col:
-        df = df[(df[amount_col] >= 50000000) & (df[amount_col] <= 1000000000)]  # 0.5-10 亿成交额
+        df = df[(df[amount_col] >= 80000000) & (df[amount_col] <= 800000000)]  # 0.8-8 亿成交额
     if turnover_col:
-        df = df[(df[turnover_col] >= 0.3) & (df[turnover_col] <= 8.0)]  # 换手 0.3-8%
+        df = df[(df[turnover_col] >= 0.4) & (df[turnover_col] <= 6.0)]  # 换手 0.4-6%
     if change_col:
-        df = df[(df[change_col] >= -2.0) & (df[change_col] <= 5.0)]  # 蓄势/温和突破
+        df = df[(df[change_col] >= -1.5) & (df[change_col] <= 4.0)]  # 蓄势/温和突破，排除异动
     if name_col:
         df = df[~df[name_col].astype(str).str.contains("ST", na=False, case=False)]
 
@@ -4184,7 +4185,8 @@ def _screen_sideways_breakout_specialized(config: Config, max_results: int) -> D
         price = row.get(price_col)
         change_pct = row.get(change_col) if change_col else None
         try:
-            hist_df, _ = load_history_df(code, days=120)
+            # 长期横盘平台需要 ≥150 日日线数据
+            hist_df, _ = load_history_df(code, days=250)
             sig = detect_sideways_breakout(hist_df)
         except Exception as exc:
             logger.debug("横盘突破识别 %s 失败: %s", code, exc)
@@ -4305,10 +4307,10 @@ def _screen_sideways_breakout_specialized(config: Config, max_results: int) -> D
         "all_candidates": all_candidates,
         "all_candidate_count": len(all_candidates),
         "run_id": run_id,
-        "strategy": "sideways_breakout",
+        "strategy": "consolidation_breakout",
         "market": "cn",
         "snapshot_count": snapshot_count,
-        "snapshot_source": "snapshot",
+        "snapshot_source":  "snapshot",
         "after_filter_count": after_filter_count,
         "llm_ranked": False,
         "llm_market_view": "",
@@ -4330,7 +4332,7 @@ def _screen_sideways_breakout_specialized(config: Config, max_results: int) -> D
 
     try:
         write_alphasift_screen_cache(
-            strategy="sideways_breakout", market="cn", result=result,
+            strategy="consolidation_breakout", market="cn", result=result,
         )
     except Exception:
         pass
