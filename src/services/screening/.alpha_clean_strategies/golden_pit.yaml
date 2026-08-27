@@ -151,4 +151,4 @@ screening:
     6. 注意连续涨停/一字板的不可参与标的（hard_filters 已过滤出部分）
 
     '
-  max_output: 5
+  max_output: 6

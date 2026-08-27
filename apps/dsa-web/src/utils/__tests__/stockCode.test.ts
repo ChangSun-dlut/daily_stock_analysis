@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { areStockCodesEquivalent, findMatchingStockCode, includesStockCode, normalizeStockCode } from '../stockCode';
+import { areStockCodesEquivalent, findMatchingStockCode, getMarketFromStockCode, includesStockCode, normalizeStockCode } from '../stockCode';
 
 describe('normalizeStockCode', () => {
   it('keeps clean A-share codes as-is', () => {
@@ -108,5 +108,36 @@ describe('normalizeStockCode', () => {
     expect(includesStockCode(codes, 'HK01810')).toBe(false);
     expect(findMatchingStockCode(codes, 'HK00700')).toBe('00700');
     expect(findMatchingStockCode(codes, 'AAPL')).toBe('aapl');
+  });
+});
+
+describe('getMarketFromStockCode', () => {
+  it('detects A-share markets', () => {
+    expect(getMarketFromStockCode('600519.SH')).toBe('cn');
+    expect(getMarketFromStockCode('000001.SZ')).toBe('cn');
+    expect(getMarketFromStockCode('920748.BJ')).toBe('cn');
+    expect(getMarketFromStockCode('SH600519')).toBe('cn');
+    expect(getMarketFromStockCode('SZ.000001')).toBe('cn');
+  });
+
+  it('detects HK market', () => {
+    expect(getMarketFromStockCode('00700.HK')).toBe('hk');
+    expect(getMarketFromStockCode('HK00700')).toBe('hk');
+  });
+
+  it('detects US market', () => {
+    expect(getMarketFromStockCode('AAPL')).toBe('us');
+    expect(getMarketFromStockCode('TSLA.NASDAQ')).toBe('us');
+  });
+
+  it('detects JP/KR/TW markets', () => {
+    expect(getMarketFromStockCode('7203.T')).toBe('jp');
+    expect(getMarketFromStockCode('005930.KS')).toBe('kr');
+    expect(getMarketFromStockCode('2330.TW')).toBe('tw');
+  });
+
+  it('falls back to other for unrecognized codes', () => {
+    expect(getMarketFromStockCode('')).toBe('other');
+    expect(getMarketFromStockCode('FOO.BAR')).toBe('other');
   });
 });

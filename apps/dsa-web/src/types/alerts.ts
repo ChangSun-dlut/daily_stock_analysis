@@ -178,3 +178,18 @@ export interface AlertNotificationListQuery {
   page?: number;
   pageSize?: number;
 }
+
+export type WebPopupLevel = 'info' | 'success' | 'warning' | 'error';
+
+export interface WebPopupItem {
+  id: number;
+  title: string;
+  body: string;
+  level: WebPopupLevel;
+  createdAt: string;
+}
+
+export interface WebPopupListResponse {
+  items: WebPopupItem[];
+  latestId: number;
+}

@@ -1,4 +1,7 @@
 """OpenClaw 微信发送器单元测试（subprocess / socket 已 mock）。"""
+import json
+import os
+import time
 from unittest import mock
 
 import pytest
@@ -313,3 +316,419 @@ def test_send_image_no_repair_when_auto_repair_false(monkeypatch):
     assert svc._send_openclaw_wechat_image(b"\x89PNG", auto_repair=False) is False
     assert calls["run"] == 1
     assert svc.last_repair_info is None
+
+
+# ----------------------------------------------------------------------
+# 错误分类 + 主动探活
+# ----------------------------------------------------------------------
+def test_classify_auth_needed(monkeypatch):
+    from src.notification_sender.openclaw_wechat_sender import (
+        classify_openclaw_send_error,
+        OPENCLAW_ERR_AUTH_NEEDED,
+    )
+
+    assert (
+        classify_openclaw_send_error(
+            returncode=1, stderr="sendMessage ret=-2 errmsg=prepare failed"
+        )
+        == OPENCLAW_ERR_AUTH_NEEDED
+    )
+    assert (
+        classify_openclaw_send_error(returncode=0, stderr="需要重新登录")
+        == OPENCLAW_ERR_AUTH_NEEDED
+    )
+
+
+def test_classify_cdn_error(monkeypatch):
+    from src.notification_sender.openclaw_wechat_sender import (
+        classify_openclaw_send_error,
+        OPENCLAW_ERR_CDN,
+    )
+
+    assert (
+        classify_openclaw_send_error(
+            returncode=0,
+            stderr="OutboundDeliveryError: CDN upload server error: status 500",
+        )
+        == OPENCLAW_ERR_CDN
+    )
+
+
+def test_classify_gateway_down(monkeypatch):
+    from src.notification_sender.openclaw_wechat_sender import (
+        classify_openclaw_send_error,
+        OPENCLAW_ERR_GATEWAY,
+    )
+
+    assert (
+        classify_openclaw_send_error(returncode=1, stderr="WebSocket closed before message sent")
+        == OPENCLAW_ERR_GATEWAY
+    )
+    assert (
+        classify_openclaw_send_error(returncode=1, stderr="connect ECONNREFUSED 127.0.0.1:18789")
+        == OPENCLAW_ERR_GATEWAY
+    )
+
+
+def test_classify_timeout(monkeypatch):
+    from src.notification_sender.openclaw_wechat_sender import (
+        classify_openclaw_send_error,
+        OPENCLAW_ERR_TIMEOUT,
+    )
+
+    assert (
+        classify_openclaw_send_error(returncode=1, stderr="anything", timed_out=True)
+        == OPENCLAW_ERR_TIMEOUT
+    )
+
+
+def test_classify_other_and_ok(monkeypatch):
+    from src.notification_sender.openclaw_wechat_sender import (
+        classify_openclaw_send_error,
+        OPENCLAW_ERR_OTHER,
+        OPENCLAW_ERR_OK,
+    )
+
+    assert (
+        classify_openclaw_send_error(returncode=1, stderr="unknown failure")
+        == OPENCLAW_ERR_OTHER
+    )
+    assert classify_openclaw_send_error(returncode=0, stderr="") == OPENCLAW_ERR_OK
+
+
+def test_run_cli_records_auth_needed_error(monkeypatch):
+    svc = _make_sender(
+        monkeypatch,
+        run_returncode=1,
+        run_stderr="sendMessage ret=-2 errmsg=prepare failed",
+    )
+    monkeypatch.setattr(svc, "_repair_service", lambda: None)
+    assert svc.send_to_openclaw_wechat("hi") is False
+    from src.notification_sender.openclaw_wechat_sender import OPENCLAW_ERR_AUTH_NEEDED
+    assert svc.last_error_type == OPENCLAW_ERR_AUTH_NEEDED
+    assert "prepare failed" in svc.last_error_detail
+
+
+def test_run_cli_records_cdn_error(monkeypatch):
+    svc = _make_sender(
+        monkeypatch,
+        run_returncode=1,
+        run_stderr="OutboundDeliveryError: CDN upload server error: status 500",
+    )
+    monkeypatch.setattr(svc, "_repair_service", lambda: None)
+    assert svc._send_openclaw_wechat_image(b"\x89PNG") is False
+    from src.notification_sender.openclaw_wechat_sender import OPENCLAW_ERR_CDN
+    assert svc.last_error_type == OPENCLAW_ERR_CDN
+
+
+def test_check_bot_health_unconfigured():
+    svc = _unconfigured_sender()
+    health = svc.check_bot_health()
+    assert health["enabled"] is False
+    assert health["needs_relogin"] is False
+
+
+def test_check_bot_health_healthy(monkeypatch):
+    svc = _make_sender(monkeypatch)
+    # 首次调用 channels status（在 _bot_healthy 里），再次调用在 detail 抓 lastError
+    monkeypatch.setattr(svc, "_gateway_reachable", lambda: True)
+    monkeypatch.setattr(svc, "_bot_healthy", lambda timeout_seconds=10: True)
+
+    healthy_payload = json.dumps({
+        "channelAccounts": {
+            "openclaw-weixin": [
+                {
+                    "id": svc._account,
+                    "running": True,
+                    "lastError": None,
+                }
+            ]
+        }
+    })
+
+    def fake_run(cmd, **kwargs):
+        return mock.Mock(returncode=0, stdout=healthy_payload, stderr="")
+
+    monkeypatch.setattr(
+        "src.notification_sender.openclaw_wechat_sender.subprocess.run", fake_run
+    )
+
+    health = svc.check_bot_health()
+    assert health["enabled"] is True
+    assert health["gateway_reachable"] is True
+    assert health["bot_healthy"] is True
+    assert health["needs_relogin"] is False
+    assert health["last_error"] is None
+
+
+def test_check_bot_health_needs_relogin(monkeypatch):
+    svc = _make_sender(monkeypatch)
+    monkeypatch.setattr(svc, "_gateway_reachable", lambda: True)
+    monkeypatch.setattr(svc, "_bot_healthy", lambda timeout_seconds=10: False)
+
+    relogin_payload = json.dumps({
+        "channelAccounts": {
+            "openclaw-weixin": [
+                {
+                    "id": svc._account,
+                    "running": False,
+                    "lastError": "iLink bot needs relogin: token expired",
+                }
+            ]
+        }
+    })
+
+    def fake_run(cmd, **kwargs):
+        return mock.Mock(returncode=0, stdout=relogin_payload, stderr="")
+
+    monkeypatch.setattr(
+        "src.notification_sender.openclaw_wechat_sender.subprocess.run", fake_run
+    )
+
+    health = svc.check_bot_health()
+    assert health["needs_relogin"] is True
+    assert health["bot_healthy"] is False
+    assert "relogin" in (health["last_error"] or "")
+    assert "relogin" in health["detail"]
+
+
+# ----------------------------------------------------------------------
+# 旁路巡检自动修复：gateway 拉起 + iLink contextToken 失效自愈
+# ----------------------------------------------------------------------
+def test_clear_stale_context_tokens_deletes_when_force(monkeypatch, tmp_path):
+    svc = _make_sender(monkeypatch)
+    token = tmp_path / "tok.context-tokens.json"
+    token.write_text("{}")
+    monkeypatch.setattr(svc, "_context_tokens_path", lambda: str(token))
+    assert svc._clear_stale_context_tokens(force=True) is True
+    assert not token.exists()
+
+
+def test_clear_stale_context_tokens_skips_fresh_token(monkeypatch, tmp_path):
+    svc = _make_sender(monkeypatch)
+    token = tmp_path / "tok.context-tokens.json"
+    token.write_text("{}")
+    # 记录一次“已知失败时刻”，并使 token 文件 mtime 晚于该时刻（用户刚重建）。
+    svc._last_context_failure_ts = time.time()
+    future = time.time() + 10
+    os.utime(str(token), (future, future))
+    monkeypatch.setattr(svc, "_context_tokens_path", lambda: str(token))
+    # force=False 时应保护刚重建的 token，不删除。
+    assert svc._clear_stale_context_tokens(force=False) is False
+    assert token.exists()
+
+
+def test_clear_stale_context_tokens_no_file_is_noop(monkeypatch, tmp_path):
+    svc = _make_sender(monkeypatch)
+    monkeypatch.setattr(svc, "_context_tokens_path", lambda: str(tmp_path / "missing.json"))
+    assert svc._clear_stale_context_tokens(force=True) is False
+
+
+def test_repair_service_clears_context_token_on_prepare_failed(monkeypatch, tmp_path):
+    svc = _make_sender(monkeypatch)
+    from src.notification_sender.openclaw_wechat_sender import OPENCLAW_ERR_AUTH_NEEDED
+
+    token = tmp_path / "tok.context-tokens.json"
+    token.write_text("{}")
+    monkeypatch.setattr(svc, "_context_tokens_path", lambda: str(token))
+    monkeypatch.setattr(svc, "_restart_gateway", lambda: True)
+    monkeypatch.setattr(svc, "_bot_healthy", lambda timeout_seconds=10: True)
+    svc.last_error_type = OPENCLAW_ERR_AUTH_NEEDED
+    svc.last_error_detail = "sendMessage ret=-2 errmsg=prepare failed"
+
+    info = svc._repair_service()
+    assert info["context_token_cleared"] is True
+    assert info["needs_user_message"] is True
+    assert info["gateway_restarted"] is True
+    assert not token.exists()
+
+
+def test_send_text_prepare_failed_auto_clears_token_and_stops(monkeypatch, tmp_path):
+    svc = _make_sender(
+        monkeypatch,
+        run_returncode=1,
+        run_stderr="sendMessage ret=-2 errmsg=prepare failed",
+    )
+    from src.notification_sender.openclaw_wechat_sender import OPENCLAW_ERR_AUTH_NEEDED
+
+    token = tmp_path / "tok.context-tokens.json"
+    token.write_text("{}")
+    monkeypatch.setattr(svc, "_context_tokens_path", lambda: str(token))
+    monkeypatch.setattr(svc, "_restart_gateway", lambda: True)
+    monkeypatch.setattr(svc, "_bot_healthy", lambda timeout_seconds=10: True)
+
+    # 统计“message send”调用次数，并让 channels status 返回健康，避免真实网络。
+    send_calls = {"n": 0}
+    healthy_payload = json.dumps({
+        "channelAccounts": {"openclaw-weixin": [{"id": svc._account, "running": True, "lastError": None}]}
+    })
+
+    def spy_run(cmd, **kwargs):
+        if "channels" in cmd:
+            return mock.Mock(returncode=0, stdout=healthy_payload, stderr="")
+        send_calls["n"] += 1
+        return mock.Mock(returncode=1, stdout="", stderr="sendMessage ret=-2 errmsg=prepare failed")
+
+    monkeypatch.setattr(
+        "src.notification_sender.openclaw_wechat_sender.subprocess.run", spy_run
+    )
+
+    assert svc.send_to_openclaw_wechat("hi") is False
+    # 清 token 后不再盲目重试：仅发起一次 message send。
+    assert send_calls["n"] == 1
+    assert svc.last_needs_user_message is True
+    assert svc.last_error_type == OPENCLAW_ERR_AUTH_NEEDED
+    assert not token.exists()
+
+
+def test_check_bot_health_auto_heal_context_issue(monkeypatch, tmp_path):
+    svc = _make_sender(monkeypatch)
+    from src.notification_sender.openclaw_wechat_sender import OPENCLAW_ERR_AUTH_NEEDED
+
+    token = tmp_path / "tok.context-tokens.json"
+    token.write_text("{}")
+    monkeypatch.setattr(svc, "_context_tokens_path", lambda: str(token))
+    monkeypatch.setattr(svc, "_restart_gateway", lambda: True)
+    monkeypatch.setattr(svc, "_bot_healthy", lambda timeout_seconds=10: True)
+    svc.last_error_type = OPENCLAW_ERR_AUTH_NEEDED
+    svc.last_error_detail = "sendMessage ret=-2 errmsg=prepare failed"
+
+    health = svc.check_bot_health(auto_heal=True)
+    assert health["needs_user_message"] is True
+    assert health["context_token_cleared"] is True
+    assert health["repaired"] is True
+    # contextToken 失效不是授权过期，不应误报需重扫。
+    assert health["needs_relogin"] is False
+    assert not token.exists()
+
+
+def test_check_bot_health_auto_heal_healthy_no_restart(monkeypatch):
+    svc = _make_sender(monkeypatch)
+    monkeypatch.setattr(svc, "_bot_healthy", lambda timeout_seconds=10: True)
+    restarted = {"n": 0}
+
+    def fake_restart():
+        restarted["n"] += 1
+        return True
+
+    monkeypatch.setattr(svc, "_restart_gateway", fake_restart)
+
+    health = svc.check_bot_health(auto_heal=True)
+    # 健康且无 context 故障时，不应反复重启一个在线 gateway。
+    assert restarted["n"] == 0
+    assert health["repaired"] is False
+    assert health["needs_user_message"] is False
+
+
+def test_crash_loop_detection(monkeypatch):
+    svc = _make_sender(monkeypatch)
+    # channels status 返回 crash-loop breaker 抑制文案（端口仍可达）。
+    crash_payload = json.dumps({
+        "channelAccounts": {
+            "openclaw-weixin": [
+                {
+                    "accountId": "f4add82e8cf4-im-bot",
+                    "lastError": "gateway restart-loop breaker tripped: 3 unclean boot(s)",
+                    "running": False,
+                    "configured": True,
+                    "enabled": True,
+                }
+            ]
+        }
+    })
+
+    def fake_run(cmd, **kwargs):
+        class P:
+            returncode = 0
+            stdout = crash_payload
+            stderr = ""
+
+        return P()
+
+    monkeypatch.setattr(
+        "src.notification_sender.openclaw_wechat_sender.subprocess.run", fake_run
+    )
+    # 端口仍可达（gateway 进程在跑），但通道被 breaker 抑制。
+    monkeypatch.setattr(svc, "_gateway_reachable", lambda: True)
+    assert svc._crash_loop_suppressed() is True
+
+
+def test_check_bot_health_auto_heal_crash_loop_restarts(monkeypatch):
+    svc = _make_sender(monkeypatch)
+    crash_payload = json.dumps({
+        "channelAccounts": {
+            "openclaw-weixin": [
+                {
+                    "accountId": "f4add82e8cf4-im-bot",
+                    "id": "f4add82e8cf4-im-bot",
+                    "lastError": "gateway restart-loop breaker tripped: 3 unclean boot(s)",
+                    "running": False,
+                    "configured": True,
+                    "enabled": True,
+                }
+            ]
+        }
+    })
+
+    def fake_run(cmd, **kwargs):
+        class P:
+            returncode = 0
+            stdout = crash_payload
+            stderr = ""
+
+        return P()
+
+    monkeypatch.setattr(
+        "src.notification_sender.openclaw_wechat_sender.subprocess.run", fake_run
+    )
+    monkeypatch.setattr(svc, "_gateway_reachable", lambda: True)
+    restarted = {"n": 0}
+
+    def fake_restart():
+        restarted["n"] += 1
+        return True
+
+    monkeypatch.setattr(svc, "_restart_gateway", fake_restart)
+    # _wait_for_gateway_ready 会轮询，mock 掉避免真实等待。
+    monkeypatch.setattr(svc, "_wait_for_gateway_ready", lambda: None)
+
+    health = svc.check_bot_health(auto_heal=True)
+    # crash-loop 抑制应触发强制重启 gateway（端口可达也不应跳过）。
+    assert restarted["n"] == 1
+    assert health["crash_loop_recovered"] is True
+    assert health["crash_loop_suppressed"] is True
+    assert health["repaired"] is True
+    # crash-loop 不是授权过期，不应误报 contextToken / 重扫。
+    assert health["needs_user_message"] is False
+    assert health["needs_relogin"] is False
+
+
+def test_check_bot_health_crash_loop_suppressed_flag_only(monkeypatch):
+    svc = _make_sender(monkeypatch)
+    crash_payload = json.dumps({
+        "channelAccounts": {
+            "openclaw-weixin": [
+                {
+                    "accountId": "f4add82e8cf4-im-bot",
+                    "id": "f4add82e8cf4-im-bot",
+                    "lastError": "crash loop breaker tripped",
+                    "running": False,
+                }
+            ]
+        }
+    })
+
+    def fake_run(cmd, **kwargs):
+        class P:
+            returncode = 0
+            stdout = crash_payload
+            stderr = ""
+
+        return P()
+
+    monkeypatch.setattr(
+        "src.notification_sender.openclaw_wechat_sender.subprocess.run", fake_run
+    )
+    # 仅探测（auto_heal=False）也应能暴露 crash_loop_suppressed 标志。
+    health = svc.check_bot_health(auto_heal=False)
+    assert health["crash_loop_suppressed"] is True

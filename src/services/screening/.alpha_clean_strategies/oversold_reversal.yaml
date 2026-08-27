@@ -93,4 +93,4 @@ screening:
     3. 若存在错杀、事件落地或板块修复线索，可提高优先级
 
     '
-  max_output: 5
+  max_output: 6

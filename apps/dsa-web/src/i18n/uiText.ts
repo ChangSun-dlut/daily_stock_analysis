@@ -496,6 +496,10 @@ const zh = {
   'watchlist.volumeSurge': '巨量 {ratio}x',
   'watchlist.volumeNormal': '量正常',
   'watchlist.volumeRatioUnavailable': '量比暂无',
+  'watchlist.volumeRatioPremarket': '未开盘',
+  'watchlist.volumeRatioLunchBreak': '午休',
+  'watchlist.volumeRatioPostmarket': '已收盘',
+  'watchlist.volumeRatioNonTrading': '非交易日',
   'watchlist.volumeRatioTooltip': '量比 = 当日累计成交 / 近 N 日同时段均量；≥2 表示放量，≥5 表示巨量',
 
   'stockTrend.allHistory': '全部历史',
@@ -1461,6 +1465,10 @@ const en: Record<UiTextKey, string> = {
   'watchlist.volumeSurge': 'Vol surge {ratio}x',
   'watchlist.volumeNormal': 'Vol normal',
   'watchlist.volumeRatioUnavailable': 'Vol ratio n/a',
+  'watchlist.volumeRatioPremarket': 'Pre-market',
+  'watchlist.volumeRatioLunchBreak': 'Lunch break',
+  'watchlist.volumeRatioPostmarket': 'Post-market',
+  'watchlist.volumeRatioNonTrading': 'Non-trading',
   'watchlist.volumeRatioTooltip': 'Volume ratio = today cumulative volume / N-day same-window average; ≥2 means a spike, ≥5 means a surge.',
 
   'stockTrend.allHistory': 'All history',

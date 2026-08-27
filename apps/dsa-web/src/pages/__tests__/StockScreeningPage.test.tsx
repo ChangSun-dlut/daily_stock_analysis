@@ -56,6 +56,12 @@ const {
   };
 });
 
+const { isInWatchlist, addToWatchlist, isActioning } = vi.hoisted(() => ({
+  isInWatchlist: vi.fn(),
+  addToWatchlist: vi.fn(),
+  isActioning: vi.fn(),
+}));
+
 vi.mock('react-router-dom', async () => {
   const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
   return {
@@ -75,6 +81,22 @@ vi.mock('../../api/screening', () => ({
     screen: (payload: unknown) => screenStocks(payload),
     startScreen: (payload: unknown) => startScreenTask(payload),
   },
+}));
+
+vi.mock('../../hooks/useWatchlist', () => ({
+  useWatchlist: () => ({
+    isInWatchlist: (code: string) => isInWatchlist(code),
+    addToWatchlist: (code: string) => addToWatchlist(code),
+    get isActioning() {
+      return isActioning();
+    },
+    isLoading: false,
+    error: null,
+    actionMessage: '',
+    removeFromWatchlist: vi.fn(),
+    refresh: vi.fn(),
+    codes: [],
+  }),
 }));
 
 const mockStrategiesResponse = {
@@ -116,6 +138,11 @@ describe('StockScreeningPage', () => {
     resetLastScreenResult();
     screenStocks.mockReset();
     startScreenTask.mockClear();
+    isInWatchlist.mockReset();
+    addToWatchlist.mockReset();
+    isActioning.mockReset();
+    isInWatchlist.mockReturnValue(false);
+    isActioning.mockReturnValue(false);
     getStrategies.mockResolvedValue(mockStrategiesResponse);
     getHotspotDetail.mockResolvedValue({
       enabled: true,
@@ -991,7 +1018,7 @@ describe('StockScreeningPage', () => {
     expect(screenStocks).toHaveBeenCalledWith({
       market: 'cn',
       strategy: 'shrink_pullback',
-      maxResults: 3,
+      maxResults: 6,
     });
   });
 
@@ -1091,6 +1118,75 @@ describe('StockScreeningPage', () => {
         skills: ['growth_quality'],
       },
     });
+  });
+
+  it('adds a candidate to watchlist from screening results', async () => {
+    getScreeningStatus.mockResolvedValue({
+      enabled: true,
+      available: true,
+    });
+    screenStocks.mockResolvedValueOnce({
+      enabled: true,
+      candidates: [
+        {
+          rank: 1,
+          code: '600519',
+          name: '贵州茅台',
+          score: 88.5,
+          reason: '候选摘要',
+          raw: {},
+        },
+      ],
+      candidateCount: 1,
+    });
+    addToWatchlist.mockResolvedValueOnce(undefined);
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('选股已开启')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /运行选股/ }));
+    expect(await screen.findByText('贵州茅台')).toBeInTheDocument();
+
+    const addButton = screen.getByTestId('stock-screening-add-watchlist-600519');
+    expect(addButton).toHaveTextContent('加入自选');
+    fireEvent.click(addButton);
+
+    await waitFor(() => expect(addToWatchlist).toHaveBeenCalledWith('600519'));
+
+    isInWatchlist.mockImplementation((code: string) => code === '600519');
+    expect(screen.getByTestId('stock-screening-add-watchlist-600519')).toHaveTextContent('已加自选');
+  });
+
+  it('shows already-in-watchlist state for candidates already in watchlist', async () => {
+    getScreeningStatus.mockResolvedValue({
+      enabled: true,
+      available: true,
+    });
+    isInWatchlist.mockImplementation((code: string) => code === '600519');
+    screenStocks.mockResolvedValueOnce({
+      enabled: true,
+      candidates: [
+        {
+          rank: 1,
+          code: '600519',
+          name: '贵州茅台',
+          score: 88.5,
+          reason: '候选摘要',
+          raw: {},
+        },
+      ],
+      candidateCount: 1,
+    });
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('选股已开启')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /运行选股/ }));
+    expect(await screen.findByText('贵州茅台')).toBeInTheDocument();
+
+    const addButton = await screen.findByTestId('stock-screening-add-watchlist-600519');
+    expect(addButton).toHaveTextContent('已加自选');
+    expect(addButton).toBeDisabled();
   });
 
   it('restores an in-flight screening task after remounting the page', async () => {

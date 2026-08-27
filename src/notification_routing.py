@@ -26,6 +26,7 @@ ROUTABLE_NOTIFICATION_CHANNELS: Tuple[str, ...] = (
     "slack",
     "astrbot",
     "openclaw_wechat",
+    "web",
 )
 ROUTABLE_NOTIFICATION_CHANNEL_SET = frozenset(ROUTABLE_NOTIFICATION_CHANNELS)
 

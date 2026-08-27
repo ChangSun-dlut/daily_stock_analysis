@@ -11,6 +11,7 @@ import type {
   AlertRuleTestResponse,
   AlertTriggerListQuery,
   AlertTriggerListResponse,
+  WebPopupListResponse,
 } from '../types/alerts';
 
 function omitUndefined(input: Record<string, unknown>): Record<string, unknown> {
@@ -129,5 +130,12 @@ export const alertsApi = {
       params: toNotificationListParams(query),
     });
     return toCamelCase<AlertNotificationListResponse>(response.data);
+  },
+
+  async listWebPopups(since = 0): Promise<WebPopupListResponse> {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/alerts/web-popups', {
+      params: since > 0 ? { since } : {},
+    });
+    return toCamelCase<WebPopupListResponse>(response.data);
   },
 };

@@ -815,6 +815,11 @@ const HomePage: React.FC = () => {
       if (!abortController.signal.aborted) {
         setWatchlistSpotQuotesByCode(map);
       }
+    } catch (error) {
+      if (!abortController.signal.aborted) {
+        // 整批刷新失败：保留上次成功的数据，避免被空数据覆盖成「暂无」。
+        console.warn('批量获取自选股实时行情失败，保留上次数据:', error);
+      }
     } finally {
       if (!abortController.signal.aborted) {
         setWatchlistSpotQuotesLoading(false);
@@ -823,7 +828,7 @@ const HomePage: React.FC = () => {
   }, [watchlistState.watchlistCodes]);
 
   // 盘中 9:00-15:00（Asia/Shanghai）每 5 分钟自动刷新放量预警；
-  // 盘前/盘后只调度下次 9:00 触发。依赖项变化时自动清理。
+  // 盘前/盘后先立即拉一次收盘数据，再调度下次 9:00 触发。依赖项变化时自动清理。
   useEffect(() => {
     let timeoutId: number | undefined;
     let intervalId: number | undefined;
@@ -906,7 +911,9 @@ const HomePage: React.FC = () => {
       void refreshWatchlistSpotQuotes();
       startTradingInterval();
     } else {
-      // 盘前/盘后：调度到下次 9:00
+      // 盘前/盘后：先拉一次取最新收盘数据（盘后能拿到 backend 用全日成交量算出的最终量比），
+      // 然后调度到下次 9:00。
+      void refreshWatchlistSpotQuotes();
       const delay = computeMsUntilShanghaiTime(9);
       timeoutId = window.setTimeout(() => {
         if (cancelled) return;
@@ -1544,8 +1551,8 @@ const HomePage: React.FC = () => {
     });
   }, [marketReviewHistoryItems, stockBarItems, t]);
 
-  // 历史栏目放量预警：盘中 9:00-15:00（Asia/Shanghai）每 5 分钟自动刷新；
-  // 盘前/盘后只调度次日 9:00 触发；用户可随时手动点击闪电按钮刷新。与 watchlist 保持一致。
+  // 历史栏目放量预警：不再自动定时刷新（避免历史栏常 >50 只叠加自选股轮询放大 422 / 请求压力），
+  // 仅保留手动触发（用户点击闪电按钮 -> onRefreshHistorySpotQuotes -> refreshHistorySpotQuotes）。
   const historySpotCodes = useMemo(
     () => mergedStockBarItems
       .map((item) => item.stockCode)
@@ -1569,6 +1576,11 @@ const HomePage: React.FC = () => {
       if (!abortController.signal.aborted) {
         setHistorySpotQuotesByCode(map);
       }
+    } catch (error) {
+      if (!abortController.signal.aborted) {
+        // 整批刷新失败：保留上次成功的数据，避免被空数据覆盖成「暂无」。
+        console.warn('批量获取历史栏实时行情失败，保留上次数据:', error);
+      }
     } finally {
       if (!abortController.signal.aborted) {
         setHistorySpotQuotesLoading(false);
@@ -1576,104 +1588,10 @@ const HomePage: React.FC = () => {
     }
   }, [historySpotCodes]);
 
-  // 盘中 9:00-15:00（Asia/Shanghai）每 5 分钟自动刷新，逻辑与 watchlist 完全一致。
-  useEffect(() => {
-    let timeoutId: number | undefined;
-    let intervalId: number | undefined;
-    let cancelled = false;
-
-    const getShanghaiTotalMinutes = (): number => {
-      const now = new Date();
-      const fmt = new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'Asia/Shanghai',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false,
-      });
-      const parts = fmt.formatToParts(now);
-      const h = Number(parts.find((p) => p.type === 'hour')?.value ?? 0);
-      const m = Number(parts.find((p) => p.type === 'minute')?.value ?? 0);
-      return h * 60 + m;
-    };
-
-    const computeMsUntilShanghaiTime = (targetHour: number): number => {
-      const now = new Date();
-      const fmt = new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'Asia/Shanghai',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        hour12: false,
-      });
-      const parts = fmt.formatToParts(now);
-      const valueOf = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0);
-      const year = valueOf('year');
-      const month = valueOf('month');
-      const day = valueOf('day');
-      const hour = valueOf('hour');
-      let targetYear = year;
-      let targetMonth = month;
-      let targetDay = day;
-      if (hour >= targetHour) {
-        const tomorrow = new Date(Date.UTC(year, month - 1, day + 1));
-        targetYear = tomorrow.getUTCFullYear();
-        targetMonth = tomorrow.getUTCMonth() + 1;
-        targetDay = tomorrow.getUTCDate();
-      }
-      // targetHour Asia/Shanghai = (targetHour - 8) UTC
-      const targetUtcMs = Date.UTC(targetYear, targetMonth - 1, targetDay, targetHour - 8, 0, 0);
-      return Math.max(0, targetUtcMs - now.getTime());
-    };
-
-    const startTradingInterval = () => {
-      if (cancelled) return;
-      intervalId = window.setInterval(() => {
-        if (cancelled) return;
-        void refreshHistorySpotQuotes();
-      }, 5 * 60 * 1000);
-      // 15:00 停止 interval，排明天 9:00 重新开始
-      const delayUntil15 = computeMsUntilShanghaiTime(15);
-      if (delayUntil15 > 0) {
-        timeoutId = window.setTimeout(() => {
-          if (cancelled) return;
-          if (intervalId !== undefined) {
-            window.clearInterval(intervalId);
-            intervalId = undefined;
-          }
-          const delay = computeMsUntilShanghaiTime(9);
-          timeoutId = window.setTimeout(() => {
-            if (cancelled) return;
-            void refreshHistorySpotQuotes();
-            startTradingInterval();
-          }, delay);
-        }, delayUntil15);
-      }
-    };
-
-    const totalMinutes = getShanghaiTotalMinutes();
-    if (totalMinutes >= 540 && totalMinutes < 900) {
-      // 交易时段内：立即拉一次，然后开始 5 分钟循环
-      void refreshHistorySpotQuotes();
-      startTradingInterval();
-    } else {
-      // 盘前/盘后：调度到下次 9:00
-      const delay = computeMsUntilShanghaiTime(9);
-      timeoutId = window.setTimeout(() => {
-        if (cancelled) return;
-        void refreshHistorySpotQuotes();
-        startTradingInterval();
-      }, delay);
-    }
-
-    return () => {
-      cancelled = true;
-      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
-      if (intervalId !== undefined) window.clearInterval(intervalId);
-    };
-  }, [refreshHistorySpotQuotes]);
+  // 历史栏实时量比不再自动定时刷新（避免历史栏常 >50 只叠加自选股一起轮询、
+  // 放大 422/请求压力）。仅保留手动触发口子（HomeStockWorkspace 的刷新按钮 ->
+  // onRefreshHistorySpotQuotes -> refreshHistorySpotQuotes）。自选股仍按 5 分钟定时刷新。
+  // 因此此处不再挂载自动 interval / timeout。
 
   const handleBatchAnalyze = useCallback(async () => {
     if (isBatchAnalyzing) return;

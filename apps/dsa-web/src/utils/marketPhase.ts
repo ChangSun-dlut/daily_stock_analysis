@@ -113,3 +113,49 @@ export const getMarketPhaseSummaryLabel = (
 
 export const getPartialBarLabel = (language?: ReportLanguage | null): string =>
   TEXT[normalizeReportLanguage(language)].partialBar;
+
+/**
+ * 根据当前 UTC 时间推算 A 股（上海/深圳）所处交易阶段。
+ *
+ * 交易时段（北京时间）：
+ * - 09:30 ~ 11:30  盘中
+ * - 11:30 ~ 13:00  午间休市
+ * - 13:00 ~ 15:00  盘中
+ * - 其他时段 / 周末  盘前/盘后/非交易日
+ *
+ * 节假日不单独处理，因为后端量比自算也是按当前时刻是否落在交易时段判断；
+ * UI 展示只需与后端逻辑保持一致即可。
+ */
+export const getCurrentAshareMarketPhase = (
+  now: Date = new Date(),
+): MarketPhaseValue => {
+  const shanghaiTime = now.toLocaleString('sv-SE', {
+    timeZone: 'Asia/Shanghai',
+    hour12: false,
+  });
+  const [, timePart] = shanghaiTime.split(' ');
+  const [hour, minute] = (timePart || '00:00').split(':').map(Number);
+  const minutes = hour * 60 + minute;
+  const weekday = now.toLocaleDateString('en-US', {
+    timeZone: 'Asia/Shanghai',
+    weekday: 'short',
+  });
+  const isWeekday = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(weekday);
+
+  if (!isWeekday) {
+    return 'non_trading';
+  }
+  if (minutes < 9 * 60 + 30) {
+    return 'premarket';
+  }
+  if (minutes < 11 * 60 + 30) {
+    return 'intraday';
+  }
+  if (minutes < 13 * 60) {
+    return 'lunch_break';
+  }
+  if (minutes < 15 * 60) {
+    return 'intraday';
+  }
+  return 'postmarket';
+};

@@ -1,22 +1,39 @@
 import type React from 'react';
 import { Loader2 } from 'lucide-react';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
+import { getCurrentAshareMarketPhase } from '../../utils/marketPhase';
+import type { MarketPhaseValue } from '../../types/analysis';
 import { classifyVolumeRatio } from './volumeRatio';
+
+import type { UiTextKey } from '../../i18n/uiText';
+
+const PHASE_TO_VOLUME_RATIO_KEY: Record<MarketPhaseValue, UiTextKey> = {
+  premarket: 'watchlist.volumeRatioPremarket',
+  lunch_break: 'watchlist.volumeRatioLunchBreak',
+  postmarket: 'watchlist.volumeRatioPostmarket',
+  non_trading: 'watchlist.volumeRatioNonTrading',
+  intraday: 'watchlist.volumeRatioUnavailable',
+  closing_auction: 'watchlist.volumeRatioUnavailable',
+  unknown: 'watchlist.volumeRatioUnavailable',
+};
 
 /**
  * 放量预警徽标：在自选股列表和历史列表中复用。
  * - surge: 量比 ≥ 5，红色脉冲
  * - spike: 量比 ≥ 2，黄色
  * - normal: 量比 < 2，灰色
- * - unavailable: 数据缺失，cyan 占位
+ * - unavailable: 数据缺失或 A 股非交易时段，cyan 占位；会根据当前北京时间显示
+ *   「未开盘 / 午休 / 已收盘 / 非交易日 / 量比暂无」。
  */
 export const VolumeSpikeBadge: React.FC<{
   ratio: number | null | undefined;
   changePercent: number | null | undefined;
   loading?: boolean;
+  /** 股票所属市场；A 股（cn）在量比缺失时可根据交易阶段给出更精确提示。 */
+  market?: string | null;
   /** 自定义 data-testid 前缀，避免两个栏目重名（例如 watchlist-volume-spike / history-volume-spike）。默认 watchlist-volume-* */
   testIdPrefix?: string;
-}> = ({ ratio, changePercent, loading, testIdPrefix = 'watchlist-volume' }) => {
+}> = ({ ratio, changePercent, loading, market, testIdPrefix = 'watchlist-volume' }) => {
   const { t } = useUiLanguage();
   if (loading) {
     return (
@@ -30,6 +47,10 @@ export const VolumeSpikeBadge: React.FC<{
   }
   const level = classifyVolumeRatio(ratio);
   if (level === 'unavailable') {
+    const phase = (market || '').trim().toLowerCase() === 'cn'
+      ? getCurrentAshareMarketPhase()
+      : 'unknown';
+    const labelKey = PHASE_TO_VOLUME_RATIO_KEY[phase] || 'watchlist.volumeRatioUnavailable';
     return (
       <span
         className="inline-flex h-6 items-center gap-1 rounded-full border border-cyan/40 bg-cyan/15 px-2 text-[11px] font-medium leading-none text-cyan"
@@ -37,7 +58,7 @@ export const VolumeSpikeBadge: React.FC<{
         data-testid={`${testIdPrefix}-unavailable`}
       >
         <span className="h-1.5 w-1.5 rounded-full bg-cyan" aria-hidden="true" />
-        {t('watchlist.volumeRatioUnavailable')}
+        {t(labelKey)}
       </span>
     );
   }

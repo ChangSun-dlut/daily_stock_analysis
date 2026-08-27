@@ -552,11 +552,18 @@ class AlertService:
             )
 
         def _run_evaluation():
+            from data_provider.base import DataFetcherManager
+
+            try:
+                quote = DataFetcherManager().get_realtime_quote(rule.stock_code)
+            except Exception:
+                quote = None
             return evaluate_realtime_indicator_alert(
                 rule.alert_type,
                 rule.stock_code,
                 params,
                 get_default_cache(),
+                quote=quote,
             )
 
         try:

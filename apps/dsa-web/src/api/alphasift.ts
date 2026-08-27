@@ -461,6 +461,21 @@ export type YesterdayBacktestResponse = {
   errors: string[];
 };
 
+export type ScreenHistoryCandidate = {
+  code: string;
+  name: string;
+  price?: number | null;
+};
+
+export type ScreenHistoryResponse = {
+  available: boolean;
+  date?: string;
+  market?: string;
+  cachedAt?: string;
+  candidates?: ScreenHistoryCandidate[];
+  candidateCount?: number;
+};
+
 export function notifyAlphaSiftConfigChanged(): void {
   window.dispatchEvent(new Event(ALPHASIFT_CONFIG_CHANGED_EVENT));
   notifySystemConfigChanged();
@@ -616,5 +631,16 @@ export const alphasiftApi = {
       { timeout: 120000 },
     );
     return toCamelCase<YesterdayBacktestResponse>(response.data);
+  },
+
+  async getScreenHistory(payload: {
+    strategy: string;
+    date?: string;
+  }): Promise<ScreenHistoryResponse> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      `/api/v1/screening/screen/history/${encodeURIComponent(payload.strategy)}`,
+      { params: payload.date ? { date: payload.date } : undefined },
+    );
+    return toCamelCase<ScreenHistoryResponse>(response.data);
   },
 };

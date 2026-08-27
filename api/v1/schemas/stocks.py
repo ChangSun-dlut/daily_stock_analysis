@@ -117,8 +117,9 @@ class WatchlistSpotQuotesRequest(BaseModel):
 
     codes: List[str] = Field(
         ...,
-        max_length=50,
-        description="股票代码列表，0~50 只；空字符串或重复会被跳过；空 list 直接返回空结果",
+        max_length=300,
+        description="股票代码列表，1~300 只；空字符串或重复会被跳过；空 list 直接返回空结果。"
+        "前端会按 40 只一批分批调用，避免单次超长触发 422 或客户端超时。",
     )
 
 

@@ -10,6 +10,14 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
+from data_provider.base import normalize_stock_code
+
+from src.core.trading_calendar import (
+    MarketPhase,
+    get_market_for_stock,
+    infer_market_phase,
+)
+
 
 TECHNICAL_ALERT_TYPES = frozenset({
     "ma_price_cross",
@@ -601,6 +609,22 @@ class RealtimeIndicatorOutcome:
     evaluated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+def _format_volume_direction(quote: Optional[Any]) -> str:
+    """Return a human-readable up/down label for a realtime volume-spike quote."""
+    if quote is None:
+        return "放量预警"
+    pct = getattr(quote, "change_pct", None)
+    if pct is None or not isfinite(pct):
+        pct = getattr(quote, "pct_change", None)
+    if pct is None or not isfinite(pct):
+        return "放量预警"
+    if pct > 0:
+        return f"放量上涨预警（+{pct:.2f}%）"
+    if pct < 0:
+        return f"放量下跌预警（{pct:.2f}%）"
+    return "放量平盘预警（0.00%）"
+
+
 def evaluate_realtime_indicator_alert(
     alert_type: str,
     stock_code: str,
@@ -608,54 +632,111 @@ def evaluate_realtime_indicator_alert(
     cache: Any,
     *,
     now: Optional[datetime] = None,
+    quote: Optional[Any] = None,
 ) -> RealtimeIndicatorOutcome:
     """Evaluate a realtime indicator against the supplied cache.
 
     ``cache`` is expected to expose ``current_ratio`` and ``slope`` (both
     accept ``window_minutes`` and ``now`` kwargs). The default singleton from
     :mod:`src.services.realtime_volume_cache` satisfies this contract.
+
+    ``quote`` is an optional realtime quote object (e.g.
+    :class:`data_provider.realtime_types.UnifiedRealtimeQuote`) used to enrich
+    the triggered summary with up/down direction.
     """
     if alert_type not in REALTIME_ALERT_TYPES:
         raise ValueError(f"unsupported realtime alert_type: {alert_type}")
 
+    # Normalise stock code early so market-phase inference can resolve the market.
+    stock_code = normalize_stock_code(stock_code)
+
+    # Realtime alerts only make sense while the market is actively trading.
+    # We fail-open: only skip when we can positively identify a non-active phase.
+    now_dt = now or datetime.now(timezone.utc)
+    market = get_market_for_stock(stock_code)
+    if market:
+        phase = infer_market_phase(market, current_time=now_dt)
+        if phase in {
+            MarketPhase.PREMARKET,
+            MarketPhase.LUNCH_BREAK,
+            MarketPhase.POSTMARKET,
+            MarketPhase.NON_TRADING,
+        }:
+            return RealtimeIndicatorOutcome(
+                triggered=False,
+                summary=f"市场未开盘（{phase.value}），跳过实时指标检查",
+                latest_value=None,
+                slope=None,
+                window_points=0,
+                evaluated_at=now_dt,
+            )
+
     if alert_type == "volume_spike_rt":
         window = int(params["window_minutes"])
         min_ratio = float(params["min_ratio"])
-        min_slope = float(params["min_slope"])
-        now_dt = now or datetime.now(timezone.utc)
+        min_slope = float(params.get("min_slope", 0.0))
+        # Peak-ratio threshold for catching *short* bursts (e.g. a 3-minute
+        # explosion) that are invisible to a 30-min slope and may be missed by
+        # the 5-min sampling interval. Disabled when <= 0.
+        min_peak = float(params.get("min_peak_ratio", 0.0))
         current = cache.current_ratio(stock_code, now=now_dt)
-        if current is None or current < min_ratio:
+        if current is None:
             return RealtimeIndicatorOutcome(
                 triggered=False,
-                summary=f"量比 {current:.2f}x，未达阈值 {min_ratio:.2f}x" if current is not None else "量比数据不足",
+                summary="量比数据不足",
                 latest_value=current,
                 slope=None,
                 window_points=0,
                 evaluated_at=now_dt,
             )
+
         slope = cache.slope(stock_code, window_minutes=window, now=now_dt)
-        if slope is None:
-            return RealtimeIndicatorOutcome(
-                triggered=False,
-                summary=f"量比 {current:.2f}x，窗口 {window} 分钟采样不足",
-                latest_value=current,
-                slope=None,
-                window_points=cache.size(stock_code),
-                evaluated_at=now_dt,
-            )
         # slope units = volume_ratio per minute; convert to per-5-min for display
-        slope_per_5min = slope * 5.0
-        # Tiny epsilon absorbs float-precision drift (e.g. 0.05 vs 0.0499999).
-        triggered = slope >= (min_slope / 5.0) - 1e-9
-        if triggered:
+        slope_per_5min = slope * 5.0 if slope is not None else None
+        peak = cache.peak_ratio(stock_code, window_minutes=window, now=now_dt)
+
+        # Three independent signals — OR semantics so a stock "heating up" is
+        # caught even before its absolute volume ratio crosses the threshold:
+        #   1) absolute: ratio already elevated (>= min_ratio)
+        #   2) acceleration: slope over the window is steep (ratio expanding)
+        #      with a meaningful base (current > 1.0) to avoid trivial noise.
+        #   3) peak: the window's highest ratio spiked (short sudden burst)
+        ratio_ok = current >= (min_ratio - 1e-9)
+        slope_ok = (
+            slope is not None
+            and min_slope > 0
+            and slope_per_5min >= (min_slope - 1e-9)
+            and current > 1.0
+        )
+        peak_ok = peak is not None and min_peak > 0 and peak >= (min_peak - 1e-9)
+
+        if ratio_ok or slope_ok or peak_ok:
+            triggered = True
+            hits = []
+            if ratio_ok:
+                hits.append("量比")
+            if slope_ok:
+                hits.append("斜率")
+            if peak_ok:
+                hits.append("峰值")
+            direction = _format_volume_direction(quote)
+            head = (
+                f"{direction}：{stock_code} 量比 {current:.2f}x"
+                + (f"（窗口峰值 {peak:.2f}x）" if peak is not None else "")
+            )
+            detail = f"，{window} 分钟斜率 +{slope_per_5min:.2f}/5min" if slope_per_5min is not None else ""
             summary = (
-                f"放量预警：{stock_code} 量比 {current:.2f}x，"
-                f"{window} 分钟窗口斜率 +{slope_per_5min:.2f}/5min（阈值 {min_slope:.2f}）"
+                f"{head}{detail}"
+                f"（命中：{'/'.join(hits)}；阈值 量比≥{min_ratio:.2f} 或 斜率≥{min_slope:.2f} 或 峰值≥{min_peak:.2f}）"
             )
         else:
-            summary = (
-                f"量比 {current:.2f}x，斜率 +{slope_per_5min:.2f}/5min（未达阈值 {min_slope:.2f}）"
-            )
+            triggered = False
+            summary = f"量比 {current:.2f}x"
+            if slope_per_5min is not None:
+                summary += f"，斜率 +{slope_per_5min:.2f}/5min"
+            if peak is not None:
+                summary += f"，峰值 {peak:.2f}x"
+            summary += f"（阈值 量比≥{min_ratio:.2f}/斜率≥{min_slope:.2f}/峰值≥{min_peak:.2f}）"
         return RealtimeIndicatorOutcome(
             triggered=triggered,
             summary=summary,

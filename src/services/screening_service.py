@@ -378,6 +378,51 @@ def write_alphasift_screen_cache(
         logger.warning("Failed to write AlphaSift screen cache for %s: %s", strategy, exc)
 
 
+def read_alphasift_screen_cache_on(strategy: str, cache_date: str) -> dict | None:
+    """返回某策略在指定日期 ``cache_date``(YYYY-MM-DD) 的选股缓存；不存在返回 None。"""
+    cache_path = _alphasift_screen_cache_day_path(strategy, cache_date)
+    try:
+        raw = json.loads(cache_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        logger.warning(
+            "Failed to read AlphaSift screen cache %s/%s: %s", strategy, cache_date, exc
+        )
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return raw
+
+
+def read_alphasift_screen_cache_previous(strategy: str) -> dict | None:
+    """返回某策略"昨日"(最新且严格早于今天)的选股缓存；无则返回 None。
+
+    用于"昨日"Tab 展示真实昨日选股，而非当天缓存被当作昨日回测。
+    跨周末/节假日时自动回退到最近一个交易日。
+    """
+    cache_dir = _alphasift_screen_cache_dir(strategy)
+    if not cache_dir.is_dir():
+        return None
+    today = datetime.now(timezone.utc).astimezone().date()
+    dates: list[str] = []
+    for child in cache_dir.iterdir():
+        if (
+            child.is_file()
+            and child.suffix == ".json"
+            and re.match(r"^\d{4}-\d{2}-\d{2}\.json$", child.name)
+        ):
+            try:
+                d = datetime.strptime(child.stem, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if d < today:
+                dates.append(child.stem)
+    if not dates:
+        return None
+    return read_alphasift_screen_cache_on(strategy, max(dates))
+
+
 def compute_selected_days(
     strategy: str,
     codes: Iterable[str],

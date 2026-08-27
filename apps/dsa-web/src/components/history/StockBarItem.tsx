@@ -136,6 +136,7 @@ export const StockBarItemComponent: React.FC<StockBarItemProps> = ({
                 ratio={volumeRatio}
                 changePercent={volumeChangePercent}
                 loading={isVolumeRatioLoading}
+                market={item.marketPhaseSummary?.market}
                 testIdPrefix="history-volume"
               />
             ) : null}

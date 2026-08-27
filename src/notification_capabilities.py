@@ -190,6 +190,15 @@ CHANNEL_PROFILES: Dict[str, ChannelProfile] = {
         supports_link=True,
         notes="OpenClaw 微信通道复用本地 iLink 配对 bot，支持文本与 Markdown 转图。",
     ),
+    "web": ChannelProfile(
+        channel="web",
+        markdown="plain_text",
+        default_mode="plain_fallback",
+        max_text_bytes=4000,
+        supports_image=False,
+        supports_link=False,
+        notes="Web 控制台弹窗通道：进程内 hub 兜底，无需用户配置，仅支持纯文本。",
+    ),
     "unknown": ChannelProfile(
         channel="unknown",
         markdown="plain_text",

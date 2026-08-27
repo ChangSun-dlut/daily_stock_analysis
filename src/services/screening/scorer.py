@@ -123,6 +123,7 @@ _DEFAULT_SCORING_PROFILE = {
     "consolidation_quality_surge_pullback_penalty_slope": 1.0,
     "consolidation_quality_long_bonus_60d": 8.0,
     "consolidation_quality_long_bonus_120d": 15.0,
+    "consolidation_quality_long_bonus_250d": 22.0,
     "consolidation_quality_ma_bullish_bonus": 5.0,
     "consolidation_quality_price_above_ma20_bonus": 3.0,
     # 破位惩罚（横盘蓄势相关）：大阴线 + 倍量柱 + 下穿多条均线
@@ -678,6 +679,9 @@ def _compute_consolidation_quality_score(df: pd.DataFrame, profile: dict[str, fl
     if "consolidation_days_120d" in df.columns:
         c120 = pd.to_numeric(df["consolidation_days_120d"], errors="coerce").fillna(0)
         score += (c120 > 0).astype(float) * profile["consolidation_quality_long_bonus_120d"]
+    if "consolidation_days_250d" in df.columns:
+        c250 = pd.to_numeric(df["consolidation_days_250d"], errors="coerce").fillna(0)
+        score += (c250 > 0).astype(float) * profile["consolidation_quality_long_bonus_250d"]
 
     # 10. MA structure bonus.
     ma_bullish_bonus = profile.get("consolidation_quality_ma_bullish_bonus", 5.0)

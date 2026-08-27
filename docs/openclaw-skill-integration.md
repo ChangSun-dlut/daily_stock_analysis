@@ -20,6 +20,7 @@
 | `/api/v1/analysis/analyze` | POST | 触发分析（主入口） |
 | `/api/v1/analysis/status/{task_id}` | GET | 异步任务状态 |
 | `/api/v1/agent/chat` | POST | Agent 策略问股（需 `AGENT_MODE=true`） |
+| `/api/v1/bot/commands` | GET | 获取 DSA 已打通指令清单 |
 | `/api/health` | GET | 健康检查 |
 
 ### 触发分析请求体
@@ -120,16 +121,17 @@
 ```markdown
 ---
 name: daily-stock-analysis
-description: 调用 daily_stock_analysis API 进行股票智能分析。当用户询问「分析茅台」「analyze AAPL」「帮我看看 600519」等时使用。仅支持股票代码，不支持中文名称。
+description: 调用 daily_stock_analysis API 进行股票智能分析或获取指令菜单。当用户询问「分析茅台」「analyze AAPL」「帮我看看 600519」「dsa命令」「/menu」等时使用。
 metadata:
   {"openclaw": {"requires": {"env": ["DSA_BASE_URL"]}, "primaryEnv": "DSA_BASE_URL"}}
 ---
 
 ## 触发条件
 
-当用户请求分析某只股票时（如「分析茅台」「analyze AAPL」「帮我看看 600519」），使用本 Skill。
+1. **股票分析**：当用户请求分析某只股票时（如「分析茅台」「analyze AAPL」「帮我看看 600519」）。
+2. **指令菜单**：当用户询问 DSA 有哪些命令、怎么用、菜单等（如「/help」「/menu」「dsa命令」「有哪些命令」「指令列表」「功能菜单」）时，调用 `{DSA_BASE_URL}/api/v1/bot/commands` 返回指令清单。
 
-## 工作流程
+## 工作流程（股票分析）
 
 1. **提取股票代码**：从用户消息中识别股票代码（如 600519、AAPL、hk00700）。若用户仅提供中文名称（如「茅台」），需提示用户提供股票代码，或使用常见映射（茅台→600519）。
 2. **调用 API**：向 `{DSA_BASE_URL}/api/v1/analysis/analyze` 发送 POST 请求，请求体：
@@ -144,6 +146,13 @@ metadata:
    - 400：检查 stock_code 格式
    - 409：该股票正在分析中，可稍后重试或查询任务状态
    - 500：提示查看 DSA 日志排查
+
+## 工作流程（指令菜单）
+
+1. **识别意图**：用户消息匹配 `/help`、`/menu`、`dsa命令`、`有哪些命令`、`指令列表`、`功能菜单` 等。
+2. **调用 API**：向 `{DSA_BASE_URL}/api/v1/bot/commands` 发送 GET 请求。
+3. **展示结果**：将响应中的 `markdown` 字段原样展示给用户（已按分组排版，可直接发送到微信）。
+4. **错误处理**：连接失败时提示「检查 DSA 是否运行以及 DSA_BASE_URL」。
 
 ## 股票代码格式
 

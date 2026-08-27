@@ -800,6 +800,34 @@ def _required_daily_fields(filters_config: HardFilterConfig) -> list[str]:
             or filters_config.max_drawdown_20d_pct_max is not None,
         ),
         ("atr_20_pct", filters_config.atr_20_pct_min is not None or filters_config.atr_20_pct_max is not None),
+        (
+            "max_drawdown_60d_pct",
+            filters_config.max_drawdown_60d_pct_min is not None
+            or filters_config.max_drawdown_60d_pct_max is not None,
+        ),
+        (
+            "max_drawdown_120d_pct",
+            filters_config.max_drawdown_120d_pct_min is not None
+            or filters_config.max_drawdown_120d_pct_max is not None,
+        ),
+        (
+            "max_drawdown_250d_pct",
+            filters_config.max_drawdown_250d_pct_min is not None
+            or filters_config.max_drawdown_250d_pct_max is not None,
+        ),
+        (
+            "consolidation_days_250d",
+            filters_config.consolidation_days_250d_min is not None
+            or filters_config.consolidation_days_250d_max is not None,
+        ),
+        (
+            "change_120d",
+            filters_config.change_120d_min is not None or filters_config.change_120d_max is not None,
+        ),
+        (
+            "change_250d",
+            filters_config.change_250d_min is not None or filters_config.change_250d_max is not None,
+        ),
     ]
     return [field for field, enabled in checks if enabled]
 

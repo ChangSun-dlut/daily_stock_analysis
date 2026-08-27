@@ -117,4 +117,4 @@ screening:
     3. 主题热度可以加分，但不要让短线热度覆盖稳定性和估值约束
 
     '
-  max_output: 5
+  max_output: 6

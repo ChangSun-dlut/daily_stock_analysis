@@ -144,4 +144,4 @@ screening:
     6. 切忌追高：当日涨幅 ≥ 7% 或已一字涨停的标的应排除
 
     '
-  max_output: 5
+  max_output: 6

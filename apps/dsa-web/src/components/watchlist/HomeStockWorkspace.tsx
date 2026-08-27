@@ -21,7 +21,7 @@ import type { StockBarItem, TaskInfo } from '../../types/analysis';
 import { getSentimentColor } from '../../types/analysis';
 import { buildDecisionActionLabelMap, getDecisionActionLabel } from '../../utils/decisionAction';
 import { formatDateTime } from '../../utils/format';
-import { areStockCodesEquivalent } from '../../utils/stockCode';
+import { areStockCodesEquivalent, getMarketFromStockCode } from '../../utils/stockCode';
 import { truncateStockName } from '../../utils/stockName';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import type { UiTextKey, UiTextParams } from '../../i18n/uiText';
@@ -201,6 +201,7 @@ const WatchlistRowItem: React.FC<{
               ratio={row.volumeRatio}
               changePercent={row.volumeChangePercent}
               loading={row.isVolumeRatioLoading}
+              market={getMarketFromStockCode(row.code)}
             />
           </div>
           <div className="flex min-w-0 items-center justify-between gap-2 text-[11px]">

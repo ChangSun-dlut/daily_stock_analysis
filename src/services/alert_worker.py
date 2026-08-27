@@ -152,6 +152,7 @@ class AlertWorker:
             try:
                 result = asyncio.run(self.service._evaluate_rule(runtime_rule.rule, monitor, daily_cache=daily_cache))
             except Exception as exc:
+                logger.warning("[AlertWorker] 规则评估异常 %s: %s", runtime_rule.rule.alert_type, exc)
                 result = {
                     "rule_id": self.service._runtime_rule_id(runtime_rule.rule),
                     "record_status": "failed",
@@ -165,6 +166,10 @@ class AlertWorker:
                 }
 
             record_status = result.get("record_status")
+            if record_status == "triggered":
+                logger.info("[AlertWorker] 触发 %s → %s: %s", runtime_rule.rule.alert_type, getattr(runtime_rule.rule, "stock_code", "?"), result.get("message", ""))
+            elif record_status in ("failed", "skipped", "degraded"):
+                logger.debug("[AlertWorker] %s %s: %s", record_status, getattr(runtime_rule.rule, "stock_code", "?"), result.get("message", ""))
             if record_status == "triggered":
                 self._attach_decision_signal_summary_safely(runtime_rule, result)
             if record_status in WRITABLE_TRIGGER_STATUSES:
@@ -658,7 +663,24 @@ class AlertWorker:
         from data_provider.base import DataFetcherManager
 
         manager = DataFetcherManager()
-        for stock_code in targets:
+        stock_codes = list(targets.keys())
+
+        # (1) 1 分钟 K 线独立喂入：以 60s 频率直接走 PytdxFetcher，与下面 300s 的
+        #     spot-quote 量比刷新解耦，且**不依赖 get_realtime_quote 的多源 fallback**
+        #     —— 这是修复「盘中主链路切换后 1 分钟预警消失」的核心。
+        one_min_interval = max(1, int(
+            getattr(config, "volume_spike_rt_1min_feed_interval_seconds", 60)
+        ))
+        last_1min = getattr(self, "_last_1min_kline_refresh", 0.0)
+        if now - last_1min >= one_min_interval:
+            try:
+                manager.refresh_1min_kline_volume_ratios(stock_codes)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("[AlertWorker] 1min kline feed failed: %s", exc)
+            self._last_1min_kline_refresh = now
+
+        # (2) spot-quote 量比按 300s 刷新（维持原有行为）
+        for stock_code in stock_codes:
             try:
                 manager.get_realtime_quote(stock_code)
             except Exception as exc:  # pragma: no cover - defensive

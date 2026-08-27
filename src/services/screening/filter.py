@@ -40,6 +40,18 @@ _DAILY_FILTER_DEFAULTS = {
     "change_5d_min": None,
     "ma_breakdown_count_max": None,
     "mf_net_inflow_5d_min": None,
+    "max_drawdown_60d_pct_min": None,
+    "max_drawdown_60d_pct_max": None,
+    "max_drawdown_120d_pct_min": None,
+    "max_drawdown_120d_pct_max": None,
+    "max_drawdown_250d_pct_min": None,
+    "max_drawdown_250d_pct_max": None,
+    "consolidation_days_250d_min": None,
+    "consolidation_days_250d_max": None,
+    "change_120d_min": None,
+    "change_120d_max": None,
+    "change_250d_min": None,
+    "change_250d_max": None,
 }
 
 
@@ -115,6 +127,22 @@ def apply_hard_filters(df: pd.DataFrame, filters: HardFilterConfig) -> pd.DataFr
     mask = _filter_max(result, mask, ["max_drawdown_20d_pct"], filters.max_drawdown_20d_pct_max)
     mask = _filter_min(result, mask, ["atr_20_pct"], filters.atr_20_pct_min)
     mask = _filter_max(result, mask, ["atr_20_pct"], filters.atr_20_pct_max)
+
+    # 长周期回撤过滤
+    mask = _filter_min(result, mask, ["max_drawdown_60d_pct"], filters.max_drawdown_60d_pct_min)
+    mask = _filter_max(result, mask, ["max_drawdown_60d_pct"], filters.max_drawdown_60d_pct_max)
+    mask = _filter_min(result, mask, ["max_drawdown_120d_pct"], filters.max_drawdown_120d_pct_min)
+    mask = _filter_max(result, mask, ["max_drawdown_120d_pct"], filters.max_drawdown_120d_pct_max)
+    mask = _filter_min(result, mask, ["max_drawdown_250d_pct"], filters.max_drawdown_250d_pct_min)
+    mask = _filter_max(result, mask, ["max_drawdown_250d_pct"], filters.max_drawdown_250d_pct_max)
+    # 长周期横盘天数过滤
+    mask = _filter_min(result, mask, ["consolidation_days_250d"], filters.consolidation_days_250d_min)
+    mask = _filter_max(result, mask, ["consolidation_days_250d"], filters.consolidation_days_250d_max)
+    # 长周期涨幅过滤
+    mask = _filter_min(result, mask, ["change_120d"], filters.change_120d_min)
+    mask = _filter_max(result, mask, ["change_120d"], filters.change_120d_max)
+    mask = _filter_min(result, mask, ["change_250d"], filters.change_250d_min)
+    mask = _filter_max(result, mask, ["change_250d"], filters.change_250d_max)
 
     # 累积破位硬过滤（防"立昂技术"类已放量破位票进候选）
     mask = _filter_min(result, mask, ["change_5d"], filters.change_5d_min)
@@ -227,6 +255,22 @@ def hard_filter_rejection_summary(
     record_min("atr_20_pct_min", ["atr_20_pct"], filters.atr_20_pct_min)
     record_max("atr_20_pct_max", ["atr_20_pct"], filters.atr_20_pct_max)
 
+    # 长周期回撤过滤 rejection summary
+    record_min("max_drawdown_60d_pct_min", ["max_drawdown_60d_pct"], filters.max_drawdown_60d_pct_min)
+    record_max("max_drawdown_60d_pct_max", ["max_drawdown_60d_pct"], filters.max_drawdown_60d_pct_max)
+    record_min("max_drawdown_120d_pct_min", ["max_drawdown_120d_pct"], filters.max_drawdown_120d_pct_min)
+    record_max("max_drawdown_120d_pct_max", ["max_drawdown_120d_pct"], filters.max_drawdown_120d_pct_max)
+    record_min("max_drawdown_250d_pct_min", ["max_drawdown_250d_pct"], filters.max_drawdown_250d_pct_min)
+    record_max("max_drawdown_250d_pct_max", ["max_drawdown_250d_pct"], filters.max_drawdown_250d_pct_max)
+    # 长周期横盘天数过滤 rejection summary
+    record_min("consolidation_days_250d_min", ["consolidation_days_250d"], filters.consolidation_days_250d_min)
+    record_max("consolidation_days_250d_max", ["consolidation_days_250d"], filters.consolidation_days_250d_max)
+    # 长周期涨幅过滤 rejection summary
+    record_min("change_120d_min", ["change_120d"], filters.change_120d_min)
+    record_max("change_120d_max", ["change_120d"], filters.change_120d_max)
+    record_min("change_250d_min", ["change_250d"], filters.change_250d_min)
+    record_max("change_250d_max", ["change_250d"], filters.change_250d_max)
+
     # 累积破位硬过滤 rejection summary
     record_min("change_5d_min", ["change_5d"], filters.change_5d_min)
     record_max("ma_breakdown_count_max", ["ma_breakdown_count"], filters.ma_breakdown_count_max)
@@ -332,6 +376,22 @@ def hard_filter_waterfall(
     record_min("atr_20_pct_min", ["atr_20_pct"], filters.atr_20_pct_min)
     record_max("atr_20_pct_max", ["atr_20_pct"], filters.atr_20_pct_max)
 
+    # 长周期回撤过滤 waterfall
+    record_min("max_drawdown_60d_pct_min", ["max_drawdown_60d_pct"], filters.max_drawdown_60d_pct_min)
+    record_max("max_drawdown_60d_pct_max", ["max_drawdown_60d_pct"], filters.max_drawdown_60d_pct_max)
+    record_min("max_drawdown_120d_pct_min", ["max_drawdown_120d_pct"], filters.max_drawdown_120d_pct_min)
+    record_max("max_drawdown_120d_pct_max", ["max_drawdown_120d_pct"], filters.max_drawdown_120d_pct_max)
+    record_min("max_drawdown_250d_pct_min", ["max_drawdown_250d_pct"], filters.max_drawdown_250d_pct_min)
+    record_max("max_drawdown_250d_pct_max", ["max_drawdown_250d_pct"], filters.max_drawdown_250d_pct_max)
+    # 长周期横盘天数过滤 waterfall
+    record_min("consolidation_days_250d_min", ["consolidation_days_250d"], filters.consolidation_days_250d_min)
+    record_max("consolidation_days_250d_max", ["consolidation_days_250d"], filters.consolidation_days_250d_max)
+    # 长周期涨幅过滤 waterfall
+    record_min("change_120d_min", ["change_120d"], filters.change_120d_min)
+    record_max("change_120d_max", ["change_120d"], filters.change_120d_max)
+    record_min("change_250d_min", ["change_250d"], filters.change_250d_min)
+    record_max("change_250d_max", ["change_250d"], filters.change_250d_max)
+
     return steps
 
 
@@ -362,6 +422,18 @@ def requires_daily_features(filters: HardFilterConfig) -> bool:
         filters.max_drawdown_20d_pct_max is not None,
         filters.atr_20_pct_min is not None,
         filters.atr_20_pct_max is not None,
+        filters.max_drawdown_60d_pct_min is not None,
+        filters.max_drawdown_60d_pct_max is not None,
+        filters.max_drawdown_120d_pct_min is not None,
+        filters.max_drawdown_120d_pct_max is not None,
+        filters.max_drawdown_250d_pct_min is not None,
+        filters.max_drawdown_250d_pct_max is not None,
+        filters.consolidation_days_250d_min is not None,
+        filters.consolidation_days_250d_max is not None,
+        filters.change_120d_min is not None,
+        filters.change_120d_max is not None,
+        filters.change_250d_min is not None,
+        filters.change_250d_max is not None,
     ])
 
 

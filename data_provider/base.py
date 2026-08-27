@@ -1886,10 +1886,92 @@ class DataFetcherManager:
                     get_default_cache().record(code, ratio)
                 except Exception as cache_exc:  # pragma: no cover - defensive
                     logger.debug("[volume_ratio 缓存] %s 写入失败: %s", _qcode, cache_exc)
+            # 1 分钟 K 线增量量比（pytdx 主链路）：用相邻分钟成交量增量得到
+            # 分钟级当量比，让 volume_spike_rt 的斜率/峰值精确到分钟粒度。
+            self._feed_1min_kline_volume_ratio(quote, avg_vol, elapsed_minutes)
             return quote
         except Exception as exc:  # 增强是 best-effort，绝不能影响主流程
             logger.warning("[volume_ratio 自算] %s 异常: %s", _qcode, exc)
             return quote
+
+    def _feed_1min_kline_for_code(self, code, market, avg_daily_volume, elapsed_minutes, at=None):
+        """用 1 分钟 K 线增量量比喂入 realtime_volume_cache（单只股票，best-effort）。
+
+        注意：**直接取 PytdxFetcher 的 1 分钟 K 线接口**，不再要求 ``get_realtime_quote``
+        的主链路 source 是 pytdx。原先强依赖 ``quote.source == "pytdx"``，一旦主链路在
+        盘中偶发 fallback 到 tencent/akshare（pytdx 超时/限流），分钟级数据就会停止
+        喂入、volume_spike_rt 斜率/峰值冻结、盘中预警"消失"。现在解耦后，只要 PytdxFetcher
+        的分钟 K 线接口可用就稳定喂入，与实时行情 source 无关。
+        """
+        try:
+            from src.config import get_config
+            cfg = get_config()
+            if not getattr(cfg, "enable_volume_spike_rt_cache", True):
+                return None
+            if market not in (None, "cn"):  # 仅 A 股
+                return None
+            if not code:
+                return None
+
+            fetcher = self._get_fetcher_by_name("PytdxFetcher", capability="realtime_quote")
+            if fetcher is None or not hasattr(fetcher, "get_intraday_bars"):
+                return None
+            try:
+                bars = fetcher.get_intraday_bars(code, count=240)
+            except Exception as bar_exc:  # pragma: no cover - defensive
+                logger.debug("[1min 量比] %s 取分钟K线失败: %s", code, bar_exc)
+                return None
+            if bars is None or len(bars) == 0:
+                return None
+            from src.services.realtime_volume_cache import get_default_cache
+            ratio = get_default_cache().record_1min_kline(
+                code,
+                bars=bars,
+                avg_daily_volume=avg_daily_volume,
+                elapsed_minutes=elapsed_minutes,
+                at=at,
+            )
+            if ratio is not None:
+                logger.debug("[1min 量比] %s 分钟级量比=%s", code, round(ratio, 4))
+            return ratio
+        except Exception as exc:  # 绝对不能影响主流程
+            logger.debug("[1min 量比] %s 异常: %s", code or "?", exc)
+            return None
+
+    def _feed_1min_kline_volume_ratio(self, quote, avg_daily_volume, elapsed_minutes):
+        """兼容旧调用点：从 quote 取 code/market 后喂入（不再检查 quote.source）。"""
+        market = getattr(quote, "market", None)
+        code = getattr(quote, "code", None)
+        self._feed_1min_kline_for_code(code, market, avg_daily_volume, elapsed_minutes)
+
+    def refresh_1min_kline_volume_ratios(self, stock_codes, config=None):
+        """独立喂入入口：直接以 PytdxFetcher 1 分钟 K 线刷新实时量比缓存。
+
+        供 alert worker 以 **60s** 独立调用，与 spot-quote 量比的 300s 刷新解耦；
+        不依赖 ``get_realtime_quote`` 的多源 fallback，避免主链路切换导致分钟数据
+        中断。best-effort，逐只股票独立 try。
+        """
+        if not stock_codes:
+            return
+        try:
+            from src.config import get_config
+            cfg = config or get_config()
+        except Exception:
+            cfg = None
+        if cfg is not None and not getattr(cfg, "enable_volume_spike_rt_cache", True):
+            return
+        elapsed_minutes = _trading_minutes_elapsed()
+        if elapsed_minutes <= 0:
+            return
+        lookback = int(getattr(cfg, "intraday_volume_ratio_lookback_days", 5) or 5)
+        for code in stock_codes:
+            try:
+                avg = self._get_volume_ratio_5d_avg(code, lookback)
+                if avg is None or avg <= 0:
+                    continue
+                self._feed_1min_kline_for_code(code, "cn", avg, elapsed_minutes)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("[1min 量比] %s 刷新失败: %s", code, exc)
 
     def _get_volume_ratio_5d_avg(self, stock_code: str, lookback_days: int) -> Optional[float]:
         """读取 / 写入 5 日均量缓存。返回 None 表示无数据可用。"""
@@ -2060,7 +2142,17 @@ class DataFetcherManager:
             try:
                 quote = None
                 
-                if source == "efinance":
+                if source == "pytdx":
+                    fetcher = self._get_fetcher_by_name("PytdxFetcher", capability="realtime_quote")
+                    if fetcher is not None and hasattr(fetcher, 'get_realtime_quote'):
+                        record_provider_run_started(
+                            data_type="realtime_quote",
+                            provider=fetcher.name,
+                            operation="get_realtime_quote",
+                        )
+                        quote = self._call_fetcher_method(fetcher, 'get_realtime_quote', raw_stock_code or stock_code)
+
+                elif source == "efinance":
                     fetcher = self._get_fetcher_by_name("EfinanceFetcher", capability="realtime_quote")
                     if fetcher is not None and hasattr(fetcher, 'get_realtime_quote'):
                         record_provider_run_started(

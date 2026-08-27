@@ -8,6 +8,8 @@ import { cn } from '../../utils/cn';
 import { ThemeToggle } from '../theme/ThemeToggle';
 import { UiLanguageToggle } from '../i18n/UiLanguageToggle';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
+import { WebAlertPopups } from '../alerts/WebAlertPopups';
+import { useWebAlertPopups } from '../../hooks/useWebAlertPopups';
 
 type ShellProps = {
   children?: React.ReactNode;
@@ -17,6 +19,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
   const [mobileOpen, setMobileOpen] = useState(false);
   const collapsed = false;
   const { t } = useUiLanguage();
+  const { pendingItems, dismiss } = useWebAlertPopups();
 
   useEffect(() => {
     if (!mobileOpen) {
@@ -79,6 +82,8 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       >
         <SidebarNav onNavigate={() => setMobileOpen(false)} />
       </Drawer>
+
+      <WebAlertPopups items={pendingItems} onDismiss={dismiss} />
     </div>
   );
 };

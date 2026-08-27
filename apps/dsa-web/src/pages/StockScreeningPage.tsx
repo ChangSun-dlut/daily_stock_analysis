@@ -48,11 +48,13 @@ import {
   type AlphaSiftSectorRotationResponse,
   type AlphaSiftStrategy,
   type BacktestResponse,
+  type YesterdayBacktestCandidate,
   type YesterdayBacktestResponse,
 } from '../api/alphasift';
 import { formatParsedApiError, getParsedApiError, toApiErrorMessage, type ParsedApiError } from '../api/error';
 import { cn } from '../utils/cn';
 import { AppPage, Button, InlineAlert } from '../components/common';
+import { useWatchlist } from '../hooks/useWatchlist';
 
 const MARKETS = [{ id: 'cn', label: 'A 股' }];
 const SCREEN_TASK_STORAGE_KEY = 'dsa.alphasift.activeScreenTask.v1';
@@ -91,7 +93,7 @@ const readPersistedScreenTask = (): PersistedScreenTask | null => {
       taskId: parsed.taskId,
       market: typeof parsed.market === 'string' && parsed.market.trim() ? parsed.market : 'cn',
       strategy: typeof parsed.strategy === 'string' && parsed.strategy.trim() ? parsed.strategy : 'dual_low',
-      maxResults: Number.isFinite(restoredMaxResults) ? Math.min(100, Math.max(1, restoredMaxResults)) : 3,
+      maxResults: Number.isFinite(restoredMaxResults) ? Math.min(100, Math.max(1, restoredMaxResults)) : 6,
     };
   } catch {
     return null;
@@ -209,6 +211,31 @@ const formatPercent = (value: unknown) => {
     return '-';
   }
   return `${(Number(value) * 100).toFixed(0)}%`;
+};
+
+// 昨日强势股判定：收盘涨幅 ≥5% 或盘中触及涨停。
+// 涨停阈值按板块区分：科创/创业板 20%，北交所 30%，主板 10%。
+const getLimitUpThreshold = (code: string): number => {
+  if (/^(688|689|30)/.test(code)) return 19.9;
+  if (/^[84]/.test(code)) return 29.9;
+  return 9.9;
+};
+
+const isYesterdayHighlight = (item: YesterdayBacktestCandidate): boolean => {
+  if (item.error) return false;
+  if (item.todayReturnPct >= 5) return true;
+  return item.todayHighReturnPct >= getLimitUpThreshold(item.code);
+};
+
+const getYesterdayHighlightLabel = (item: YesterdayBacktestCandidate): { text: string; className: string } => {
+  const limitUp = getLimitUpThreshold(item.code);
+  if (item.todayHighReturnPct >= limitUp) {
+    return { text: '涨停', className: 'bg-rose/10 text-rose' };
+  }
+  if (item.todayReturnPct >= 5) {
+    return { text: '涨≥5%', className: 'bg-emerald/10 text-emerald' };
+  }
+  return { text: '强势', className: 'bg-cyan/10 text-cyan' };
 };
 
 const getCandidateReason = (item: AlphaSiftCandidate) => {
@@ -710,7 +737,7 @@ const StockScreeningPage: React.FC = () => {
   const [market, setMarket] = useState(restoredCache?.market || restoredTask?.market || 'cn');
   const [strategy, setStrategy] = useState(restoredCache?.strategy || restoredTask?.strategy || 'dual_low');
   const [strategies, setStrategies] = useState<AlphaSiftStrategy[]>([]);
-  const [maxResults, setMaxResults] = useState(restoredTask?.maxResults || 3);
+  const [maxResults, setMaxResults] = useState(restoredTask?.maxResults || 6);
   const [candidates, setCandidates] = useState<AlphaSiftCandidate[]>(restoredCache?.candidates || []);
   const [screenCacheTime, setScreenCacheTime] = useState<string | null>(restoredCache?.cachedAt || null);
   const [hotspots, setHotspots] = useState<AlphaSiftHotspot[]>([]);
@@ -741,7 +768,7 @@ const StockScreeningPage: React.FC = () => {
   const [hotspotError, setHotspotError] = useState('');
   const [screenMeta, setScreenMeta] = useState<AlphaSiftScreenResponse | null>(null);
   const [expandedCode, setExpandedCode] = useState<string | null>(restoredCache?.candidates?.[0]?.code ?? null);
-  const [viewMode, setViewMode] = useState<'list' | 'industry' | 'llmSector'>('list');
+  const [viewMode, setViewMode] = useState<'list' | 'industry' | 'llmSector' | 'yesterday'>('list');
   const [loading, setLoading] = useState(Boolean(restoredTask?.taskId));
   const [enabling, setEnabling] = useState(false);
   const [loadingStrategies, setLoadingStrategies] = useState(false);
@@ -759,6 +786,12 @@ const StockScreeningPage: React.FC = () => {
   const [yesterdayLoading, setYesterdayLoading] = useState(false);
   const [yesterdayResult, setYesterdayResult] = useState<YesterdayBacktestResponse | null>(null);
   const [yesterdayError, setYesterdayError] = useState('');
+  // 标记昨日 Tab 的数据来源：true=真实昨日选股；false=回退到今日选股缓存
+  const [yesterdayFromHistory, setYesterdayFromHistory] = useState(false);
+  const [yesterdayHistoryDate, setYesterdayHistoryDate] = useState<string | null>(null);
+  const yesterdayRequestIdRef = useRef(0);
+
+  const { isInWatchlist, addToWatchlist, isActioning } = useWatchlist();
 
   const selectedStrategy = useMemo(() => strategies.find((item) => item.id === strategy), [strategies, strategy]);
   const selectedStrategyTitle = selectedStrategy?.name || selectedStrategy?.title || '自定义策略';
@@ -775,7 +808,7 @@ const StockScreeningPage: React.FC = () => {
   const statusText = isScreeningEnabled ? '选股已开启' : '选股未开启';
 
   const groupedCandidates = useMemo(() => {
-    if (viewMode === 'list') return null;
+    if (viewMode === 'list' || viewMode === 'yesterday') return null;
     const groupKey: keyof AlphaSiftCandidate = viewMode === 'industry' ? 'industry' : 'llmSector';
     const groups = new Map<string, AlphaSiftCandidate[]>();
     for (const item of candidates) {
@@ -791,9 +824,28 @@ const StockScreeningPage: React.FC = () => {
     });
   }, [candidates, viewMode]);
 
+  // 昨日强势股：收盘涨幅 ≥5% 或盘中触及涨停。
+  const yesterdayHighlights = useMemo(() => {
+    if (!yesterdayResult?.candidates?.length) return [];
+    return yesterdayResult.candidates.filter(isYesterdayHighlight).sort((a, b) => {
+      // 优先按最高涨幅、再按收盘涨幅降序
+      const highDiff = b.todayHighReturnPct - a.todayHighReturnPct;
+      if (Math.abs(highDiff) > 0.001) return highDiff;
+      return b.todayReturnPct - a.todayReturnPct;
+    });
+  }, [yesterdayResult]);
+
+  const clearYesterdayState = useCallback(() => {
+    yesterdayRequestIdRef.current += 1;
+    setYesterdayResult(null);
+    setYesterdayError('');
+    setYesterdayLoading(false);
+  }, []);
+
   const applyScreenResult = useCallback((result: AlphaSiftScreenResponse) => {
     const nextCandidates = result.candidates || [];
     const now = new Date().toISOString();
+    clearYesterdayState();
     setScreenMeta(result);
     setCandidates(nextCandidates);
     setExpandedCode(nextCandidates[0]?.code ?? null);
@@ -804,9 +856,10 @@ const StockScreeningPage: React.FC = () => {
       cachedAt: now,
       candidates: nextCandidates,
     });
-  }, [strategy, market]);
+  }, [strategy, market, clearYesterdayState]);
 
   const clearScreeningResults = () => {
+    clearYesterdayState();
     setCandidates([]);
     setScreenMeta(null);
     setExpandedCode(null);
@@ -1169,25 +1222,27 @@ const StockScreeningPage: React.FC = () => {
       setTaskMessage(task.message || '');
 
       if (task.status === 'completed') {
-        if (task.result) {
-          applyScreenResult(task.result);
-          setError('');
-        } else {
-          setError('选股任务已完成，但服务端未返回候选结果。');
-          setCandidates([]);
-          setScreenMeta(null);
-        }
-        finishTask();
-        return;
+      if (task.result) {
+        applyScreenResult(task.result);
+        setError('');
+      } else {
+        setError('选股任务已完成，但服务端未返回候选结果。');
+        clearYesterdayState();
+        setCandidates([]);
+        setScreenMeta(null);
+      }
+      finishTask();
+      return;
       }
 
       if (task.status === 'failed') {
-        setCandidates([]);
-        setScreenMeta(null);
-        setExpandedCode(null);
-        setError(formatScreenTaskFailure(task.error || task.message));
-        finishTask();
-        return;
+      clearYesterdayState();
+      setCandidates([]);
+      setScreenMeta(null);
+      setExpandedCode(null);
+      setError(formatScreenTaskFailure(task.error || task.message));
+      finishTask();
+      return;
       }
 
       if (isRunningScreenTask(task.status)) {
@@ -1214,6 +1269,7 @@ const StockScreeningPage: React.FC = () => {
         const parsedError = getParsedApiError(err);
         if (isUnrecoverableScreenTaskError(parsedError)) {
           setError(formatParsedApiError(parsedError) || '选股任务不可恢复，请重新提交。');
+          clearYesterdayState();
           setCandidates([]);
           setScreenMeta(null);
           finishTask();
@@ -1233,7 +1289,7 @@ const StockScreeningPage: React.FC = () => {
         window.clearTimeout(timer);
       }
     };
-  }, [activeTaskId, applyScreenResult]);
+  }, [activeTaskId, applyScreenResult, clearYesterdayState]);
 
   const handleEnable = async () => {
     setEnabling(true);
@@ -1270,8 +1326,7 @@ const StockScreeningPage: React.FC = () => {
     setBacktestLoading(true);
     setBacktestError('');
     setBacktestResult(null);
-    setYesterdayResult(null);
-    setYesterdayError('');
+    clearYesterdayState();
     try {
       const resp = await alphasiftApi.backtest({
         strategy,
@@ -1309,6 +1364,93 @@ const StockScreeningPage: React.FC = () => {
     }
   };
 
+  // 昨日 tab 自动加载：
+  //  1) 优先读取"昨天真实选股"缓存（screencache/{strategy}/{昨日}.json），回测这些票今天表现；
+  //  2) 若无昨日记录（如周末未选股、该策略首次运行），回退到当前缓存(今日选股)回测并提示。
+  // 注意：后端以数据里倒数第二天为信号日(昨天)、最后一天为今天，price 仅作参考；这里传 null，
+  // 让后端用昨天收盘价作为信号基准，避免把当前实时价误当成"信号价"。
+  const handleYesterdayAutoLoad = useCallback(async () => {
+    const activeStrategy = strategy || restoredCache?.strategy || 'dual_low';
+    const requestId = (yesterdayRequestIdRef.current += 1);
+    setYesterdayLoading(true);
+    setYesterdayError('');
+    setYesterdayFromHistory(false);
+    setYesterdayHistoryDate(null);
+
+    // 1) 读取真实昨日选股
+    let payloadCandidates: Array<{ code: string; name: string; price: null }> = [];
+    let fromHistory = false;
+    try {
+      const history = await alphasiftApi.getScreenHistory({ strategy: activeStrategy });
+      if (requestId !== yesterdayRequestIdRef.current) return;
+      if (history.available && history.candidates && history.candidates.length > 0) {
+        payloadCandidates = history.candidates.map((c) => ({
+          code: c.code,
+          name: c.name ?? c.code,
+          price: null,
+        }));
+        fromHistory = true;
+        setYesterdayHistoryDate(history.date ?? null);
+      } else if (candidates.length > 0) {
+        // 2) 回退：用当前缓存(今日选股)
+        payloadCandidates = candidates.map((c) => ({
+          code: c.code,
+          name: c.name ?? c.code,
+          price: null,
+        }));
+      }
+    } catch (err) {
+      if (requestId !== yesterdayRequestIdRef.current) return;
+      // 历史接口异常时，仍能回退到当前缓存
+      if (candidates.length > 0) {
+        payloadCandidates = candidates.map((c) => ({
+          code: c.code,
+          name: c.name ?? c.code,
+          price: null,
+        }));
+      } else {
+        setYesterdayResult(null);
+        setYesterdayError(err instanceof Error ? err.message : '昨日选股读取失败');
+        setYesterdayLoading(false);
+        console.error('昨日选股读取失败', err);
+        return;
+      }
+    }
+
+    if (payloadCandidates.length === 0) {
+      setYesterdayResult(null);
+      setYesterdayError('');
+      setYesterdayLoading(false);
+      return;
+    }
+
+    setYesterdayFromHistory(fromHistory);
+    try {
+      const yesterdayResp = await alphasiftApi.backtestYesterday({
+        strategy: activeStrategy,
+        candidates: payloadCandidates,
+      });
+      if (requestId !== yesterdayRequestIdRef.current) return;
+      setYesterdayResult(yesterdayResp);
+    } catch (err) {
+      if (requestId !== yesterdayRequestIdRef.current) return;
+      setYesterdayResult(null);
+      setYesterdayError(err instanceof Error ? err.message : '昨日复盘请求失败');
+      console.error('昨日回测自动加载失败', err);
+    } finally {
+      if (requestId === yesterdayRequestIdRef.current) {
+        setYesterdayLoading(false);
+      }
+    }
+  }, [candidates, strategy, restoredCache]);
+
+  // 切换到昨日 tab 或选股结果/策略变化时自动触发加载；切离/清理后旧请求会被 requestId 护栏忽略。
+  useEffect(() => {
+    if (viewMode === 'yesterday') {
+      handleYesterdayAutoLoad();
+    }
+  }, [viewMode, handleYesterdayAutoLoad]);
+
   const handleMarketChange = (nextMarket: string) => {
     if (nextMarket !== market) {
       clearScreeningResults();
@@ -1341,6 +1483,7 @@ const StockScreeningPage: React.FC = () => {
       setTaskProgress(0);
       setTaskMessage(task.message || 'AlphaSift 选股任务已提交');
     } catch (err) {
+      clearYesterdayState();
       setCandidates([]);
       setLoading(false);
       setError(toApiErrorMessage(err, '选股任务提交失败，请稍后重试。'));
@@ -2061,6 +2204,7 @@ const StockScreeningPage: React.FC = () => {
                   ['list', '列表'],
                   ['industry', '按行业'],
                   ['llmSector', '按板块'],
+                  ['yesterday', `昨日${yesterdayHighlights.length > 0 ? ` (${yesterdayHighlights.length})` : ''}`],
                 ] as const).map(([mode, label]) => (
                   <button
                     key={mode}
@@ -2170,11 +2314,13 @@ const StockScreeningPage: React.FC = () => {
                   <th className="px-4 py-3 font-semibold">LLM</th>
                   <th className="px-4 py-3 font-semibold">风险</th>
                   <th className="px-4 py-3 font-semibold">详情</th>
-                </tr>
-              </thead>
-              <tbody>
-                {candidates.map((item) => {
-                  const expanded = expandedCode === item.code;
+                  <th className="px-4 py-3 font-semibold">自选</th>
+                  </tr>
+                  </thead>
+                  <tbody>
+                  {candidates.map((item) => {
+                    const expanded = expandedCode === item.code;
+                    const alreadyInWatchlist = isInWatchlist(item.code);
                   const factors = getFactorEntries(item);
                   const llmInsightAvailable = hasLlmInsight(item);
                   const llmFallbackText =
@@ -2211,10 +2357,36 @@ const StockScreeningPage: React.FC = () => {
                             {expanded ? '收起' : '展开查看'}
                           </button>
                         </td>
+                        <td className="px-4 py-3">
+                          <button
+                            type="button"
+                            disabled={alreadyInWatchlist || isActioning}
+                            onClick={() => addToWatchlist(item.code)}
+                            className={cn(
+                              'inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold transition-colors',
+                              alreadyInWatchlist
+                                ? 'bg-success/15 text-success cursor-default'
+                                : 'bg-cyan/15 text-cyan hover:bg-cyan/25 disabled:cursor-not-allowed disabled:opacity-50'
+                            )}
+                            data-testid={`stock-screening-add-watchlist-${item.code}`}
+                          >
+                            {alreadyInWatchlist ? (
+                              <>
+                                <CheckCircle2 className="h-3.5 w-3.5" />
+                                已加自选
+                              </>
+                            ) : (
+                              <>
+                                <PlusCircle className="h-3.5 w-3.5" />
+                                加入自选
+                              </>
+                            )}
+                          </button>
+                        </td>
                       </tr>
                       {expanded ? (
                         <tr className="border-t border-border bg-surface/45">
-                          <td colSpan={10} className="px-4 py-4">
+                          <td colSpan={12} className="px-4 py-4">
                             <div className="grid gap-4 lg:grid-cols-[1.1fr_1fr]">
                               <div className="space-y-3">
                                 <div>
@@ -2359,6 +2531,128 @@ const StockScreeningPage: React.FC = () => {
                 })}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {/* ——— 昨日强势（涨停 / 涨幅≥5%）视图 ——— */}
+        {viewMode === 'yesterday' && (
+          <div className="overflow-hidden rounded-xl border border-border">
+            {yesterdayLoading ? (
+              <div className="bg-surface/70 px-5 py-10 text-center">
+                <div className="mx-auto mb-3 h-6 w-6 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
+                <p className="text-sm font-medium text-foreground">正在加载昨日选股并计算今日涨幅…</p>
+                <p className="mt-2 text-sm text-secondary-text">
+                  正在读取该策略的历史选股记录并回测今日表现。
+                </p>
+              </div>
+            ) : !yesterdayResult || yesterdayResult.candidates.length === 0 ? (
+              <div className="bg-surface/70 px-5 py-10 text-center">
+                {yesterdayError ? (
+                  <InlineAlert variant="warning" message={`昨日复盘加载失败：${yesterdayError}`} />
+                ) : (
+                  <>
+                    <p className="text-sm font-medium text-foreground">暂无可回测的昨日标的</p>
+                    <p className="mt-2 text-sm text-secondary-text">
+                      {candidates.length === 0
+                        ? '暂无选股结果。运行选股后，昨日选股会自动加载并展示今日表现。'
+                        : '昨日复盘结果已清空。重新计算或切换回「昨日」Tab 后会自动加载。'}
+                    </p>
+                  </>
+                )}
+              </div>
+            ) : (
+              <>
+                {yesterdayError && (
+                  <div className="bg-surface/70 px-5 py-3">
+                    <InlineAlert variant="warning" message={`昨日复盘加载失败：${yesterdayError}`} />
+                  </div>
+                )}
+                <div className="flex items-center justify-between bg-surface/70 px-5 py-3">
+                  <p className="text-sm font-medium text-foreground">
+                    昨日选出的票 · 今日表现
+                    <span className="ml-2 text-secondary-text">
+                      共 {yesterdayResult.candidates.length} 只，达标 {yesterdayHighlights.length} 只
+                    </span>
+                    {yesterdayFromHistory ? (
+                      <span className="ml-2 rounded-full border border-emerald/30 bg-emerald/10 px-2 py-0.5 text-xs font-medium text-emerald">
+                        真实昨日选股{yesterdayHistoryDate ? `（${yesterdayHistoryDate}）` : ''}
+                      </span>
+                    ) : (
+                      <span className="ml-2 rounded-full border border-amber/30 bg-amber/10 px-2 py-0.5 text-xs font-medium text-amber" title="未找到该策略昨日选股记录，以下为今日选股回测">
+                        回退：今日选股回测
+                      </span>
+                    )}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleYesterdayAutoLoad}
+                    className="rounded-lg border border-border px-3 py-1.5 text-xs text-secondary-text transition-colors hover:bg-hover/50 hover:text-foreground"
+                  >
+                    重新计算
+                  </button>
+                </div>
+                <p className="bg-surface/40 px-5 py-2 text-xs text-secondary-text">
+                  {yesterdayFromHistory
+                    ? `信号日 = ${yesterdayResult.signalDate || '昨日'}（真实昨日选股对应的交易日），信号价 = 昨日收盘价；今收 / 收盘涨幅 / 最高涨幅 = 这些票今天的实际表现。`
+                    : '未找到该策略昨日的真实选股记录（如周末未选股或首次运行），以下为「今日选股」回测其今日表现，仅供参考。'}
+                </p>
+                <table className="w-full min-w-[720px] border-collapse text-sm">
+                  <thead className="bg-surface text-left text-xs text-secondary-text">
+                    <tr>
+                      <th className="w-14 px-4 py-3 font-semibold">#</th>
+                      <th className="px-4 py-3 font-semibold">代码</th>
+                      <th className="px-4 py-3 font-semibold">名称</th>
+                      <th className="px-4 py-3 font-semibold">信号日</th>
+                      <th className="px-4 py-3 font-semibold">信号价</th>
+                      <th className="px-4 py-3 font-semibold">今收</th>
+                      <th className="px-4 py-3 font-semibold">收盘涨幅</th>
+                      <th className="px-4 py-3 font-semibold">最高涨幅</th>
+                      <th className="px-4 py-3 font-semibold">状态</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {yesterdayResult.candidates.map((item, index) => {
+                      const badge = getYesterdayHighlightLabel(item);
+                      const highlight = isYesterdayHighlight(item);
+                      const limitUp = getLimitUpThreshold(item.code);
+                      const isLimitUp = !item.error && item.todayHighReturnPct >= limitUp;
+                      const rowClass = highlight
+                        ? isLimitUp
+                          ? 'border-t border-rose/40 bg-rose/5 animate-pulse-glow'
+                          : 'border-t border-emerald/40 bg-emerald/5'
+                        : 'border-t border-border align-top transition-colors hover:bg-hover/50';
+                      return (
+                        <tr key={item.code} className={cn('align-top', rowClass)}>
+                          <td className="px-4 py-3 text-secondary-text">{index + 1}</td>
+                          <td className="px-4 py-3 font-mono font-semibold text-foreground">{item.code}</td>
+                          <td className="px-4 py-3 font-semibold text-foreground">{item.name || '-'}</td>
+                          <td className="px-4 py-3 text-secondary-text">{item.signalDate}</td>
+                          <td className="px-4 py-3 text-secondary-text">{formatNumber(item.signalPrice)}</td>
+                          <td className="px-4 py-3 text-secondary-text">{formatNumber(item.todayClose)}</td>
+                          <td className={cn('px-4 py-3 font-semibold', item.todayReturnPct >= 0 ? 'text-emerald' : 'text-rose')}>
+                            {item.error ? '—' : `${formatNumber(item.todayReturnPct)}%`}
+                          </td>
+                          <td className={cn('px-4 py-3 font-semibold', item.todayHighReturnPct >= 0 ? 'text-emerald' : 'text-rose')}>
+                            {item.error ? '—' : `${formatNumber(item.todayHighReturnPct)}%`}
+                          </td>
+                          <td className="px-4 py-3">
+                            {item.error ? (
+                              <span className="rounded-lg bg-rose/10 px-2.5 py-1 text-xs font-semibold text-rose">
+                                回测失败
+                              </span>
+                            ) : (
+                              <span className={cn('rounded-lg px-2.5 py-1 text-xs font-semibold', badge.className)}>
+                                {badge.text}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </>
+            )}
           </div>
         )}
       </>

@@ -400,34 +400,45 @@ export const systemConfigApi = {
   ): Promise<Map<string, WatchlistSpotQuoteView>> => {
     const result = new Map<string, WatchlistSpotQuoteView>();
     if (!codes.length) return result;
+    // 分批调用：后端 WatchlistSpotQuotesRequest.codes 有长度上限（默认 300），
+    // 历史栏常 >50 只，单次超限会 422 被当“无数据”清空；分批也避免大列表单次
+    // 请求超过 axios 30s 超时。批大小取 40，留足余量。
+    const BATCH_SIZE = 40;
+    const uniqueCodes = Array.from(new Set(codes));
     try {
-      const response = await apiClient.post<Record<string, unknown>>(
-        '/api/v1/stocks/watchlist/spot-quotes',
-        { codes },
-      );
-      const data = toCamelCase<{
-        quotes: Array<{
-          stockCode: string;
-          quote: WatchlistQuotePayload | null;
-          error: string | null;
-        }>;
-      }>(response.data);
-      for (const item of data.quotes || []) {
-        if (!item || !item.stockCode) continue;
-        // Use a normalized key so the Map can be looked up by either the
-        // raw backend value (``000966.SZ``) or any other canonicalization
-        // the caller passes through ``HomePage.getStockCodeKey()``.
-        const key = normalizeStockCode(item.stockCode).toUpperCase();
-        if (!key) continue;
-        result.set(key, {
-          volumeRatio: item.quote?.volumeRatio ?? null,
-          changePercent: item.quote?.changePercent ?? null,
-          amount: item.quote?.amount ?? null,
-          error: item.error ?? null,
-        });
+      for (let i = 0; i < uniqueCodes.length; i += BATCH_SIZE) {
+        const chunk = uniqueCodes.slice(i, i + BATCH_SIZE);
+        const response = await apiClient.post<Record<string, unknown>>(
+          '/api/v1/stocks/watchlist/spot-quotes',
+          { codes: chunk },
+        );
+        const data = toCamelCase<{
+          quotes: Array<{
+            stockCode: string;
+            quote: WatchlistQuotePayload | null;
+            error: string | null;
+          }>;
+        }>(response.data);
+        for (const item of data.quotes || []) {
+          if (!item || !item.stockCode) continue;
+          // Use a normalized key so the Map can be looked up by either the
+          // raw backend value (``000966.SZ``) or any other canonicalization
+          // the caller passes through ``HomePage.getStockCodeKey()``.
+          const key = normalizeStockCode(item.stockCode).toUpperCase();
+          if (!key) continue;
+          result.set(key, {
+            volumeRatio: item.quote?.volumeRatio ?? null,
+            changePercent: item.quote?.changePercent ?? null,
+            amount: item.quote?.amount ?? null,
+            error: item.error ?? null,
+          });
+        }
       }
-    } catch {
-      // 整批失败：返回空 map，调用方按无数据渲染（不阻塞页面）
+    } catch (error) {
+      // 不再静默吞掉：整批/分片请求失败（网络/超时/校验错误）时向上抛出，
+      // 由调用方保留上次成功的数据，避免被空 Map 覆盖导致全部显示「暂无」。
+      console.error('批量获取自选股实时行情失败:', error);
+      throw error;
     }
     return result;
   },

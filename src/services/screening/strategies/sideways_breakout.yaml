@@ -16,7 +16,7 @@
 name: sideways_breakout
 display_name: 横盘蓄势突破
 description: 参考澳洋健康标准横盘突破模式：长期窄幅横盘 + 均线高度粘合 + 缩量蓄势，等待放量突破。核心加权"连续蓄势天数"，蓄势越久突破越可靠。
-version: "1.0"
+version: "2.0"
 category: trend
 tags: [breakout, consolidation, accumulation, sideways]
 style:
@@ -65,6 +65,16 @@ screening:
     max_drawdown_20d_pct_max: null
     atr_20_pct_min: null
 
+    # === 长周期横盘/回撤硬过滤（v2.0 新增，用于捕捉"横盘超久"标的）====
+    # 注：以下字段依赖 daily K-line，启用后会触发 daily 特征计算。
+    # 长周期回撤上限（负值，越负表示跌幅越大）
+    max_drawdown_60d_pct_min: -10.0
+    max_drawdown_120d_pct_min: -15.0
+    max_drawdown_250d_pct_min: -25.0
+    # 长周期涨幅上限（防止已大幅上涨的票进入横盘候选）
+    change_120d_max: 20.0
+    change_250d_max: 30.0
+
   tech_weight: 0.60
   factor_weights:
     consolidation_quality: 0.30       # 横盘蓄势质量（连续天数主导）
@@ -92,6 +102,7 @@ screening:
     consolidation_quality_days_ideal: 8.0
     consolidation_quality_days_slope: 4.0
     consolidation_quality_range_ideal_max: 12.0
+    consolidation_quality_long_bonus_250d: 22.0
 
   risk_profile:
     chase_change_pct: 7.0
@@ -125,4 +136,4 @@ screening:
     4. 收盘站上 MA5，且距 60 日低点涨幅 ≤ 30%（还没涨完）
     5. 当日量比温和放大（1.2-1.5）的蓄势末期信号加分
     6. 切忌追高：当日涨幅 ≥ 7% 或已一字涨停的标的应排除
-  max_output: 5
+  max_output: 6

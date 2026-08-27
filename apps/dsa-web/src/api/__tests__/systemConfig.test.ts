@@ -451,5 +451,24 @@ describe('systemConfigApi', () => {
       expect(map.get('002092')?.volumeRatio).toBeNull();
       expect(map.get('002092')?.error).toBe('realtime_fetch_failed');
     });
+
+    it('rejects when the request fails instead of returning an empty map', async () => {
+      post.mockRejectedValueOnce(new Error('network down'));
+      await expect(
+        systemConfigApi.fetchWatchlistSpotQuotes(['000966.SZ']),
+      ).rejects.toThrow('network down');
+    });
+
+    it('batches codes into chunks of 40 to avoid backend 422 / client timeout', async () => {
+      post.mockResolvedValue({ data: { quotes: [] } });
+      const codes = Array.from({ length: 90 }, (_, i) => `${String(i).padStart(6, '0')}.SZ`);
+      const map = await systemConfigApi.fetchWatchlistSpotQuotes(codes);
+      // 90 只 -> 3 批（40 / 40 / 10）
+      expect(post).toHaveBeenCalledTimes(3);
+      for (const call of post.mock.calls) {
+        expect((call[1] as { codes: string[] }).codes.length).toBeLessThanOrEqual(40);
+      }
+      expect(map.size).toBe(0);
+    });
   });
 });

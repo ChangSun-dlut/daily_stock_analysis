@@ -18,6 +18,7 @@ from api.v1.endpoints import (
     analysis,
     auth,
     backtest,
+    bot,
     decision_signals,
     health,
     history,
@@ -113,4 +114,10 @@ router.include_router(
 router.include_router(
     health.router,
     tags=["Health"]
+)
+
+router.include_router(
+    bot.router,
+    prefix="/bot",
+    tags=["Bot"]
 )

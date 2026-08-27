@@ -260,3 +260,24 @@ def list_notifications(
         )
     except Exception as exc:
         raise _internal_error("List alert notifications failed", exc)
+
+
+@router.get(
+    "/web-popups",
+    responses={500: {"model": ErrorResponse}},
+    summary="List recent web popup alerts (frontend polling fallback)",
+)
+def list_web_popups(
+    since: int = Query(0, ge=0, description="Only return alerts with id greater than this"),
+) -> dict:
+    """Return web popup alerts for the dashboard to render as toasts/modals.
+
+    Used as a fallback for primary push channels (e.g. WeChat). The frontend
+    polls this endpoint and shows new alerts as popups.
+    """
+    from src.services.web_alert_hub import get_web_alert_hub
+
+    hub = get_web_alert_hub()
+    alerts = hub.get_since(int(since)) if since > 0 else hub.get_all()
+    return {"items": [a.to_dict() for a in alerts], "latest_id": hub._seq}
+

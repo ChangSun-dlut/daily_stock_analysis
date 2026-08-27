@@ -38,6 +38,7 @@ from .base import (
     normalize_stock_code,
     _is_hk_market,
 )
+from .realtime_types import UnifiedRealtimeQuote, RealtimeSource, safe_float
 import os
 
 logger = logging.getLogger(__name__)
@@ -117,8 +118,10 @@ class PytdxFetcher(BaseFetcher):
     name = "PytdxFetcher"
     priority = int(os.getenv("PYTDX_PRIORITY", "2"))
     
-    # 默认通达信行情服务器列表
+    # 默认通达信行情服务器列表（公开行情服务器，可能随网络/地域失效，可用
+    # PYTDX_SERVERS 覆盖为自己的可用清单）
     DEFAULT_HOSTS = [
+        ("115.238.90.165", 7709),  # 浙江（实测可用）
         ("119.147.212.81", 7709),  # 深圳
         ("112.74.214.43", 7727),   # 深圳
         ("221.231.141.60", 7709),  # 上海
@@ -452,15 +455,12 @@ class PytdxFetcher(BaseFetcher):
         
         return None
     
-    def get_realtime_quote(self, stock_code: str) -> Optional[dict]:
+    def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """
-        获取实时行情
-        
-        Args:
-            stock_code: 股票代码
-            
-        Returns:
-            实时行情数据字典，失败返回 None
+        获取实时行情（无需 Token，直连券商行情服务器）。
+
+        返回 UnifiedRealtimeQuote；失败时抛出 DataSourceUnavailableError（供上层熔断/降级）
+        或返回 None（具体异常）。volume 为当日累计成交量（股）。
         """
         if is_bse_code(stock_code):
             raise DataFetchError(
@@ -468,28 +468,63 @@ class PytdxFetcher(BaseFetcher):
             )
         try:
             market, code = self._get_market_code(stock_code)
-            
+
             with self._pytdx_session() as api:
                 data = api.get_security_quotes([(market, code)])
-                
+
                 if data and len(data) > 0:
                     quote = data[0]
-                    return {
-                        'code': stock_code,
-                        'name': quote.get('name', ''),
-                        'price': quote.get('price', 0),
-                        'open': quote.get('open', 0),
-                        'high': quote.get('high', 0),
-                        'low': quote.get('low', 0),
-                        'pre_close': quote.get('last_close', 0),
-                        'volume': quote.get('vol', 0),
-                        'amount': quote.get('amount', 0),
-                        'bid_prices': [quote.get(f'bid{i}', 0) for i in range(1, 6)],
-                        'ask_prices': [quote.get(f'ask{i}', 0) for i in range(1, 6)],
-                    }
+                    return UnifiedRealtimeQuote(
+                        code=stock_code,
+                        name=quote.get("name") or "",
+                        source=RealtimeSource.PYTDX,
+                        price=safe_float(quote.get("price")),
+                        open_price=safe_float(quote.get("open")),
+                        high=safe_float(quote.get("high")),
+                        low=safe_float(quote.get("low")),
+                        pre_close=safe_float(quote.get("last_close")),
+                        volume=safe_float(quote.get("vol")),
+                        amount=safe_float(quote.get("amount")),
+                        provider_timestamp=quote.get("datetime"),
+                    )
+        except DataSourceUnavailableError:
+            raise
         except Exception as e:
             logger.warning(f"Pytdx 获取实时行情失败 {stock_code}: {e}")
-        
+
+        return None
+
+    def get_intraday_bars(self, stock_code: str, count: int = 240) -> Optional[pd.DataFrame]:
+        """通达信分钟 K 线（category=7 为 1 分钟线，已实测）。
+
+        用于分钟级预警：返回标准 DataFrame，列含 time/open/high/low/close/
+        volume/amount。失败返回 None（交由上层 fallback）。
+        """
+        if is_bse_code(stock_code):
+            raise DataFetchError(
+                f"PytdxFetcher 不支持北交所 {stock_code}，将自动切换其他数据源"
+            )
+        try:
+            market, code = self._get_market_code(stock_code)
+            with self._pytdx_session() as api:
+                raw = api.get_security_bars(
+                    category=7, market=market, code=code, start=0, count=count
+                )
+                if not raw:
+                    return None
+                df = api.to_df(raw)
+                if df is None or len(df) == 0:
+                    return None
+                # pytdx bars 列名: open/high/low/close/vol/amount，时间列可能为 datetime 或 time
+                df = df.rename(columns={"vol": "volume"})
+                if "datetime" in df.columns and "time" not in df.columns:
+                    df = df.rename(columns={"datetime": "time"})
+                return df
+        except DataSourceUnavailableError:
+            raise
+        except Exception as e:
+            logger.warning(f"Pytdx 获取分钟K线失败 {stock_code}: {e}")
+
         return None
 
 

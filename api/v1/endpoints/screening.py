@@ -18,6 +18,8 @@ from src.services.screening_service import (
     get_sector_moneyflow,
     get_sector_rotation,
     read_alphasift_screen_cache,
+    read_alphasift_screen_cache_on,
+    read_alphasift_screen_cache_previous,
     write_alphasift_screen_cache,
 )
 from src.services.task_queue import TaskStatus as QueueTaskStatus
@@ -233,6 +235,46 @@ def alphasift_screen_cache(strategy: str) -> dict | None:
     if cached is None:
         return None
     return cached
+
+
+@router.get("/screen/history/{strategy}")
+def alphasift_screen_history(
+    strategy: str,
+    date: Optional[str] = Query(None, max_length=16),
+) -> Dict[str, Any]:
+    """返回某策略历史某天(默认最新且早于今天)的选股缓存，用于"昨日"Tab 展示真实昨日选股。
+
+    返回结构与字段：
+      - available: 是否有历史记录
+      - date / market / cached_at: 该次选股的日期、市场、写入时间
+      - candidates: [{code, name, price}] 列表（price 为选股时信号价，回测时会重算，可忽略）
+      - candidate_count: 候选数量
+    """
+    cached = (
+        read_alphasift_screen_cache_on(strategy, date)
+        if date
+        else read_alphasift_screen_cache_previous(strategy)
+    )
+    if cached is None:
+        return {"available": False}
+    raw_candidates = cached.get("candidates") or []
+    candidates = [
+        {
+            "code": c.get("code") if isinstance(c, dict) else c,
+            "name": c.get("name", "") if isinstance(c, dict) else "",
+            "price": c.get("price") if isinstance(c, dict) else None,
+        }
+        for c in raw_candidates
+        if isinstance(c, dict) and c.get("code")
+    ]
+    return {
+        "available": True,
+        "date": cached.get("date"),
+        "market": cached.get("market"),
+        "cached_at": cached.get("cached_at"),
+        "candidates": candidates,
+        "candidate_count": cached.get("candidate_count", len(candidates)),
+    }
 
 
 class BacktestCandidate(BaseModel):

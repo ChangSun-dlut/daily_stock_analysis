@@ -94,6 +94,30 @@ export function normalizeStockCode(stockCode: string): string {
   return code;
 }
 
+/**
+ * 根据股票代码推断所属市场，用于前端在无法拿到 market 字段时判断使用哪个
+ * 市场阶段/交易时段规则（如 A 股 watchlist 实时行情卡片）。
+ */
+export function getMarketFromStockCode(stockCode: string): string {
+  const code = stockCode.trim();
+  const upper = code.toUpperCase();
+
+  if (/^\d{6}\.(SH|SZ|BJ|SS)$/.test(code)) return 'cn';
+  if (/^(SH|SZ|BJ)\d{6}$/.test(upper)) return 'cn';
+  if (/^(SH|SZ|BJ)\.\d{6}$/.test(upper)) return 'cn';
+
+  if (/^\d{5}\.HK$/.test(code) || /^HK\d{5}$/.test(upper) || /^HK\.\d{5}$/.test(upper)) {
+    return 'hk';
+  }
+
+  if (/^\d{4,5}\.T$/.test(code)) return 'jp';
+  if (/^\d{6}\.(KS|KQ)$/.test(code)) return 'kr';
+  if (/^\d{4,6}\.(TW|TWO)$/.test(code)) return 'tw';
+  if (/\.(US|NYSE|NASDAQ|AMEX)$/.test(code) || /^[A-Z]{1,5}$/.test(upper)) return 'us';
+
+  return 'other';
+}
+
 function stockCodeMatchKey(stockCode: string): string {
   return normalizeStockCode(stockCode).toUpperCase();
 }

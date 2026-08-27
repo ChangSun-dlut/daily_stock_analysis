@@ -1653,6 +1653,95 @@ def main() -> int:
                     "name": "agent_event_monitor",
                 })
 
+            # 微信(OpenClaw) 通道健康巡检：bot 授权失效 / CDN 持续故障时主动告警。
+            # 仅在配置了 OPENCLAW_WECHAT_ACCOUNT + OPENCLAW_WECHAT_TARGET 时启用。
+            if (
+                getattr(config, 'openclaw_wechat_account', None)
+                and getattr(config, 'openclaw_wechat_target', None)
+            ):
+                from src.notification_sender.openclaw_wechat_sender import (
+                    OpenclawWechatSender,
+                    OPENCLAW_ERR_AUTH_NEEDED,
+                    OPENCLAW_ERR_CDN,
+                    OPENCLAW_ERR_GATEWAY,
+                )
+
+                # 限频：contextToken 已自动重置、仅等待用户发消息的情形，避免每 30 分钟重复告警。
+                _openclaw_last_user_msg_alert_ts = {"ts": 0.0}
+
+                def openclaw_health_task():
+                    sender = OpenclawWechatSender(_reload_runtime_config())
+                    # auto_heal=True：gateway 失活自动拉起；contextToken 失效自动清 token + 重启。
+                    health = sender.check_bot_health(
+                        restart_gateway_if_down=True, auto_heal=True
+                    )
+                    if not health.get("enabled"):
+                        return
+                    needs_user_message = bool(health.get("needs_user_message"))
+                    err_type = health.get("last_send_error_type")
+                    persistent = err_type in (
+                        OPENCLAW_ERR_AUTH_NEEDED,
+                        OPENCLAW_ERR_CDN,
+                        OPENCLAW_ERR_GATEWAY,
+                    )
+                    if needs_user_message:
+                        # contextToken 已自动重置，只需接收人发一条消息即可恢复；
+                        # 告警降级为 warning 并限频，避免反复打扰。
+                        now = time.time()
+                        if now - _openclaw_last_user_msg_alert_ts["ts"] < 6 * 3600:
+                            logger.debug(
+                                "[OpenClawHealth] 微信通道 contextToken 已重置，等待用户发消息: %s",
+                                health.get("detail"),
+                            )
+                            return
+                        _openclaw_last_user_msg_alert_ts["ts"] = now
+                        cleared = "已自动清token+重启gateway" if health.get(
+                            "context_token_cleared"
+                        ) else "需人工"
+                        logger.warning(
+                            "[OpenClawHealth] 微信通道 contextToken 失效，%s；"
+                            "请给 bot 发一条任意微信消息以重建对话上下文，之后即可自动推送。"
+                            " detail=%s",
+                            cleared,
+                            health.get("detail"),
+                        )
+                    elif health.get("needs_relogin") or persistent:
+                        logger.error(
+                            "[OpenClawHealth] 微信通道异常: %s | "
+                            "需用户介入重新扫码登录（openclaw channels login --channel openclaw-weixin）。"
+                            " last_send_error_type=%s last_send_error_detail=%s",
+                            health.get("detail"),
+                            health.get("last_send_error_type"),
+                            health.get("last_send_error_detail"),
+                        )
+                    elif health.get("crash_loop_recovered"):
+                        # gateway 曾因 crash-loop breaker 暂停通道，本次巡检已强制重启清除。
+                        # 已自动恢复，记录一条 error 级便于追溯，但无需用户介入。
+                        logger.error(
+                            "[OpenClawHealth] 微信通道 gateway 曾因 crash-loop breaker 被抑制，"
+                            "已自动强制重启清除并恢复通道。 detail=%s",
+                            health.get("detail"),
+                        )
+                    elif health.get("crash_loop_suppressed"):
+                        # 处于抑制状态但冷却期内未重启，记录 warning 便于观察。
+                        logger.warning(
+                            "[OpenClawHealth] 微信通道 gateway 处于 crash-loop 抑制状态"
+                            "(冷却期内暂不强制重启): %s",
+                            health.get("detail"),
+                        )
+                    else:
+                        logger.debug(
+                            "[OpenClawHealth] 微信通道健康: %s",
+                            health.get("detail"),
+                        )
+
+                background_tasks.append({
+                    "task": openclaw_health_task,
+                    "interval_seconds": 30 * 60,
+                    "run_immediately": True,
+                    "name": "openclaw_wechat_health",
+                })
+
             schedule_kwargs = {
                 "task": scheduled_task,
                 "schedule_time": config.schedule_time,

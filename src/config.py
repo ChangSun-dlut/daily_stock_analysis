@@ -1249,7 +1249,7 @@ class Config:
     # - akshare_sina: 新浪财经，基本行情稳定，但无量比
     # - efinance/akshare_em: 东财全量接口，数据最全但容易被封
     # - tushare: Tushare Pro，需要2000积分，数据全面（付费用户可优先使用）
-    realtime_source_priority: str = "tencent,akshare_sina,efinance,akshare_em"
+    realtime_source_priority: str = "pytdx,tencent,akshare_sina,efinance,akshare_em"
     # 实时行情缓存时间（秒）
     realtime_cache_ttl: int = 600
     # 熔断器冷却时间（秒）
@@ -1271,6 +1271,9 @@ class Config:
     volume_spike_rt_cache_retention_minutes: int = 60
     # AlertWorker 在每次轮询时主动拉一次实时量比，确保斜率采样新鲜；最小间隔（秒）。
     volume_spike_rt_refresh_interval_seconds: int = 300
+    # 1 分钟 K 线独立喂入频率（秒）。与上面的 300s spot-quote 刷新解耦，直接走
+    # PytdxFetcher 分钟 K 线接口，避免主链路 fallback 导致盘中 1 分钟预警中断。
+    volume_spike_rt_1min_feed_interval_seconds: int = 60
 
     # === 基本面聚合开关与降级保护 ===
     # 全局总开关；关闭时返回 not_supported 并保持主流程无变化
@@ -2304,6 +2307,13 @@ class Config:
                 minimum=10,
                 maximum=1800,
             ),
+            volume_spike_rt_1min_feed_interval_seconds=parse_env_int(
+                os.getenv('VOLUME_SPIKE_RT_1MIN_FEED_INTERVAL_SECONDS'),
+                60,
+                field_name='VOLUME_SPIKE_RT_1MIN_FEED_INTERVAL_SECONDS',
+                minimum=10,
+                maximum=600,
+            ),
             enable_fundamental_pipeline=os.getenv('ENABLE_FUNDAMENTAL_PIPELINE', 'true').lower() == 'true',
             fundamental_stage_timeout_seconds=parse_env_float(
                 os.getenv('FUNDAMENTAL_STAGE_TIMEOUT_SECONDS'),
@@ -3021,32 +3031,23 @@ class Config:
     @classmethod
     def _resolve_realtime_source_priority(cls) -> str:
         """
-        Resolve realtime source priority with automatic tushare injection.
+        Resolve realtime source priority.
 
-        When TUSHARE_TOKEN is configured but REALTIME_SOURCE_PRIORITY is not
-        explicitly set, automatically prepend 'tushare' to the default priority
-        so that the paid data source is utilized for realtime quotes as well.
+        pytdx (通达信直连，免费无 Token，A 股延迟最低) is **hard-pinned as the
+        absolute first source** and stays first under all conditions:
+
+        - The ``REALTIME_SOURCE_PRIORITY`` env var / ``.env`` override is
+          **ignored entirely** — it must not be able to demote pytdx or
+          re-order the chain. This removes any chance of environment-driven
+          drift breaking the recommended free realtime main link.
+        - ``TUSHARE_TOKEN`` auto-injection is removed; paid sources only ever
+          appear *after* pytdx.
+
+        The remaining fallbacks (after pytdx) are fixed and ordered for
+        stability: tencent → akshare_sina → efinance → akshare_em.
         """
-        explicit = os.getenv('REALTIME_SOURCE_PRIORITY')
-        default_priority = 'tencent,akshare_sina,efinance,akshare_em'
-
-        if explicit:
-            # User explicitly set priority, respect it
-            return explicit
-
-        tushare_token = os.getenv('TUSHARE_TOKEN', '').strip()
-        if tushare_token:
-            # Token configured but no explicit priority override
-            # Prepend tushare so the paid source is tried first
-            import logging
-            logger = logging.getLogger(__name__)
-            resolved = f'tushare,{default_priority}'
-            logger.info(
-                f"TUSHARE_TOKEN detected, auto-injecting tushare into realtime priority: {resolved}"
-            )
-            return resolved
-
-        return default_priority
+        # Hard-pinned chain. pytdx is always first and cannot be overridden.
+        return 'pytdx,tencent,akshare_sina,efinance,akshare_em'
 
     @classmethod
     def reset_instance(cls) -> None:

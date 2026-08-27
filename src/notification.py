@@ -200,6 +200,7 @@ class NotificationChannel(Enum):
     SLACK = "slack"        # Slack
     ASTRBOT = "astrbot"
     OPENCLAW_WECHAT = "openclaw_wechat"
+    WEB = "web"            # 网页弹窗（后台实时推送兜底）
     UNKNOWN = "unknown"    # 未知
 
 
@@ -252,6 +253,7 @@ class ChannelDetector:
             NotificationChannel.SLACK: "Slack",
             NotificationChannel.ASTRBOT: "ASTRBOT机器人",
             NotificationChannel.OPENCLAW_WECHAT: "微信(OpenClaw)",
+            NotificationChannel.WEB: "网页弹窗",
             NotificationChannel.UNKNOWN: "未知渠道",
         }
         return names.get(channel, "未知渠道")
@@ -335,6 +337,12 @@ class NotificationService(
 
         # 检测所有已配置的渠道
         self._available_channels = self._detect_all_channels()
+        # NOTE: NotificationChannel.WEB is intentionally NOT appended to
+        # _available_channels here. It's a process-local runtime fallback
+        # that requires no user configuration, so it should not change the
+        # "is the notification service available?" signal. Routing to WEB
+        # still happens via _send_message() which has an explicit branch
+        # for NotificationChannel.WEB.
         if self._extract_dingtalk_session_webhook() is not None:
             self._context_channels.append("钉钉会话")
         if self._extract_feishu_reply_info() is not None:
@@ -543,6 +551,11 @@ class NotificationService(
             channels.append(NotificationChannel.ASTRBOT)
         if getattr(config, "openclaw_wechat_account", None) and getattr(config, "openclaw_wechat_target", None):
             channels.append(NotificationChannel.OPENCLAW_WECHAT)
+        # NOTE: NotificationChannel.WEB is intentionally NOT appended here.
+        # It's a process-local runtime fallback (in-process hub) that requires
+        # no user configuration, so it shouldn't be counted as a "configured
+        # channel" by diagnostics. It is added separately to _available_channels
+        # in NotificationService.__init__ so the routing layer can still reach it.
 
         return channels
 
@@ -597,7 +610,14 @@ class NotificationService(
             )
 
         allowed = set(valid_channels)
-        return [channel for channel in target_channels if channel.value in allowed]
+        result = [channel for channel in target_channels if channel.value in allowed]
+        # Web popup channel is a process-local fallback: it has no user
+        # configuration but if the route config explicitly opts in via the
+        # "web" token, surface it as a target so the dashboard can still see
+        # the alert in real time.
+        if "web" in allowed and NotificationChannel.WEB not in result:
+            result.append(NotificationChannel.WEB)
+        return result
 
     def get_channel_names(self) -> str:
         """获取所有已配置渠道的名称"""
@@ -674,6 +694,21 @@ class NotificationService(
     def should_broadcast_static_channels(self) -> bool:
         """Whether static notification channels should receive this dispatch."""
         return not self._has_context_channel()
+
+    def _route_explicitly_includes_web(self, route_type: Optional[str]) -> bool:
+        """Whether the route config for ``route_type`` explicitly lists the
+        ``web`` token. WEB is a process-local fallback channel that has no
+        user-tunable configuration, so we only consider it "routable" when the
+        route env explicitly opts in via ``NOTIFICATION_*_CHANNELS=web``.
+        """
+        if route_type is None:
+            return False
+        route_config = get_notification_route_config(route_type)
+        if route_config is None:
+            return False
+        configured = getattr(self._config, route_config["config_attr"], []) or []
+        valid_channels, _ = split_notification_route_channels(configured)
+        return "web" in valid_channels
 
     def _extract_dingtalk_session_webhook(self) -> Optional[str]:
         """从来源消息中提取钉钉会话 Webhook（用于 Stream 模式回复）"""
@@ -2587,6 +2622,8 @@ class NotificationService(
             if use_image:
                 return self._send_openclaw_wechat_image(image_bytes)
             return self.send_to_openclaw_wechat(sanitized_content)
+        if channel == NotificationChannel.WEB:
+            return self._push_web_alert(sanitized_content)
         if channel == NotificationChannel.ASTRBOT:
             return self.send_to_astrbot(sanitized_content)
         logger.warning(f"不支持的通知渠道: {channel}")
@@ -2653,7 +2690,13 @@ class NotificationService(
                 message="interactive context delivery failed; static channels skipped",
             )
 
-        if not self._available_channels:
+        # Web popup channel is a process-local fallback that is intentionally
+        # not in self._available_channels (it isn't user-configured). If the
+        # current route explicitly opts in to "web" via env config, we still
+        # need to reach the dispatch path; bypass the early no_channel exit.
+        route_explicit_web = self._route_explicitly_includes_web(route_type)
+
+        if not self._available_channels and not route_explicit_web:
             if context_success:
                 logger.info("已通过消息上下文渠道完成推送（无其他通知渠道）")
                 return NotificationDispatchResult(
@@ -2896,6 +2939,29 @@ class NotificationService(
         )
         logger.info("将上传文件到飞书: %s", filepath)
         return self.send_feishu_file(filepath)
+
+    def _push_web_alert(self, content: str) -> bool:
+        """Persist an alert into the in-process web popup hub for the dashboard.
+
+        This is a best-effort, non-blocking fallback delivery: even if the
+        primary push channel (WeChat/Feishu) is unavailable, the open dashboard
+        can still surface the alert in real time. The web channel never converts
+        content to an image.
+        """
+        try:
+            from src.services.web_alert_hub import get_web_alert_hub
+
+            hub = get_web_alert_hub()
+            # The alert text typically starts with a summary line; use the first
+            # non-empty line as the popup title for a compact toast.
+            lines = [ln.strip() for ln in (content or "").splitlines() if ln.strip()]
+            title = lines[0] if lines else "预警提醒"
+            body = "\n".join(lines[1:]) if len(lines) > 1 else ""
+            hub.push(title=title, body=body, level="warning")
+            return True
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("WEB 弹窗推送失败: %s", exc)
+            return False
 
 
 class NotificationBuilder:

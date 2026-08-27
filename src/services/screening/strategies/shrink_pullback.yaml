@@ -73,4 +73,4 @@ screening:
     1. 回调幅度适中、趋势结构未破坏
     2. 缩量明显，洗盘而非出货
     3. 近期无重大利空
-  max_output: 5
+  max_output: 6

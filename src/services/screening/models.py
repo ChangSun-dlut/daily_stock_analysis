@@ -60,6 +60,18 @@ class HardFilterConfig:
     change_5d_min: float | None = None
     ma_breakdown_count_max: int | None = None
     mf_net_inflow_5d_min: float | None = None
+    max_drawdown_60d_pct_min: float | None = None
+    max_drawdown_60d_pct_max: float | None = None
+    max_drawdown_120d_pct_min: float | None = None
+    max_drawdown_120d_pct_max: float | None = None
+    max_drawdown_250d_pct_min: float | None = None
+    max_drawdown_250d_pct_max: float | None = None
+    consolidation_days_250d_min: int | None = None
+    consolidation_days_250d_max: int | None = None
+    change_120d_min: float | None = None
+    change_120d_max: float | None = None
+    change_250d_min: float | None = None
+    change_250d_max: float | None = None
 
 
 @dataclass

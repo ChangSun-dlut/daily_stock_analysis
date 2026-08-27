@@ -113,7 +113,7 @@ screening:
     volume_ratio_20d_min: -999
   market_scope:
   - cn
-  max_output: 10
+  max_output: 6
   portfolio_profile:
     buckets:
       周期:

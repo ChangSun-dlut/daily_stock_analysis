@@ -63,6 +63,12 @@ _DAILY_FEATURE_DEFAULTS = {
     "mf_consecutive_days": pd.NA,
     "mf_inflow_strength_pct": pd.NA,
     "mf_available": False,
+    "change_120d": pd.NA,
+    "change_250d": pd.NA,
+    "max_drawdown_60d_pct": pd.NA,
+    "max_drawdown_120d_pct": pd.NA,
+    "max_drawdown_250d_pct": pd.NA,
+    "consolidation_days_250d": pd.NA,
 }
 _MF_LOOKBACK_DAYS = 15
 _MF_CALL_TIMEOUT_SECONDS = 15.0
@@ -1387,8 +1393,8 @@ def _compute_shape_features(
         "upper_shadow_pct": _round_or_none(upper_shadow_pct),
         "pullback_to_ma20_pct": _round_or_none(pullback_to_ma20_pct),
         "consolidation_days_20d": _consolidation_days(previous),
-        "consolidation_days_60d": _consolidation_days(df.iloc[:-1].tail(60)),
-        "consolidation_days_120d": _consolidation_days(df.iloc[:-1].tail(120)),
+        "consolidation_days_60d": _consolidation_days(df.iloc[:-1].tail(60), max_lookback=60),
+        "consolidation_days_120d": _consolidation_days(df.iloc[:-1].tail(120), max_lookback=120),
         "volatility_20d_pct": _round_or_none(volatility_20d_pct),
         "max_drawdown_20d_pct": _round_or_none(max_drawdown_20d_pct),
         "atr_20_pct": _round_or_none(atr_20_pct),
@@ -1401,6 +1407,12 @@ def _compute_shape_features(
         "consecutive_volume_spike_3d": _consecutive_volume_spike(df, 3),
         "coiled_spring_contraction_pct": _round_or_none(contraction_pct),
         "coiled_spring_ramp_ratio": _round_or_none(ramp_ratio),
+        "max_drawdown_60d_pct": _round_or_none(_max_drawdown_pct(pd.to_numeric(df["close"], errors="coerce").dropna().tail(60))),
+        "max_drawdown_120d_pct": _round_or_none(_max_drawdown_pct(pd.to_numeric(df["close"], errors="coerce").dropna().tail(120))),
+        "max_drawdown_250d_pct": _round_or_none(_max_drawdown_pct(pd.to_numeric(df["close"], errors="coerce").dropna().tail(250))),
+        "consolidation_days_250d": _consolidation_days(df.iloc[:-1].tail(250), max_lookback=250),
+        "change_120d": _round_or_none(_change_pct(df["close"], 120)),
+        "change_250d": _round_or_none(_change_pct(df["close"], 250)),
         "ma_breakdown_count": ma_breakdown_count,
     }
 
@@ -1479,10 +1491,10 @@ def _atr_20_pct(df: pd.DataFrame) -> float | None:
     return float(atr) / last_close * 100
 
 
-def _consolidation_days(previous: pd.DataFrame, *, max_range_pct: float = 12.0) -> int | None:
+def _consolidation_days(previous: pd.DataFrame, *, max_range_pct: float = 12.0, max_lookback: int = 20) -> int | None:
     if previous.empty or "high" not in previous.columns or "low" not in previous.columns:
         return None
-    for days in range(min(len(previous), 20), 1, -1):
+    for days in range(min(len(previous), max_lookback), 1, -1):
         window = previous.tail(days)
         range_pct = _range_pct(window)
         if range_pct is not None and range_pct <= max_range_pct:

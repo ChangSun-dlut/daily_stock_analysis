@@ -189,6 +189,13 @@ CHANNEL_SPECS: Tuple[NotificationChannelSpec, ...] = (
         note="通过本地 openclaw gateway + iLink 微信 bot 推送；需先 `npx openclaw channels login --channel openclaw-weixin` 配对。",
     ),
     NotificationChannelSpec(
+        channel=NotificationChannel.WEB.value,
+        display_name=ChannelDetector.get_channel_name(NotificationChannel.WEB),
+        kind="fallback",
+        minimal_keys=(),
+        note="运行时进程内 hub 兜底通道，无需用户配置；仅在 Web 控制台活跃时生效。",
+    ),
+    NotificationChannelSpec(
         channel=NotificationChannel.UNKNOWN.value,
         display_name=ChannelDetector.get_channel_name(NotificationChannel.UNKNOWN),
         kind="fallback",
@@ -322,7 +329,11 @@ def _require_pair(
 def run_notification_diagnostics(config: Config) -> NotificationDiagnosticResult:
     """Run read-only diagnostics for notification configuration."""
 
-    configured = tuple(channel.value for channel in NotificationService.detect_configured_channels(config))
+    configured = tuple(
+        channel.value
+        for channel in NotificationService.detect_configured_channels(config)
+        if channel != NotificationChannel.WEB
+    )
     errors: List[NotificationDiagnosticIssue] = []
     warnings: List[NotificationDiagnosticIssue] = []
     info: List[NotificationDiagnosticIssue] = [
