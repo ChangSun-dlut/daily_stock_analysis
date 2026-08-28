@@ -120,7 +120,8 @@ _DEFAULT_SCORING_PROFILE = {
     "consolidation_quality_coiled_spring_ramp_min": 1.15,
     "consolidation_quality_coiled_spring_ramp_max": 3.5,
     "consolidation_quality_coiled_spring_bonus": 20.0,
-    "consolidation_quality_surge_pullback_penalty_slope": 1.0,
+    "consolidation_quality_surge_pullback_penalty_slope": 3.0,
+    "consolidation_quality_surge_pullback_drawdown_threshold_pct": 8.0,
     "consolidation_quality_long_bonus_60d": 8.0,
     "consolidation_quality_long_bonus_120d": 15.0,
     "consolidation_quality_long_bonus_250d": 22.0,
@@ -700,6 +701,21 @@ def _compute_consolidation_quality_score(df: pd.DataFrame, profile: dict[str, fl
         df, profile, "consolidation_quality_cum_"
     )
     score = score - cum_bear
+
+    # 12.5 主升回落惩罚：近 20 日最大回撤超出阈值部分按斜率减分。
+    #      用于压制「刚主升后又回落」的 V 形（如冲高到 85.8 再下来）——这类票
+    #      在旧专用评分器里会被当成"连续蓄势"而拿满分，与"横盘很久才突破"语义相悖。
+    #      注意 max_drawdown_20d_pct 为负值约定（回撤越大越负），故取绝对值比较。
+    if "max_drawdown_20d_pct" in df.columns:
+        _dd = pd.to_numeric(df["max_drawdown_20d_pct"], errors="coerce")
+        _dd_threshold = float(
+            profile.get("consolidation_quality_surge_pullback_drawdown_threshold_pct", 8.0)
+        )
+        _dd_slope = float(
+            profile.get("consolidation_quality_surge_pullback_penalty_slope", 3.0)
+        )
+        _dd_excess = (_dd.abs() - _dd_threshold).clip(lower=0.0)
+        score = score - _dd_excess.fillna(0.0) * _dd_slope
 
     # --- Money Flow Confirmation (0-10 pts, consolidation-breakout overlay) ---
     #     Rewards sustained main-force accumulation; penalises outflow.

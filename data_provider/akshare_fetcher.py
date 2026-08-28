@@ -2136,7 +2136,46 @@ class AkshareFetcher(BaseFetcher):
             rows.sort(key=lambda r: abs(float(r["main_net"] or 0)), reverse=True)
             return rows[: max(1, int(top_n))]
         except Exception as e:
-            logger.warning("[Akshare] 获取板块资金流实时兜底失败: %s", e)
+            logger.warning("[Akshare] 东财实时板块资金流失败: %s", e)
+            # 兜底：尝试新浪接口（无资金流数据，但有今日涨跌幅/成交额/代表股）
+            logger.info("[Akshare] 尝试新浪接口兜底板块资金流...")
+            try:
+                self._set_random_user_agent()
+                self._enforce_rate_limit()
+                df = ak.stock_sector_spot(indicator="行业")
+                if df is not None and not df.empty:
+                    rows: List[Dict[str, Any]] = []
+                    for _, row in df.iterrows():
+                        name = str(row.get("板块") or "").strip()
+                        if not name:
+                            continue
+                        pct_change = safe_float(row.get("涨跌幅"))
+                        total_turnover = safe_float(row.get("总成交额"))
+                        lead_stock = str(row.get("股票名称") or "").strip()
+                        lead_pct = safe_float(row.get("个股-涨跌幅"))
+                        rows.append(
+                            {
+                                "name": name,
+                                "ts_code": str(row.get("股票代码") or "").strip(),
+                                "pct_change": pct_change if pct_change is not None else 0.0,
+                                "main_net": 0.0,  # 新浪无资金流数据
+                                "mid_net": 0.0,
+                                "retail_net": 0.0,
+                                "block_net": None,
+                                "lead_stock": lead_stock if lead_stock else None,
+                                "total_turnover": total_turnover,
+                                "lead_pct": lead_pct,
+                                "source": "sina_realtime",
+                            }
+                        )
+                    if rows:
+                        rows.sort(key=lambda r: abs(float(r.get("pct_change", 0) or 0)), reverse=True)
+                        return rows[: max(1, int(top_n))]
+                    logger.warning("[Akshare] 新浪接口板块资金流兜底返回空")
+                else:
+                    logger.warning("[Akshare] 新浪接口板块资金流兜底返回空")
+            except Exception as e2:
+                logger.warning("[Akshare] 新浪接口板块资金流兜底也失败: %s", e2)
             return None
 
     def get_concept_rankings(self, n: int = 5) -> Optional[Tuple[List[Dict], List[Dict]]]:

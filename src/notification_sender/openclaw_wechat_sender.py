@@ -316,6 +316,45 @@ class OpenclawWechatSender:
             )
         return os.path.join(base, f"{self._account}.context-tokens.json")
 
+    def context_token_mtime(self) -> float | None:
+        """返回 iLink context-tokens.json 的 mtime（秒）；无文件/不可读返回 None。
+
+        该文件在「接收人给 bot 发消息重建对话上下文」时被重写，因此 mtime 可近似作为
+        「上下文最近一次建立 / 刷新」的锚点，用于估算距离过期还有多久。
+        """
+        path = self._context_tokens_path()
+        if not path:
+            return None
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return None
+
+    def should_send_context_keepalive(self) -> tuple[bool, str]:
+        """判断是否在 iLink contextToken 到期前发送「请发消息续期」提醒。
+
+        OpenClaw 不暴露真实过期时间，这里用「context-tokens.json 的 mtime + 预估有效期」
+        估算。通过环境变量微调（默认值按经验设定，建议按实际观察调整）：
+
+        - ``OPENCLAW_CONTEXT_TTL_SECONDS``：预估有效期，默认 72h。
+        - ``OPENCLAW_CONTEXT_REMIND_MARGIN_SECONDS``：提前量，默认 12h。
+
+        返回 ``(是否应发送, 原因)``。仅当上下文已存在、且 ``age >= ttl - margin`` 时返回 True。
+        实际的发送 / 限频由调用方（main.py 健康巡检）负责。
+        """
+        try:
+            ttl = float(os.environ.get("OPENCLAW_CONTEXT_TTL_SECONDS", 72 * 3600))
+            margin = float(os.environ.get("OPENCLAW_CONTEXT_REMIND_MARGIN_SECONDS", 12 * 3600))
+        except (TypeError, ValueError):
+            ttl, margin = 72 * 3600, 12 * 3600
+        mt = self.context_token_mtime()
+        if mt is None:
+            return False, "no_context_token"
+        age = time.time() - mt
+        if age < max(0.0, ttl - margin):
+            return False, "context_not_near_expiry"
+        return True, "context_near_expiry"
+
     def _clear_stale_context_tokens(self, *, force: bool = False) -> bool:
         """删除过期的 iLink context-tokens.json，强制下次收消息时重建对话上下文。
 

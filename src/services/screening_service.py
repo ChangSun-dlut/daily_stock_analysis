@@ -1536,9 +1536,9 @@ class AlphaSiftService:
         # 黄金坑走专用形态识别器，绕过 AlphaSift 通用因子评分
         if strategy == "golden_pit":
             return _screen_golden_pit_specialized(self.config, max_results)
-        # 横盘蓄势突破走专用形态识别器，绕过 AlphaSift 通用因子评分
-        if strategy == "consolidation_breakout":
-            return _screen_sideways_breakout_specialized(self.config, max_results)
+        # 注意：consolidation_breakout（横盘突破）与 sideways_breakout 是两个独立策略，
+        # 前者走 AlphaSift 通用因子评分（strategies/consolidation_breakout.yaml 驱动，
+        # consolidation_quality 因子主导 + LLM 排序），不可路由到 sideways 专用形态识别器。
         _ensure_alphasift_enabled(self.config)
         _ensure_alphasift_available_for_use()
         _ensure_supported_market(market)
@@ -4832,13 +4832,17 @@ def _build_sector_moneyflow_payload(rows: List[Dict[str, Any]]) -> Dict[str, Any
         lead_stock_name = str(lead_stock_name).strip() if lead_stock_name else ""
         is_inflow = main_net > 0
         is_outflow = main_net < 0
+        # 新浪实时无资金流数据（main_net=0），显示"暂缺"而非"净流入: +0.0亿"
+        row_source = str(row.get("source") or "")
+        is_sina_moneyflow = (main_net == 0.0 and row_source == "sina_realtime")
+        net_text = "暂缺" if is_sina_moneyflow else _format_sector_money_amount(main_net)
         item = {
             "rank": rank,
             "name": str(row.get("name") or ""),
             "ts_code": str(row.get("ts_code") or ""),
             "pct_change": pct_change,
             "net": main_net,
-            "net_text": _format_sector_money_amount(main_net),
+            "net_text": net_text,
             "direction": direction,
             "main_net": main_net,
             "mid_net": float(row.get("mid_net") or 0),
@@ -4871,9 +4875,13 @@ def _build_sector_moneyflow_payload(rows: List[Dict[str, Any]]) -> Dict[str, Any
         leader_parts.append(f"主力净流出 {outflow_leaders[0]['name']} {outflow_leaders[0]['net_text']}")
     summary_text = "；".join(leader_parts) if leader_parts else "暂无板块资金流向数据"
 
+    # 实时兜底的数据行（akshare/sina）通常不带 trade_date，用本地今天补齐，否则前端日期会空白。
+    row_source = str(rows[0].get("source") or "")
+    is_realtime = row_source.endswith("_realtime")
+    date_value = rows[0].get("trade_date") or (is_realtime and _sector_moneyflow_today_str()) or ""
     return {
         "available": True,
-        "date": str(rows[0].get("trade_date") or ""),
+        "date": str(date_value),
         "source": str(rows[0].get("source") or items[0].get("source", "")),
         "total_inflow": total_inflow,
         "total_outflow": total_outflow,
@@ -5198,6 +5206,12 @@ def _build_sector_rotation_item(name: str, ts_code: str, history: List[Dict[str,
     latest = history[-1]
     today_pct = float(latest.get("pct_change") or 0)
     today_net = float(latest.get("net_amount") or 0)
+    # 新浪实时无资金流数据，显示"暂缺"而非"+0.0亿"
+    latest_source = str(latest.get("_source") or "")
+    if today_net == 0.0 and "sina" in latest_source:
+        today_net_text = "暂缺"
+    else:
+        today_net_text = _format_sector_money_amount(today_net)
 
     # 当前连涨/连跌天数（从最新日往前数，同号连续；正=连涨，负=连跌）
     streak = 0
@@ -5229,12 +5243,140 @@ def _build_sector_rotation_item(name: str, ts_code: str, history: List[Dict[str,
         "inflow_days_5d": inflow_days,
         "today_pct": round(today_pct, 2),
         "today_net": today_net,
-        "today_net_text": _format_sector_money_amount(today_net),
+        "today_net_text": today_net_text,
         "phase": phase,
         "signal": signal,
         "score": score,
         "trade_date": str(latest.get("trade_date") or ""),
     }
+
+
+def _normalize_sector_name(name: str) -> str:
+    """板块名称标准化，用于历史（Tushare/东财）与实时（新浪/akshare）数据做模糊匹配。
+
+    东财板块名带罗马数字后缀（ⅢⅡⅣ）和量词后缀（及其他、及细项），
+    新浪则用简名，需要对齐才能匹配。
+    """
+    import re
+
+    s = str(name or "").strip()
+    s = s.replace(" ", "").replace("㈡", "").replace("㈢", "").replace("㈣", "")
+    # 去掉罗马数字后缀（ⅢⅡⅣ️）及常见后缀
+    s = re.sub(r"[ⅰⅱⅲⅳⅴⅵⅶⅷⅸⅹⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+$", "", s)
+    s = re.sub(r"及其他$|及细项$|类$", "", s)
+    s = s.replace("板块", "").replace("行业", "").replace("概念", "").replace("指数", "")
+    return s.lower()
+
+
+def _merge_realtime_into_rotation_history(
+    history_rows: List[Dict[str, Any]],
+    realtime_rows: List[Dict[str, Any]],
+    today_str: str,
+) -> List[Dict[str, Any]]:
+    """把东财/AKShare 实时板块资金流作为「今天」这一行合并进 Tushare 历史。
+
+    Tushare ``moneyflow_ind_dc`` 是盘后数据，盘中（以及盘后 Tushare 未更新前）没有最新日。
+    本函数把已有的实时板块资金流（和 ``get_sector_money_flow_realtime`` 同一个源）接入轮动，
+    让板块轮动可以在交易日当日刷新。
+
+    合并规则：
+    - 按板块名称（标准化后）匹配；历史里不存在的板块作为新板块加入（只有今天一行）。
+    - 追加字段：``trade_date=today_str``, ``pct_change=rt.pct_change``, ``net_amount=rt.main_net``。
+    - 如果某个板块历史里已存在 today_str，不再重复追加。
+    """
+    if not realtime_rows:
+        return history_rows
+
+    rt_by_name: Dict[str, Dict[str, Any]] = {}
+    for rt in realtime_rows:
+        name = str(rt.get("name") or "").strip()
+        if not name:
+            continue
+        key = _normalize_sector_name(name)
+        rt_by_name.setdefault(key, rt)
+
+    merged: List[Dict[str, Any]] = []
+    seen_keys: set = set()
+
+    for hist in history_rows:
+        name = str(hist.get("name") or "").strip()
+        ts_code = str(hist.get("ts_code") or "")
+        key = _normalize_sector_name(name)
+        history = list(hist.get("history") or [])
+        if not isinstance(history, list):
+            history = []
+
+        # 今天已经存在就不重复追加
+        if any(str(d.get("trade_date") or "") == today_str for d in history):
+            merged.append(hist)
+            seen_keys.add(key)
+            continue
+
+        rt = rt_by_name.get(key)
+        if rt:
+            try:
+                pct = float(rt.get("pct_change") or 0.0)
+            except (TypeError, ValueError):
+                pct = 0.0
+            # 历史字段用 net_amount；实时字段里 main_net 就是主力净流入，对应 net_amount 口径
+            net = rt.get("main_net")
+            if net is None:
+                net = rt.get("block_net") or 0.0
+            try:
+                net = float(net or 0.0)
+            except (TypeError, ValueError):
+                net = 0.0
+            rt_source = str(rt.get("source") or "realtime")
+            history.append(
+                {
+                    "trade_date": today_str,
+                    "pct_change": pct,
+                    "net_amount": net,
+                    "_source": rt_source,
+                }
+            )
+            merged.append({**hist, "history": history})
+        else:
+            merged.append(hist)
+        seen_keys.add(key)
+
+    # 把历史里没有但实时里有的板块补进来（只有今天一行）
+    for rt in realtime_rows:
+        name = str(rt.get("name") or "").strip()
+        if not name:
+            continue
+        key = _normalize_sector_name(name)
+        if key in seen_keys:
+            continue
+        try:
+            pct = float(rt.get("pct_change") or 0.0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        net = rt.get("main_net")
+        if net is None:
+            net = rt.get("block_net") or 0.0
+        try:
+            net = float(net or 0.0)
+        except (TypeError, ValueError):
+            net = 0.0
+        rt_source = str(rt.get("source") or "realtime")
+        merged.append(
+            {
+                "name": name,
+                "ts_code": str(rt.get("ts_code") or ""),
+                "history": [
+                    {
+                        "trade_date": today_str,
+                        "pct_change": pct,
+                        "net_amount": net,
+                        "_source": rt_source,
+                    }
+                ],
+            }
+        )
+        seen_keys.add(key)
+
+    return merged
 
 
 def _read_sector_rotation_cache() -> Optional[Dict[str, Any]]:
@@ -5283,6 +5425,30 @@ def get_sector_rotation(days: int = DSA_ALPHASIFT_SECTOR_ROTATION_DAYS, force_re
         logger.warning(f"[板块轮动] 历史数据获取失败: {e}")
         history_rows = []
 
+    # 盘中/收盘前 Tushare 还没更新今天，用东财实时板块资金流补上一行「今天」的数据。
+    if history_rows and _cn_market_open_now():
+        today_str = _sector_moneyflow_today_str()
+        latest_date = ""
+        for hist in history_rows:
+            for d in hist.get("history") or []:
+                td = str(d.get("trade_date") or "")
+                if td and td > latest_date:
+                    latest_date = td
+        if latest_date and latest_date < today_str:
+            try:
+                realtime_rows = manager.get_sector_money_flow_realtime(top_n=100)
+                if realtime_rows:
+                    history_rows = _merge_realtime_into_rotation_history(
+                        history_rows, realtime_rows, today_str
+                    )
+                    logger.info(
+                        "[板块轮动] 盘中合并实时板块资金流 %d 条作为 %s 数据",
+                        len(realtime_rows),
+                        today_str,
+                    )
+            except Exception as e:
+                logger.warning("[板块轮动] 实时板块资金流合并失败: %s", e)
+
     items: List[Dict[str, Any]] = []
     for row in history_rows or []:
         item = _build_sector_rotation_item(
@@ -5304,7 +5470,7 @@ def get_sector_rotation(days: int = DSA_ALPHASIFT_SECTOR_ROTATION_DAYS, force_re
     payload: Dict[str, Any] = {
         "available": bool(items),
         "days": days,
-        "trade_date": items[0]["trade_date"] if items else "",
+        "trade_date": max(it["trade_date"] for it in items) if items else "",
         "items": items,
         "top_buy": [i for i in items if i["signal"] == "buy"][:10],
         "top_avoid": [i for i in items if i["signal"] == "avoid"][:10],

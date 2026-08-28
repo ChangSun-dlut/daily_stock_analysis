@@ -979,7 +979,14 @@ def _to_baostock_code(code: str) -> str:
 
 
 def _to_tushare_code(code: str) -> str:
-    raw = str(code).strip().zfill(6)
+    raw = str(code).strip()
+    # 先剥离已有的交易所后缀，否则 600739.SH 会被判成以 6 开头而追加成
+    # 600739.SH.SH，导致 Tushare 查询无结果、整条 fallback 链误降级。
+    for _suffix in (".SH", ".SZ", ".BJ"):
+        if raw.upper().endswith(_suffix):
+            raw = raw[: -len(_suffix)]
+            break
+    raw = raw.zfill(6)
     if raw.startswith(("4", "8", "920")):
         return f"{raw}.BJ"
     if raw.startswith(("6", "9", "5")):
@@ -1384,6 +1391,16 @@ def _compute_shape_features(
         if _ma_vals:
             ma_breakdown_count = int(sum(1 for m in _ma_vals if last_close < m))
 
+    # 均线结构：多头排列（ma5>ma20>ma60）与是否站上 MA20。
+    # 供 scorer 的 consolidation_quality 均线加分使用；该列缺失时加分逻辑不生效。
+    ma_bullish = None
+    price_above_ma20 = None
+    if last_close is not None and pd.notna(last_close):
+        if last_ma20 is not None and pd.notna(last_ma20):
+            price_above_ma20 = bool(last_close > last_ma20)
+        if all(m is not None and pd.notna(m) for m in (last_ma5, last_ma20, last_ma60)):
+            ma_bullish = bool(last_ma5 > last_ma20 > last_ma60)
+
     return {
         "prev_high_20d": _round_or_none(prev_high_20d),
         "range_20d_pct": _round_or_none(range_20d_pct),
@@ -1414,6 +1431,8 @@ def _compute_shape_features(
         "change_120d": _round_or_none(_change_pct(df["close"], 120)),
         "change_250d": _round_or_none(_change_pct(df["close"], 250)),
         "ma_breakdown_count": ma_breakdown_count,
+        "ma_bullish": ma_bullish,
+        "price_above_ma20": price_above_ma20,
     }
 
 
@@ -1655,9 +1674,14 @@ def _fetch_moneyflow_tushare(
         ts_code=ts_code,
         start_date=start_date,
         end_date=end_date,
+        # moneyflow_dc 实际不返回 sell_* 与 amount（会被接口忽略），
+        # 但 buy_*_amount_rate 可用，用于直接给出各档占成交额比例。
         fields=(
             "trade_date,ts_code,net_amount,net_amount_rate,"
-            "buy_elg_amount,buy_lg_amount,buy_md_amount,buy_sm_amount,"
+            "buy_elg_amount,buy_elg_amount_rate,"
+            "buy_lg_amount,buy_lg_amount_rate,"
+            "buy_md_amount,buy_md_amount_rate,"
+            "buy_sm_amount,buy_sm_amount_rate,"
             "sell_elg_amount,sell_lg_amount,sell_md_amount,sell_sm_amount,"
             "amount"
         ),
@@ -1799,8 +1823,15 @@ def _fetch_moneyflow(
 def _compute_tier_breakdown(moneyflow: pd.DataFrame) -> dict[str, object]:
     """计算最新交易日的四档资金净额、占比与分析文本。
 
-    优先使用 Tushare ``moneyflow_dc`` 返回的买入/卖出金额（元）计算；
-    缺失时回退到 AkShare 风格的四档净流入净额（元/万元，通过正负号判断）。
+    各数据源字段口径不同，按「列是否存在」判断，不做单位猜测：
+
+    - Tushare ``moneyflow_dc``：**只返回** ``buy_*_amount``，且这些列**本身就是
+      各档净额（万元）**，同时提供 ``buy_*_amount_rate``（占成交额比，%）。
+      该接口**没有** ``sell_*`` 与 ``amount`` 列。
+    - Tushare ``moneyflow``(legacy)：``buy_*``/``sell_*`` 成对出现，为买入/卖出额
+      （万元），净额需相减。
+    - AkShare：提供 ``net_*_amount``，已是净额（万元）。
+
     输出：
     - 超大单、大单、中单、小单净额（万元）
     - 每档净额占当日成交额的比例（%）
@@ -1814,9 +1845,15 @@ def _compute_tier_breakdown(moneyflow: pd.DataFrame) -> dict[str, object]:
         }
 
     latest = moneyflow.iloc[-1]
-    amount = _mf_to_float(latest.get("amount"))
 
-    # Tushare 形式：买入/卖出分开；AkShare 形式：净流入净额
+    # moneyflow_dc 没有 sell_* 列；moneyflow(legacy) 有。用列存在性判断口径，
+    # 避免把 moneyflow_dc 的「净额」误当成「买入额」去减一个不存在的卖出额。
+    has_sell_cols = "sell_elg_amount" in moneyflow.columns
+
+    # 成交额（元）仅用于兜底算占比；moneyflow_dc 无此列，优先用 rate 字段。
+    amount = _mf_to_float(latest.get("amount"))
+    amount_wan = amount / 10000.0 if amount and amount > 0 else None
+
     tiers = [
         ("超大单", "buy_elg_amount", "sell_elg_amount", "net_elg_amount"),
         ("大单（主力）", "buy_lg_amount", "sell_lg_amount", "net_lg_amount"),
@@ -1825,20 +1862,25 @@ def _compute_tier_breakdown(moneyflow: pd.DataFrame) -> dict[str, object]:
     ]
 
     breakdown: list[dict[str, object]] = []
-    total_net_yuan = 0.0
+    total_net_wan = 0.0
     for label, buy_col, sell_col, net_col in tiers:
         buy = _mf_to_float(latest.get(buy_col))
-        sell = _mf_to_float(latest.get(sell_col))
+        sell = _mf_to_float(latest.get(sell_col)) if has_sell_cols else None
         net_direct = _mf_to_float(latest.get(net_col))
 
-        if buy is not None and sell is not None:
-            net_yuan = buy - sell
+        if has_sell_cols:
+            # Tushare moneyflow(legacy)：买入/卖出额分开（万元），差额即净额
+            net_wan = round(buy - sell, 2) if (buy is not None and sell is not None) else None
         elif net_direct is not None:
-            # AkShare 返回的净额通常已经是万元或元，这里统一按元处理需要缩放；
-            # 经验上个股资金流接口净额列常为万元，且量纲与 net_amount（万元）接近，
-            # 因此当作万元再转元。若数据异常会在守恒校验中暴露。
-            net_yuan = net_direct * 10000.0
+            # AkShare：net_*_amount 已是净额（万元）
+            net_wan = round(net_direct, 2)
+        elif buy is not None:
+            # Tushare moneyflow_dc：只有 buy_*，其本身即各档净额（万元）
+            net_wan = round(buy, 2)
         else:
+            net_wan = None
+
+        if net_wan is None:
             breakdown.append({
                 "tier": label,
                 "net": None,
@@ -1847,9 +1889,17 @@ def _compute_tier_breakdown(moneyflow: pd.DataFrame) -> dict[str, object]:
             })
             continue
 
-        total_net_yuan += net_yuan
-        net_wan = round(net_yuan / 10000.0, 2)
-        pct = round((net_yuan / amount) * 100.0, 2) if amount and amount > 0 else None
+        total_net_wan += net_wan
+
+        # 优先用数据源自带的占比字段（moneyflow_dc 提供 buy_*_amount_rate，单位 %）
+        rate_col = buy_col.replace("_amount", "_amount_rate")
+        rate = _mf_to_float(latest.get(rate_col))
+        if rate is not None:
+            pct = round(rate, 2)
+        elif amount_wan:
+            pct = round((net_wan / amount_wan) * 100.0, 2)
+        else:
+            pct = None
 
         if abs(net_wan) < 0.01:
             note = f"今天无{label.split('（')[0]}"
@@ -1870,7 +1920,7 @@ def _compute_tier_breakdown(moneyflow: pd.DataFrame) -> dict[str, object]:
         })
 
     # 守恒验证：四档净额之和应接近 0（买入=卖出）
-    conservation_sum = round(total_net_yuan / 10000.0, 2)
+    conservation_sum = round(total_net_wan, 2)
     conservation_ok = abs(conservation_sum) < 1.0
 
     # 生成分析文本

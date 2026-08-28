@@ -607,16 +607,102 @@ class RealtimeIndicatorOutcome:
     slope: Optional[float] = None
     window_points: int = 0
     evaluated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    grade: Optional[str] = None            # 信号分级：强/中/弱
+    stale_seconds: Optional[float] = None  # 行情延迟（秒）
+    data_channel: Optional[str] = None     # 行情来源 token（如 pytdx）
+    direction: Optional[str] = None        # 涨跌方向：up/down/flat
+
+
+_SOURCE_FRIENDLY = {
+    "pytdx": "通达信",
+    "efinance": "东方财富",
+    "akshare_em": "东方财富",
+    "akshare_sina": "新浪",
+    "akshare_qq": "腾讯",
+    "tencent": "腾讯",
+    "tushare": "Tushare",
+    "sina": "新浪",
+    "hithink": "同花顺",
+}
+
+
+def _friendly_channel(token: Optional[Any]) -> str:
+    """Map a RealtimeSource token (or enum) to a friendly Chinese name."""
+    if token is None:
+        return ""
+    value = token.value if hasattr(token, "value") else token
+    if not isinstance(value, str):
+        return ""
+    return _SOURCE_FRIENDLY.get(value, value)
+
+
+def _grade_label(n_hits: int) -> Optional[str]:
+    """Map number of independent signal hits to a confidence grade."""
+    if n_hits >= 3:
+        return "强"
+    if n_hits == 2:
+        return "中"
+    if n_hits == 1:
+        return "弱"
+    return None
+
+
+def _channel_stale_suffix(quote: Optional[Any]) -> str:
+    """Build a '｜通达信·延迟Ns' suffix for notification text."""
+    if quote is None:
+        return ""
+    ch = _friendly_channel(getattr(quote, "source", None))
+    stale = getattr(quote, "stale_seconds", None)
+    parts: List[str] = []
+    if ch:
+        parts.append(ch)
+    if stale is not None:
+        try:
+            parts.append(f"延迟{int(round(stale))}s")
+        except (TypeError, ValueError):
+            pass
+    return "｜" + "·".join(parts) if parts else ""
+
+
+def _quote_pct(quote: Optional[Any]) -> Optional[float]:
+    """Return the effective change_pct for a quote, computing from price/pre_close if needed."""
+    if quote is None:
+        return None
+    pct = getattr(quote, "change_pct", None)
+    if pct is not None and isfinite(pct):
+        return float(pct)
+    pct = getattr(quote, "pct_change", None)
+    if pct is not None and isfinite(pct):
+        return float(pct)
+    price = getattr(quote, "price", None)
+    pre_close = getattr(quote, "pre_close", None)
+    if price is not None and pre_close is not None:
+        try:
+            price_f = float(price)
+            pre_f = float(pre_close)
+            if pre_f:
+                return (price_f - pre_f) / pre_f * 100
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+    return None
+
+
+def _quote_direction(quote: Optional[Any]) -> Optional[str]:
+    """Return 'up'/'down'/'flat' for a realtime quote, or None if unavailable."""
+    pct = _quote_pct(quote)
+    if pct is None:
+        return None
+    if pct > 0:
+        return "up"
+    if pct < 0:
+        return "down"
+    return "flat"
 
 
 def _format_volume_direction(quote: Optional[Any]) -> str:
     """Return a human-readable up/down label for a realtime volume-spike quote."""
-    if quote is None:
-        return "放量预警"
-    pct = getattr(quote, "change_pct", None)
-    if pct is None or not isfinite(pct):
-        pct = getattr(quote, "pct_change", None)
-    if pct is None or not isfinite(pct):
+    pct = _quote_pct(quote)
+    if pct is None:
         return "放量预警"
     if pct > 0:
         return f"放量上涨预警（+{pct:.2f}%）"
@@ -710,18 +796,27 @@ def evaluate_realtime_indicator_alert(
         )
         peak_ok = peak is not None and min_peak > 0 and peak >= (min_peak - 1e-9)
 
+        # --- signal grading (#6): count how many independent conditions fired ---
+        hits = []
+        if ratio_ok:
+            hits.append("量比")
+        if slope_ok:
+            hits.append("斜率")
+        if peak_ok:
+            hits.append("峰值")
+
+        grade = _grade_label(len(hits))
+        channel_suffix = _channel_stale_suffix(quote)
+        stale_seconds = getattr(quote, "stale_seconds", None) if quote is not None else None
+        src = getattr(quote, "source", None) if quote is not None else None
+        data_channel = src.value if hasattr(src, "value") else (src if isinstance(src, str) else None)
+        direction = _quote_direction(quote)
+
         if ratio_ok or slope_ok or peak_ok:
             triggered = True
-            hits = []
-            if ratio_ok:
-                hits.append("量比")
-            if slope_ok:
-                hits.append("斜率")
-            if peak_ok:
-                hits.append("峰值")
-            direction = _format_volume_direction(quote)
+            direction_label = _format_volume_direction(quote)
             head = (
-                f"{direction}：{stock_code} 量比 {current:.2f}x"
+                f"{direction_label}：{stock_code} 量比 {current:.2f}x"
                 + (f"（窗口峰值 {peak:.2f}x）" if peak is not None else "")
             )
             detail = f"，{window} 分钟斜率 +{slope_per_5min:.2f}/5min" if slope_per_5min is not None else ""
@@ -737,6 +832,7 @@ def evaluate_realtime_indicator_alert(
             if peak is not None:
                 summary += f"，峰值 {peak:.2f}x"
             summary += f"（阈值 量比≥{min_ratio:.2f}/斜率≥{min_slope:.2f}/峰值≥{min_peak:.2f}）"
+        summary = summary + (f"｜信号强度 {grade}" if grade else "") + channel_suffix
         return RealtimeIndicatorOutcome(
             triggered=triggered,
             summary=summary,
@@ -744,5 +840,9 @@ def evaluate_realtime_indicator_alert(
             slope=slope,
             window_points=cache.size(stock_code),
             evaluated_at=now_dt,
+            grade=grade,
+            stale_seconds=stale_seconds,
+            data_channel=data_channel,
+            direction=direction,
         )
     raise ValueError(f"unsupported realtime alert_type: {alert_type}")

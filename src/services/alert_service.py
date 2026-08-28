@@ -23,6 +23,7 @@ from src.services.alert_indicators import (
     REALTIME_ALERT_TYPES,
     TECHNICAL_ALERT_TYPES,
     TechnicalIndicatorAlert,
+    _friendly_channel,
     compute_requested_days,
     evaluate_indicator_alert,
     evaluate_realtime_indicator_alert,
@@ -574,8 +575,10 @@ class AlertService:
             )
 
         threshold = threshold_for_realtime_indicator(rule.alert_type, params)
+        channel = outcome.data_channel
+        friendly = _friendly_channel(channel)
         common_kwargs = {
-            "data_source": "realtime_quote",
+            "data_source": friendly or "realtime_quote",
             "data_timestamp": outcome.evaluated_at,
         }
         if outcome.triggered:
@@ -584,6 +587,10 @@ class AlertService:
                 outcome.latest_value,
                 outcome.summary,
                 threshold=threshold,
+                grade=outcome.grade,
+                stale_seconds=outcome.stale_seconds,
+                data_channel=channel,
+                direction=outcome.direction,
                 **common_kwargs,
             )
         return self._not_triggered(
@@ -591,6 +598,10 @@ class AlertService:
             outcome.latest_value,
             outcome.summary,
             threshold=threshold,
+            grade=outcome.grade,
+            stale_seconds=outcome.stale_seconds,
+            data_channel=channel,
+            direction=outcome.direction,
             **common_kwargs,
         )
 
@@ -697,6 +708,10 @@ class AlertService:
         threshold: Optional[float] = None,
         data_source: Optional[str] = None,
         data_timestamp: Optional[datetime] = None,
+        grade: Optional[str] = None,
+        stale_seconds: Optional[float] = None,
+        data_channel: Optional[str] = None,
+        direction: Optional[str] = None,
     ) -> Dict[str, Any]:
         sanitized_message = self._sanitize_text(message)
         return {
@@ -708,6 +723,10 @@ class AlertService:
             "threshold": threshold,
             "data_source": data_source,
             "data_timestamp": data_timestamp,
+            "grade": grade,
+            "stale_seconds": stale_seconds,
+            "data_channel": data_channel,
+            "direction": direction,
             "reason": sanitized_message,
             "message": sanitized_message,
         }
@@ -722,6 +741,10 @@ class AlertService:
         threshold: Optional[float] = None,
         data_source: Optional[str] = None,
         data_timestamp: Optional[datetime] = None,
+        grade: Optional[str] = None,
+        stale_seconds: Optional[float] = None,
+        data_channel: Optional[str] = None,
+        direction: Optional[str] = None,
     ) -> Dict[str, Any]:
         sanitized_message = self._sanitize_text(message)
         return {
@@ -733,6 +756,10 @@ class AlertService:
             "threshold": threshold,
             "data_source": data_source,
             "data_timestamp": data_timestamp,
+            "grade": grade,
+            "stale_seconds": stale_seconds,
+            "data_channel": data_channel,
+            "direction": direction,
             "reason": sanitized_message,
             "message": sanitized_message,
         }

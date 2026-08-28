@@ -1668,6 +1668,9 @@ def main() -> int:
 
                 # 限频：contextToken 已自动重置、仅等待用户发消息的情形，避免每 30 分钟重复告警。
                 _openclaw_last_user_msg_alert_ts = {"ts": 0.0}
+                # 限频：上下文临近到期时的「请发消息续期」提醒，避免周期内重复打扰。
+                _openclaw_last_keepalive_ts = {"ts": 0.0}
+                _openclaw_last_context_mtime = {"mt": 0.0}
 
                 def openclaw_health_task():
                     sender = OpenclawWechatSender(_reload_runtime_config())
@@ -1734,6 +1737,53 @@ def main() -> int:
                             "[OpenClawHealth] 微信通道健康: %s",
                             health.get("detail"),
                         )
+
+                # 上下文临近到期：趁仍能推送，主动提醒接收人发消息续期。
+                # 防止过期后 bot 无法主动推送、只能等用户在微信里发消息。
+                if not needs_user_message and health.get("gateway_reachable"):
+                    now = time.time()
+                    keepalive_ok, keepalive_reason = sender.should_send_context_keepalive()
+                    if keepalive_ok:
+                        mt = sender.context_token_mtime() or 0.0
+                        if mt > _openclaw_last_context_mtime["mt"] + 60:
+                            # 接收人刚发消息重建了上下文 → 重置本周期提醒计时。
+                            _openclaw_last_context_mtime["mt"] = mt
+                            _openclaw_last_keepalive_ts["ts"] = 0.0
+                        keepalive_gap = float(
+                            os.environ.get("OPENCLAW_CONTEXT_TTL_SECONDS", 72 * 3600)
+                        )
+                        if now - _openclaw_last_keepalive_ts["ts"] >= keepalive_gap:
+                            _openclaw_last_keepalive_ts["ts"] = now
+                            remind_text = (
+                                "⏰ 微信推送续期提醒：OpenClaw 对话上下文即将到期，"
+                                "到期后将无法自动推送预警。请给本 bot 发一条任意微信消息"
+                                "以重建对话上下文，保持推送不中断。"
+                            )
+                            sent = sender.send_to_openclaw_wechat(
+                                remind_text, auto_repair=False
+                            )
+                            if not sent:
+                                # 微信已不可用（上下文其实已失效）：转网页弹窗兜底提醒。
+                                try:
+                                    from src.services.web_alert_hub import (
+                                        get_web_alert_hub,
+                                    )
+                                    get_web_alert_hub().push(
+                                        "微信推送即将失效",
+                                        "OpenClaw 对话上下文即将到期，请给 bot 发一条微信消息以续期，"
+                                        "否则预警推送会中断。",
+                                        level="warning",
+                                    )
+                                except Exception:
+                                    pass
+                                logger.warning(
+                                    "[OpenClawHealth] 上下文续期提醒发送失败（微信已不可用），"
+                                    "已转网页弹窗提醒。"
+                                )
+                            else:
+                                logger.info(
+                                    "[OpenClawHealth] 已发送微信续期提醒（上下文临近到期）"
+                                )
 
                 background_tasks.append({
                     "task": openclaw_health_task,

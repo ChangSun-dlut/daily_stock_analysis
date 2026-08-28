@@ -26,13 +26,19 @@ from src.analysis_context_pack_overview import (
     ANALYSIS_CONTEXT_PACK_OVERVIEW_KEY,
     extract_analysis_context_pack_overview,
 )
-from src.core.trading_calendar import build_market_phase_context, get_market_for_stock
+from src.core.trading_calendar import (
+    build_market_phase_context,
+    get_market_for_stock,
+    infer_market_phase,
+    MarketPhase,
+)
 from src.market_phase_summary import (
     format_public_phase_pack_excerpt,
     render_market_phase_summary,
 )
 from src.services.alert_service import AlertService
 from src.services.decision_signal_service import DecisionSignalService
+from src.services.decision_signal_outcome_service import DecisionSignalOutcomeService
 from src.services.decision_signal_summary import (
     format_decision_signal_excerpt,
     summarize_decision_signal,
@@ -49,6 +55,10 @@ ALERT_WORKER_FINGERPRINT_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_DB_ALERT_COOLDOWN_SECONDS = 24 * 60 * 60
 ALERT_WORKER_RULE_LIMIT = 1000
 WRITABLE_TRIGGER_STATUSES = frozenset({"triggered", "skipped", "degraded", "failed"})
+
+# Lazy DataFetcherManager for stock-name enrichment in notification titles.
+_alert_worker_data_manager: Optional[Any] = None
+_alert_worker_name_cache: Dict[str, Optional[str]] = {}
 
 
 @dataclass
@@ -491,6 +501,9 @@ class AlertWorker:
                 "threshold": result.get("threshold"),
                 "data_source": result.get("data_source"),
                 "data_timestamp": self._iso_or_text(result.get("data_timestamp")),
+                "grade": result.get("grade"),
+                "stale_seconds": result.get("stale_seconds"),
+                "data_channel": result.get("data_channel"),
                 "rule_key_hash": key_hash,
             },
         }
@@ -514,6 +527,16 @@ class AlertWorker:
             parts.append(f"threshold={threshold}")
         if observed not in (None, ""):
             parts.append(f"observed={observed}")
+        # #6 信号分级 + #8 行情时效/来源，便于事后复盘与权威性展示
+        grade = result.get("grade")
+        if grade:
+            parts.append(f"信号强度={grade}")
+        channel = result.get("data_channel")
+        if channel:
+            parts.append(f"来源={channel}")
+        stale = result.get("stale_seconds")
+        if stale is not None:
+            parts.append(f"延迟={stale}s")
         return " | ".join(str(part) for part in parts)
 
     def _alert_risk_summary(self, runtime_rule: RuntimeAlertRule, result: Dict[str, Any]) -> str:
@@ -665,6 +688,16 @@ class AlertWorker:
         manager = DataFetcherManager()
         stock_codes = list(targets.keys())
 
+        # #11 时段过滤：仅在与监控标的相同的市场“正在交易”时刷新实时量能缓存，
+        #     避免收盘后/盘前 pytdx 服务器断开导致的 “无法连接任何服务器” 报错与假信号。
+        sample_market = get_market_for_stock(stock_codes[0]) or "cn"
+        phase = infer_market_phase(sample_market)
+        if phase not in (MarketPhase.INTRADAY, MarketPhase.CLOSING_AUCTION):
+            logger.debug(
+                "[AlertWorker] 非交易时段(%s)，跳过实时量能缓存刷新", phase.value
+            )
+            return
+
         # (1) 1 分钟 K 线独立喂入：以 60s 频率直接走 PytdxFetcher，与下面 300s 的
         #     spot-quote 量比刷新解耦，且**不依赖 get_realtime_quote 的多源 fallback**
         #     —— 这是修复「盘中主链路切换后 1 分钟预警消失」的核心。
@@ -710,12 +743,48 @@ class AlertWorker:
     def _db_cooldown_fallback_key(rule_key: str) -> str:
         return f"db_cooldown:{rule_key}"
 
+    def _alert_historical_win_rate(self) -> Optional[str]:
+        """#7 复用 DecisionSignalOutcomeService 统计系统历史同类预警信号胜率。
+
+        返回形如 '历史预警信号胜率 68%（样本 142 次）'；样本不足或统计失败时返回 None。
+        结果进程内缓存 30 分钟，避免每次触发都重算。
+        """
+        try:
+            now = self.now_provider()
+            cached = getattr(self, "_alert_win_rate_cache", None)
+            if cached and now - cached[0] < 1800:
+                return cached[1]
+            outcome_service = DecisionSignalOutcomeService(db_manager=self.service.db)
+            stats = outcome_service.get_stats()
+            by_source = (stats.get("breakdowns") or {}).get("source_type") or {}
+            alert_stats = by_source.get("alert") or {}
+            sample = alert_stats.get("sample_size") or 0
+            hit_rate = alert_stats.get("hit_rate")
+            text: Optional[str] = None
+            if sample and sample >= 20 and hit_rate is not None:
+                text = f"历史预警信号胜率 {hit_rate:.0f}%（样本 {sample} 次）"
+            self._alert_win_rate_cache = (now, text)
+            return text
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("[AlertWorker] 历史胜率统计失败: %s", exc)
+            return None
+
     def _send_notification(self, runtime_rule: RuntimeAlertRule, result: Dict[str, Any]) -> "NotificationDispatchResult":
         from src.notification import NotificationBuilder, NotificationService
 
         notification_service = self.notifier or NotificationService()
-        title = f"Event Alert | {self._display_target(runtime_rule)}"
+        direction_icon = {"up": "📈", "down": "📉", "flat": "➡️"}.get(
+            result.get("direction"), ""
+        )
+        title_prefix = f"{direction_icon} Event Alert" if direction_icon else "Event Alert"
+        title = f"{title_prefix} | {self._display_target(runtime_rule)}"
         content = result.get("reason") or result.get("message") or runtime_rule.rule.description or "Alert triggered"
+
+        # #6 信号分级 + #8 行情时效/来源 已写入 summary（reason）；此处仅追加 #7 历史胜率
+        win_rate = self._alert_historical_win_rate()
+        if win_rate:
+            content = f"{content}\n{win_rate}"
+
         diagnostics = self._diagnostics_payload(result.get("diagnostics"))
         visibility = diagnostics.get("analysis_visibility") if isinstance(diagnostics.get("analysis_visibility"), dict) else None
         if visibility is None:
@@ -956,7 +1025,43 @@ class AlertWorker:
 
     @staticmethod
     def _display_target(runtime_rule: RuntimeAlertRule) -> str:
-        return str(runtime_rule.display_target or runtime_rule.effective_target or getattr(runtime_rule.rule, "stock_code", "") or "?")
+        code = str(
+            runtime_rule.display_target
+            or runtime_rule.effective_target
+            or getattr(runtime_rule.rule, "stock_code", "")
+            or "?"
+        )
+        name = AlertWorker._stock_name_for_code(code)
+        if name and name != code and not name.startswith("股票"):
+            return f"{name} {code}"
+        return code
+
+    @staticmethod
+    def _stock_name_for_code(stock_code: str) -> Optional[str]:
+        if not stock_code or stock_code == "?":
+            return None
+        cached = _alert_worker_name_cache.get(stock_code)
+        if cached is not None or stock_code in _alert_worker_name_cache:
+            return cached
+        normalized = normalize_stock_code(stock_code)
+        if not normalized:
+            _alert_worker_name_cache[stock_code] = None
+            return None
+        try:
+            manager = AlertWorker._data_manager()
+            name = manager.get_stock_name(normalized)
+        except Exception:
+            name = None
+        _alert_worker_name_cache[stock_code] = name
+        return name
+
+    @staticmethod
+    def _data_manager() -> Any:
+        global _alert_worker_data_manager
+        if _alert_worker_data_manager is None:
+            from data_provider.base import DataFetcherManager
+            _alert_worker_data_manager = DataFetcherManager()
+        return _alert_worker_data_manager
 
     @staticmethod
     def _cooldown_seconds(runtime_rule: RuntimeAlertRule) -> int:
