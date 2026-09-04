@@ -72,7 +72,7 @@ def test_send_text_success_nested_payload(monkeypatch):
 def test_send_text_failure_returncode(monkeypatch):
     svc = _make_sender(monkeypatch, run_returncode=1, run_stderr="boom")
     # 失败后会自动修复并重试；mock 掉修复动作避免真实拉起 gateway。
-    monkeypatch.setattr(svc, "_repair_service", lambda: None)
+    monkeypatch.setattr(svc, "_repair_service", lambda *, force_clear_token=False, restart_gateway=True: None)
     assert svc.send_to_openclaw_wechat("你好微信") is False
 
 
@@ -88,7 +88,7 @@ def test_send_text_self_heals_after_repair(monkeypatch):
         return real_run(extra_args, timeout_seconds)  # 修复后成功
 
     monkeypatch.setattr(svc, "_run_cli", flaky)
-    monkeypatch.setattr(svc, "_repair_service", lambda: None)
+    monkeypatch.setattr(svc, "_repair_service", lambda *, force_clear_token=False, restart_gateway=True: None)
     monkeypatch.setattr(svc, "_gateway_reachable", lambda: True)
     assert svc.send_to_openclaw_wechat("hi") is True
     assert attempts["n"] == 2
@@ -459,7 +459,7 @@ def test_run_cli_records_auth_needed_error(monkeypatch):
         run_returncode=1,
         run_stderr="sendMessage ret=-2 errmsg=prepare failed",
     )
-    monkeypatch.setattr(svc, "_repair_service", lambda: None)
+    monkeypatch.setattr(svc, "_repair_service", lambda *, force_clear_token=False, restart_gateway=True: None)
     assert svc.send_to_openclaw_wechat("hi") is False
     from src.notification_sender.openclaw_wechat_sender import OPENCLAW_ERR_AUTH_NEEDED
     assert svc.last_error_type == OPENCLAW_ERR_AUTH_NEEDED
@@ -472,7 +472,7 @@ def test_run_cli_records_cdn_error(monkeypatch):
         run_returncode=1,
         run_stderr="OutboundDeliveryError: CDN upload server error: status 500",
     )
-    monkeypatch.setattr(svc, "_repair_service", lambda: None)
+    monkeypatch.setattr(svc, "_repair_service", lambda *, force_clear_token=False, restart_gateway=True: None)
     assert svc._send_openclaw_wechat_image(b"\x89PNG") is False
     from src.notification_sender.openclaw_wechat_sender import OPENCLAW_ERR_CDN
     assert svc.last_error_type == OPENCLAW_ERR_CDN
@@ -596,7 +596,7 @@ def test_repair_service_clears_context_token_on_prepare_failed(monkeypatch, tmp_
     svc.last_error_type = OPENCLAW_ERR_AUTH_NEEDED
     svc.last_error_detail = "sendMessage ret=-2 errmsg=prepare failed"
 
-    info = svc._repair_service()
+    info = svc._repair_service(force_clear_token=True)
     assert info["context_token_cleared"] is True
     # channels.start 成功（(a) 临时掉线）时 _repair_service 不在此标记 needs_user_message，
     # 交由发送方重试判断；仅当 channels.start 失败（(b) contextToken 彻底 missing）才标记。
@@ -607,6 +607,27 @@ def test_repair_service_clears_context_token_on_prepare_failed(monkeypatch, tmp_
     assert restart_calls == []
     assert info["gateway_restarted"] is False
     assert not token.exists()
+
+
+def test_clear_stale_context_tokens_skips_fresh_token(monkeypatch, tmp_path):
+    """force_clear_token=False 时，mtime 不早于最近失败时刻的 token 不被误删。
+
+    2026-09-04 加固点：发送链路失败重试改为默认 force=False 走 mtime 护栏，
+    避免把临时 (a) iLink 掉线误判成 (b) contextToken 失效并主动制造 token 失效。
+    """
+    svc = _make_sender(monkeypatch)
+    token = tmp_path / "tok.context-tokens.json"
+    token.write_text("{}")
+    monkeypatch.setattr(svc, "_context_tokens_path", lambda: str(token))
+    # 模拟“用户刚发消息重建了 token，随后才检测到 prepare failed”：失败时刻记录在前，
+    # 之后重建的 token mtime 晚于失败时刻 → 护栏跳过，保留用户刚重建的 token。
+    fail_ts = time.time() - 5.0
+    type(svc)._last_context_failure_ts = fail_ts
+    time.sleep(0.05)
+    token.write_text("{}")  # 重建 token，mtime 晚于失败时刻
+    # force=False 走护栏：token mtime >= 失败时刻 → 跳过，保留用户刚重建的 token。
+    assert svc._clear_stale_context_tokens(force=False) is False
+    assert token.exists()
 
 
 def test_send_text_prepare_failed_auto_clears_token_and_stops(monkeypatch, tmp_path):

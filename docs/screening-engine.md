@@ -116,6 +116,31 @@ DSA 中存在两类用途不同的策略文件：
 
 即使 `shrink_pullback`、`volume_breakout` 同名，两者也使用不同目录、Schema 和 loader，不会相互覆盖。筛选策略可通过 `analysis_skills` 声明下一阶段建议使用的分析 skill；Web 的“进一步深度分析”会显式携带这些 skill。未声明映射的筛选策略继续使用用户当前选择或默认分析策略，不做含义不可靠的强行映射。
 
+## 老鸭头策略（old_duck_head）
+
+按经典形态「鸭颈放量上穿 MA60 → 鸭头缩量回调洗盘 → 鸭嘴放量突破前高」选股，阈值取自通达信/同花顺选股公式与实战帖的多源共识。
+
+日线新增 7 个形态特征列（`src/services/screening/daily.py`）：
+
+| 列 | 含义 |
+| --- | --- |
+| `barslast_ma5_cross_ma60` | 距最近一次 MA5 上穿 MA60 的交易日数（鸭颈成熟度）；`None` 表示从未形成鸭颈 |
+| `duck_nose_gap_pct` | 鸭颈以来 MA5/MA10 最小间隙百分比，越小越贴合（鸭鼻孔） |
+| `death_then_golden_5_10` | 鸭颈以来是否出现过 MA5 死叉 MA10 后再金叉（鸭嘴） |
+| `duck_beak_volume_contraction` | 鸭颈以来成交量峰值/谷值（量芝麻点，共识阈值 ≥ 2） |
+| `ma60_slope_20d_pct` | MA60 近 20 日斜率，用于排除 60 线仍下行的反弹诱多 |
+| `duck_head_ma60_gap_pct` | 回调期最高价相对 MA60 的乖离，鸭头顶应远离 60 日线 |
+| `days_below_ma60_max` | 鸭颈以来连续收盘低于 MA60 的最大天数，用于排除有效跌破 |
+
+`old_duck_head_quality` 因子主导评分，形态硬过滤排除五类假老鸭头：60 线下行诱多、回调放量出货、连续 3 日跌破 60 线、鸭嘴无量突破、高位诱多。
+
+两个实现约定：
+
+- 鸭鼻孔采用「间隙越小越强」的贴合度判据，以兼容“死叉派”（必须死叉）与“粘合派”（不死叉、走平微拐）两派定义；死叉后再金叉只作为加分项，不作为硬条件。
+- 关键风控使用**乘性衰减**而非线性扣分：加性评分的 base 与 bonus 总和可能超过 100，线性惩罚会被 `clip(0, 100)` 上限掩盖，导致假形态与真形态同样拿满分（实测 60 线下行、破位、鼻孔过大三个反例均为 100 分）。
+
+新增形态过滤字段需同步扩展三处：`HardFilterConfig`（`src/services/screening/models.py`）、`apply_hard_filters`（`src/services/screening/filter.py`）以及该文件中两处诊断函数（一处为拒绝原因摘要，一处为列需求登记，两者 `record(...)` 参数不同）。
+
 ## DSA 原生能力复用
 
 - 行情：日 K 优先调用 DSA `DataFetcherManager`，无结果才进入筛选模块自己的多源 fallback；最终候选继续补 DSA 实时行情。

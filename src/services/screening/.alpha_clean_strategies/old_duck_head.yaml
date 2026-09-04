@@ -1,0 +1,103 @@
+name: old_duck_head
+display_name: 老鸭头
+description: 鸭颈放量上穿 MA60 → 鸭头缩量回调洗盘（量芝麻点）→ 鸭嘴放量突破前高。old_duck_head_quality 因子主导评分，形态硬过滤排除五类假老鸭头。
+version: '1.0'
+category: trend
+tags:
+- 老鸭头
+- duck_head
+- trend
+- breakout
+- daily_k
+style:
+  risk_profile: aggressive
+  holding_period: swing
+  execution_style: breakout
+  market_regime:
+  - risk_on
+  - trend
+  capital_profile: medium_liquidity
+  ui_badge: 老鸭头
+screening:
+  enabled: true
+  market_scope:
+  - cn
+  hard_filters:
+    exclude_st: true
+    amount_min: 50000000
+    price_min: 5
+    price_max: 500
+    turnover_rate_min: 1.0
+    signal_score_min: 50
+    change_60d_min: 5.0
+    change_60d_max: 80.0
+    change_pct_min: -3.0
+    change_pct_max: 5.0
+    require_price_above_ma20: true
+    require_ma_bullish: true
+    macd_status_whitelist:
+    - bullish
+    - neutral
+    range_20d_pct_max: 35.0
+    volatility_20d_pct_max: 35.0
+    max_drawdown_20d_pct_min: -25.0
+    atr_20_pct_max: 8.0
+    volume_ratio_20d_min: 0.6
+  tech_weight: 0.5
+  factor_weights:
+    old_duck_head_quality: 0.55
+    momentum: 0.14
+    stability: 0.1
+    activity: 0.1
+    theme_heat: 0.07
+    reversal: 0.04
+  scoring_profile: {}
+  risk_profile:
+    chase_change_pct: 9.3
+    abnormal_volume_ratio: 5.0
+    high_turnover_rate: 15.0
+    weak_signal_score: 50.0
+  portfolio_profile:
+    max_same_bucket: 1
+    concentration_penalty: 4.0
+    buckets:
+      金融:
+      - 券商
+      - 银行
+      - 保险
+      AI算力:
+      - AI算力
+      - 算力
+      - 数据中心
+      - 服务器
+      - 光模块
+      新能源:
+      - 新能源
+      - 光伏
+      - 锂电
+      - 电池
+      - 储能
+      机器人:
+      - 机器人
+      - 减速器
+      - 执行器
+      - 伺服
+      医药:
+      - 医药
+      - 生物医药
+      - CXO
+      - 创新药
+  ranking_hints: '在满足老鸭头形态的候选中，优先关注：
+
+    1. 鸭颈已形成且成熟：MA5/MA10 放量上穿 MA60 后 15-45 日，60 日均线走平或向上
+
+    2. 鸭头回调充分缩量：回调期量能峰值/谷值 >= 2（量芝麻点），理想 >= 3，且未有效跌破 60 日线
+
+    3. 鸭头顶远离 60 日线（>=8%），回撤 8-25%
+
+    4. 鸭鼻孔贴合（MA5/MA10 间隙 <=0.5%），出现死叉后再金叉（鸭嘴）
+
+    5. 鸭嘴放量突破前高（ramp_ratio 1.15-3.5）；无量突破属诱多，必须排除
+
+    '
+  max_output: 8

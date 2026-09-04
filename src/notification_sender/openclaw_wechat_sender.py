@@ -650,7 +650,7 @@ class OpenclawWechatSender:
         return any(pat in joined for pat in _OPENCLAW_CRASH_LOOP_PATTERNS)
 
     def _repair_service(
-        self, *, force_clear_token: bool = True, restart_gateway: bool = True
+        self, *, force_clear_token: bool = False, restart_gateway: bool = True
     ) -> dict:
         """根据最近一次发送失败语义自动修复 gateway / iLink contextToken。
 
@@ -664,8 +664,9 @@ class OpenclawWechatSender:
           治不了，反而冲断 iLink 会话并累积 unclean boot → crash-loop breaker。
 
         不会改动 openclaw 配置（避免 ``doctor --repair`` 旋转 token / 启用插件等副作用）。
-        ``force_clear_token`` 仅发送链路在刚检测到失败时应为 ``True``；巡检场景用
-        ``False`` 以走 mtime / 冷却护栏，避免误删用户刚重建的 token。
+        ``force_clear_token`` 默认 ``False``，走 mtime / 冷却护栏，避免误删用户刚
+        重建的 token；仅测试或明确需要强制清除的场景传 ``True``。巡检与发送链路
+        失败重试均使用默认 ``False``。
         ``restart_gateway`` 控制“端口可达时是否仍强制重启”；巡检场景传 ``False``
         避免每轮探活都重启一个健康的 gateway。
 
@@ -991,7 +992,7 @@ class OpenclawWechatSender:
         logger.warning(
             "OPENCLAW_WECHAT: 文本推送首次失败，尝试自动修复后重试"
         )
-        repair = self._repair_service()
+        repair = self._repair_service(force_clear_token=False)
         self.last_repair_info = repair
         if repair and repair.get("needs_user_message"):
             # contextToken 已失效：清掉过期 token + 重启后仍需用户发消息才能恢复，
@@ -1056,7 +1057,7 @@ class OpenclawWechatSender:
         logger.warning(
             "OPENCLAW_WECHAT: 图片推送首次失败，尝试自动修复后重试"
         )
-        repair = self._repair_service()
+        repair = self._repair_service(force_clear_token=False)
         self.last_repair_info = repair
         if repair and repair.get("needs_user_message"):
             self.last_needs_user_message = True

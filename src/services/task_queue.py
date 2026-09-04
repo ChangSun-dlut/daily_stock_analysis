@@ -768,11 +768,18 @@ class AnalysisTaskQueue:
                 # 分析返回空结果
                 raise Exception(service.last_error or "分析返回空结果")
                 
-        except Exception as e:
+        except BaseException as e:
+            # 必须为 BaseException 而非 Exception：asyncio.CancelledError 在
+            # Python 3.8+ 属于 BaseException，若只捕获 Exception 会让任务在
+            # LLM/异步调用被取消时直接冒泡退出，worker 线程回归空闲但任务状态
+            # 永远停在 processing（典型表现为前端卡 97% 无日志）。
             if "diag_token" in locals():
                 reset_run_diagnostic_context(diag_token)
             error_msg = str(e)
-            logger.error(f"[TaskQueue] 任务失败: {task_id} ({stock_code}), 错误: {error_msg}")
+            logger.exception(
+                f"[TaskQueue] 任务失败(含未捕获异常): {task_id} ({stock_code}), "
+                f"异常类型: {type(e).__name__}, 错误: {error_msg}"
+            )
             
             with self._data_lock:
                 task = self._tasks.get(task_id)

@@ -1,0 +1,125 @@
+# Derived from AlphaSift revision 9f522747caafd3c0b1ddb7e14d5cf44c8580b6cf.
+# Licensed under Apache-2.0 and modified for daily_stock_analysis.
+# 老鸭头形态选股策略
+#
+# 形态定义（量化阈值来自多源实战共识：通达信/同花顺选股公式 + 雪球/东财/百家号实战帖）：
+#   鸭颈   = MA5 与 MA10 放量上穿 MA60，且 MA60 走平或向上
+#   鸭头   = 上穿 MA60 后回撤洗盘，幅度适中且不有效跌破 MA60
+#   鸭鼻孔 = MA5 与 MA10 死叉或高度粘合，空隙越小越强（兼容"死叉派"与"粘合派"两派定义）
+#   鸭嘴   = MA5 再次上穿 MA10 并放量突破回调高点
+#   量芝麻 = 回调期成交量峰值/谷值 >= 2（多源共识：缩量至拉升期的 40%~60%）
+#
+# 五类假老鸭头（全部由硬过滤/评分衰减排除）：
+#   1) 60 日均线仍持续下行 -> 只是反弹诱多
+#   2) 鸭头回调伴随放量下跌 -> 是出货不是洗盘
+#   3) 有效跌破 60 日线（连续 3 日收在下方）-> 形态作废
+#   4) 鸭嘴无量突破 -> 诱多陷阱
+#   5) 高位老鸭头（已大涨数倍后再出形态）-> 诱多
+name: old_duck_head
+display_name: 老鸭头
+description: 鸭颈放量上穿 MA60 → 鸭头缩量回调洗盘（量芝麻点）→ 鸭嘴放量突破前高。old_duck_head_quality 因子主导评分，形态硬过滤排除五类假老鸭头。
+version: "1.0"
+category: trend
+tags: [老鸭头, duck_head, trend, breakout, daily_k]
+analysis_skills: [old_duck_head]
+style:
+  risk_profile: aggressive
+  holding_period: swing
+  execution_style: breakout
+  market_regime: [risk_on, trend]
+  capital_profile: medium_liquidity
+  ui_badge: 老鸭头
+
+screening:
+  enabled: true
+  market_scope: [cn]
+  hard_filters:
+    exclude_st: true
+    amount_min: 50000000
+    price_min: 5
+    price_max: 500
+    turnover_rate_min: 1.0
+    signal_score_min: 50
+    change_60d_min: 5.0
+    change_60d_max: 80.0
+    change_pct_min: -3.0
+    change_pct_max: 5.0
+    require_price_above_ma20: true
+    require_ma_bullish: true
+    macd_status_whitelist: [bullish, neutral]
+    range_20d_pct_max: 35.0
+    volatility_20d_pct_max: 35.0
+    max_drawdown_20d_pct_min: -25.0
+    atr_20_pct_max: 8.0
+    volume_ratio_20d_min: 0.6
+    # --- 老鸭头形态硬过滤（配合 old_duck_head_quality 因子）---
+    # barslast_ma5_cross_ma60_min 同时充当形态门禁：从未上穿 MA60 的个股该列为
+    # NaN，比较后必然被淘汰，保证候选池只含已形成鸭颈的标的。
+    barslast_ma5_cross_ma60_min: 10
+    barslast_ma5_cross_ma60_max: 60
+    duck_beak_volume_contraction_min: 2.0
+    ma60_slope_20d_pct_min: 0.0
+    days_below_ma60_max: 2
+    duck_head_ma60_gap_pct_min: 8.0
+  tech_weight: 0.5
+  factor_weights:
+    old_duck_head_quality: 0.55
+    momentum: 0.14
+    stability: 0.10
+    activity: 0.10
+    theme_heat: 0.07
+    reversal: 0.04
+  scoring_profile:
+    # --- 老鸭头评分参数（与 scorer._DEFAULT_SCORING_PROFILE 默认值一致，
+    #     显式声明便于按策略单独调参；重命名/新增参数时须同步改默认表）---
+    old_duck_head_quality_base: 50.0
+    old_duck_head_barslast_ideal_min: 15.0
+    old_duck_head_barslast_ideal_max: 45.0
+    old_duck_head_barslast_bonus: 6.0
+    old_duck_head_barslast_penalty_slope: 0.6
+    old_duck_head_nose_gap_ideal: 0.5
+    old_duck_head_nose_gap_bonus: 8.0
+    old_duck_head_nose_gap_penalty_slope: 4.0
+    old_duck_head_death_golden_bonus: 8.0
+    old_duck_head_ramp_ratio_ideal_min: 1.15
+    old_duck_head_ramp_ratio_ideal_max: 3.5
+    old_duck_head_ramp_ratio_bonus: 10.0
+    old_duck_head_ramp_ratio_penalty_slope: 25.0
+    old_duck_head_ramp_ratio_weak: 1.0
+    old_duck_head_ramp_weak_decay: 0.5
+    old_duck_head_volume_contraction_ideal: 3.0
+    old_duck_head_volume_contraction_bonus: 8.0
+    old_duck_head_volume_contraction_penalty_slope: 8.0
+    old_duck_head_ma60_slope_min: 0.0
+    old_duck_head_ma60_slope_bonus: 6.0
+    old_duck_head_ma60_slope_decay: 0.5
+    old_duck_head_head_gap_ideal_min: 8.0
+    old_duck_head_head_gap_bonus: 6.0
+    old_duck_head_head_gap_penalty_slope: 1.5
+    old_duck_head_days_below_ma60_max_allowed: 2.0
+    old_duck_head_days_below_ma60_bonus: 4.0
+    old_duck_head_days_below_ma60_decay: 0.4
+    old_duck_head_chase_start_pct: 9.3
+    old_duck_head_chase_penalty_slope: 1.5
+  risk_profile:
+    chase_change_pct: 9.3
+    abnormal_volume_ratio: 5.0
+    high_turnover_rate: 15.0
+    weak_signal_score: 50.0
+  portfolio_profile:
+    max_same_bucket: 1
+    concentration_penalty: 4.0
+    buckets:
+      金融: [券商, 银行, 保险]
+      AI算力: [AI算力, 算力, 数据中心, 服务器, 光模块]
+      新能源: [新能源, 光伏, 锂电, 电池, 储能]
+      机器人: [机器人, 减速器, 执行器, 伺服]
+      医药: [医药, 生物医药, CXO, 创新药]
+  ranking_hints: |
+    在满足老鸭头形态的候选中，优先关注：
+    1. 鸭颈已形成且成熟：MA5/MA10 放量上穿 MA60 后 15-45 日，60 日均线走平或向上
+    2. 鸭头回调充分缩量：回调期量能峰值/谷值 >= 2（量芝麻点），理想 >= 3，且未有效跌破 60 日线
+    3. 鸭头顶远离 60 日线（>=8%），回撤 8-25%
+    4. 鸭鼻孔贴合（MA5/MA10 间隙 <=0.5%），出现死叉后再金叉（鸭嘴）
+    5. 鸭嘴放量突破前高（ramp_ratio 1.15-3.5）；无量突破属诱多，必须排除
+  max_output: 8

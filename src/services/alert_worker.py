@@ -53,6 +53,9 @@ if TYPE_CHECKING:
 
 ALERT_WORKER_FINGERPRINT_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_DB_ALERT_COOLDOWN_SECONDS = 24 * 60 * 60
+# 分钟级实时放量(volume_spike_rt)盘中持续监控：去重窗口与刷新周期对齐(~5min)，
+# 不再复用 24h 默认，避免盘中触发一次后被一整天冷却压制。
+REALTIME_ALERT_DEFAULT_COOLDOWN_SECONDS = 5 * 60
 ALERT_WORKER_RULE_LIMIT = 1000
 WRITABLE_TRIGGER_STATUSES = frozenset({"triggered", "skipped", "degraded", "failed"})
 
@@ -771,13 +774,23 @@ class AlertWorker:
 
     def _send_notification(self, runtime_rule: RuntimeAlertRule, result: Dict[str, Any]) -> "NotificationDispatchResult":
         from src.notification import NotificationBuilder, NotificationService
+        from src.services.alert_indicators import REALTIME_ALERT_TYPES
 
         notification_service = self.notifier or NotificationService()
         direction_icon = {"up": "📈", "down": "📉", "flat": "➡️"}.get(
             result.get("direction"), ""
         )
         title_prefix = f"{direction_icon} Event Alert" if direction_icon else "Event Alert"
+        # 分钟级实时放量(volume_spike_rt)区分来源：横盘选股自动注册 vs 用户自选股，
+        # 标题加来源标签，避免两类通知文案无法区分。
+        source_tag = ""
+        rule = getattr(runtime_rule, "rule", None)
+        if getattr(rule, "alert_type", None) in REALTIME_ALERT_TYPES:
+            rule_source = getattr(rule, "source", None)
+            source_tag = "横盘突破" if rule_source == "consolidation_breakout" else "自选股"
         title = f"{title_prefix} | {self._display_target(runtime_rule)}"
+        if source_tag:
+            title = f"{title_prefix} | {source_tag}｜{self._display_target(runtime_rule)}"
         content = result.get("reason") or result.get("message") or runtime_rule.rule.description or "Alert triggered"
 
         # #6 信号分级 + #8 行情时效/来源 已写入 summary（reason）；此处仅追加 #7 历史胜率
@@ -1065,8 +1078,15 @@ class AlertWorker:
 
     @staticmethod
     def _cooldown_seconds(runtime_rule: RuntimeAlertRule) -> int:
+        from src.services.alert_indicators import REALTIME_ALERT_TYPES
+
         policy = runtime_rule.cooldown_policy if isinstance(runtime_rule.cooldown_policy, dict) else None
         if not policy or "cooldown_seconds" not in policy:
+            # 分钟级实时放量(volume_spike_rt)盘中持续监控：去重窗口与刷新周期对齐，
+            # 不沿用 24h 默认，否则盘中触发一次即被冷却一整天。
+            alert_type = getattr(getattr(runtime_rule, "rule", None), "alert_type", None)
+            if alert_type in REALTIME_ALERT_TYPES:
+                return REALTIME_ALERT_DEFAULT_COOLDOWN_SECONDS
             return DEFAULT_DB_ALERT_COOLDOWN_SECONDS
         try:
             return max(0, int(policy.get("cooldown_seconds") or 0))

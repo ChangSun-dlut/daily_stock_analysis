@@ -18,11 +18,44 @@ _FACTOR_COLUMNS = {
     "theme_heat": "factor_theme_heat_score",
     "topic_alignment": "factor_topic_alignment_score",
     "consolidation_quality": "factor_consolidation_quality_score",
+    "old_duck_head_quality": "factor_old_duck_head_quality_score",
     "bottom_accumulation_quality": "factor_bottom_accumulation_quality_score",
     "capital_heat_quality": "factor_capital_heat_quality_score",
     "sector_limitup_ladder": "factor_sector_limitup_ladder_score",
 }
 _DEFAULT_SCORING_PROFILE = {
+    # === 老鸭头（old_duck_head_quality）===
+    # 阈值来自多源实战共识：鸭颈放量上穿 MA60、鸭头缩量回调（量芝麻点 峰/谷 >= 2）、
+    # 鸭嘴放量突破；并排除 60 线下行诱多、回调放量出货、连续 3 日破 60 线、高位诱多。
+    "old_duck_head_quality_base": 50.0,
+    "old_duck_head_barslast_ideal_min": 15.0,
+    "old_duck_head_barslast_ideal_max": 45.0,
+    "old_duck_head_barslast_bonus": 6.0,
+    "old_duck_head_barslast_penalty_slope": 0.6,
+    "old_duck_head_nose_gap_ideal": 0.5,
+    "old_duck_head_nose_gap_bonus": 8.0,
+    "old_duck_head_nose_gap_penalty_slope": 4.0,
+    "old_duck_head_death_golden_bonus": 8.0,
+    "old_duck_head_ramp_ratio_ideal_min": 1.15,
+    "old_duck_head_ramp_ratio_ideal_max": 3.5,
+    "old_duck_head_ramp_ratio_bonus": 10.0,
+    "old_duck_head_ramp_ratio_penalty_slope": 25.0,
+    "old_duck_head_ramp_ratio_weak": 1.0,
+    "old_duck_head_ramp_weak_decay": 0.5,
+    "old_duck_head_volume_contraction_ideal": 3.0,
+    "old_duck_head_volume_contraction_bonus": 8.0,
+    "old_duck_head_volume_contraction_penalty_slope": 8.0,
+    "old_duck_head_ma60_slope_min": 0.0,
+    "old_duck_head_ma60_slope_bonus": 6.0,
+    "old_duck_head_ma60_slope_decay": 0.5,
+    "old_duck_head_head_gap_ideal_min": 8.0,
+    "old_duck_head_head_gap_bonus": 6.0,
+    "old_duck_head_head_gap_penalty_slope": 1.5,
+    "old_duck_head_days_below_ma60_max_allowed": 2.0,
+    "old_duck_head_days_below_ma60_bonus": 4.0,
+    "old_duck_head_days_below_ma60_decay": 0.4,
+    "old_duck_head_chase_start_pct": 9.3,
+    "old_duck_head_chase_penalty_slope": 1.5,
     "momentum_base": 60.0,
     "momentum_intraday_slope": 5.0,
     "momentum_chase_start_pct": 5.0,
@@ -265,6 +298,7 @@ def _compute_factor_scores(df: pd.DataFrame, config: ScreeningConfig | None = No
         "theme_heat": _compute_theme_heat_score(df, profile),
         "topic_alignment": _compute_topic_alignment_score(df, profile),
         "consolidation_quality": _compute_consolidation_quality_score(df, profile),
+        "old_duck_head_quality": _compute_old_duck_head_quality_score(df, profile),
         "bottom_accumulation_quality": _compute_bottom_accumulation_quality_score(df, profile),
         "capital_heat_quality": _compute_capital_heat_quality_score(df, profile),
         "sector_limitup_ladder": _compute_sector_limitup_ladder_score(df, profile),
@@ -584,6 +618,117 @@ def _compute_topic_alignment_score(df: pd.DataFrame, profile: dict[str, float]) 
             score -= float(profile["topic_alignment_unmatched_penalty"])
         scores.append(score)
     return pd.Series(scores, index=df.index).clip(0, 100)
+
+
+def _compute_old_duck_head_quality_score(df: pd.DataFrame, profile: dict[str, float]) -> pd.Series:
+    """Score how well a candidate matches the Old Duck Head (老鸭头) pattern.
+
+    评分项与形态部位一一对应（阈值来自多源实战共识）：
+      鸭颈   barslast_ma5_cross_ma60 落在理想区间（形态成熟度）
+      鸭鼻孔 duck_nose_gap_pct 越小越贴合（兼容"死叉派"与"粘合派"两派定义）
+      鸭嘴   death_then_golden_5_10（死叉后再金叉）+ coiled_spring_ramp_ratio（放量突破）
+      量芝麻 duck_beak_volume_contraction（缩量洗盘，多源共识为峰值/谷值 >= 2）
+      风控   ma60_slope_20d_pct（排除 60 线下行的反弹诱多）、
+            days_below_ma60_max（排除有效跌破 60 线）、
+            duck_head_ma60_gap_pct（鸭头顶应远离 60 日线）
+
+    未形成鸭颈（从未上穿 MA60）或特征列缺失时返回 0 分，避免把普通回调票误判成老鸭头。
+    """
+    score = pd.Series(float(profile["old_duck_head_quality_base"]), index=df.index)
+
+    # 形态前提：必须已形成鸭颈（MA5 上穿 MA60）。
+    if "barslast_ma5_cross_ma60" not in df.columns:
+        return pd.Series(0.0, index=df.index)
+    bars = pd.to_numeric(df["barslast_ma5_cross_ma60"], errors="coerce")
+
+    # 1. 鸭颈成熟度
+    ideal_min = profile["old_duck_head_barslast_ideal_min"]
+    ideal_max = profile["old_duck_head_barslast_ideal_max"]
+    in_range = bars.between(ideal_min, ideal_max).fillna(False)
+    score += in_range * profile["old_duck_head_barslast_bonus"]
+    deviation = (
+        (ideal_min - bars).clip(lower=0).fillna(0)
+        + (bars - ideal_max).clip(lower=0).fillna(0)
+    )
+    score -= deviation * profile["old_duck_head_barslast_penalty_slope"]
+
+    # 2. 鸭鼻孔贴合度
+    if "duck_nose_gap_pct" in df.columns:
+        gap = pd.to_numeric(df["duck_nose_gap_pct"], errors="coerce")
+        ideal_gap = profile["old_duck_head_nose_gap_ideal"]
+        score += (gap <= ideal_gap).fillna(False) * profile["old_duck_head_nose_gap_bonus"]
+        score -= (gap - ideal_gap).clip(lower=0).fillna(0) * profile["old_duck_head_nose_gap_penalty_slope"]
+
+    # 3. 鸭嘴确认（死叉后再金叉）
+    if "death_then_golden_5_10" in df.columns:
+        flag = df["death_then_golden_5_10"].fillna(False).astype(bool)
+        score += flag * profile["old_duck_head_death_golden_bonus"]
+
+    # 4. 鸭嘴放量：无量突破属诱多，异常放量易见顶
+    if "coiled_spring_ramp_ratio" in df.columns:
+        ramp = pd.to_numeric(df["coiled_spring_ramp_ratio"], errors="coerce")
+        ramp_min = profile["old_duck_head_ramp_ratio_ideal_min"]
+        ramp_max = profile["old_duck_head_ramp_ratio_ideal_max"]
+        good = ramp.between(ramp_min, ramp_max).fillna(False)
+        score += good * profile["old_duck_head_ramp_ratio_bonus"]
+        weak = (ramp_min - ramp).clip(lower=0).fillna(0)
+        over = (ramp - ramp_max).clip(lower=0).fillna(0)
+        score -= (weak + over) * profile["old_duck_head_ramp_ratio_penalty_slope"]
+
+    # 5. 量芝麻点（缩量洗盘）
+    if "duck_beak_volume_contraction" in df.columns:
+        contraction = pd.to_numeric(df["duck_beak_volume_contraction"], errors="coerce")
+        ideal_c = profile["old_duck_head_volume_contraction_ideal"]
+        score += (contraction >= ideal_c).fillna(False) * profile["old_duck_head_volume_contraction_bonus"]
+        score -= (ideal_c - contraction).clip(lower=0).fillna(0) * profile["old_duck_head_volume_contraction_penalty_slope"]
+
+    # 6. 60 日均线须走平或向上（下行的惩罚在末尾用乘性衰减处理）
+    if "ma60_slope_20d_pct" in df.columns:
+        slope = pd.to_numeric(df["ma60_slope_20d_pct"], errors="coerce")
+        slope_min = profile["old_duck_head_ma60_slope_min"]
+        score += (slope >= slope_min).fillna(False) * profile["old_duck_head_ma60_slope_bonus"]
+
+    # 7. 鸭头顶应远离 60 日线
+    if "duck_head_ma60_gap_pct" in df.columns:
+        head_gap = pd.to_numeric(df["duck_head_ma60_gap_pct"], errors="coerce")
+        ideal_head = profile["old_duck_head_head_gap_ideal_min"]
+        score += (head_gap >= ideal_head).fillna(False) * profile["old_duck_head_head_gap_bonus"]
+        score -= (ideal_head - head_gap).clip(lower=0).fillna(0) * profile["old_duck_head_head_gap_penalty_slope"]
+
+    # 8. 未破位加分（有效跌破的惩罚在末尾用乘性衰减处理）
+    if "days_below_ma60_max" in df.columns:
+        below = pd.to_numeric(df["days_below_ma60_max"], errors="coerce")
+        score += (below.fillna(1.0) <= 0.0) * profile["old_duck_head_days_below_ma60_bonus"]
+
+    # 9. 追高惩罚
+    if "change_20d" in df.columns:
+        chase = pd.to_numeric(df["change_20d"], errors="coerce")
+        start = profile["old_duck_head_chase_start_pct"]
+        score -= (chase - start).clip(lower=0).fillna(0) * profile["old_duck_head_chase_penalty_slope"]
+
+    # 10. 关键风控采用乘性衰减：线性惩罚会被 clip(0, 100) 上限掩盖
+    #     （实测：60 线下行 / 有效跌破 60 线 / 鸭嘴无量突破在线性惩罚下仍得满分）。
+    if "ma60_slope_20d_pct" in df.columns:
+        slope = pd.to_numeric(df["ma60_slope_20d_pct"], errors="coerce")
+        bad_slope = (slope < profile["old_duck_head_ma60_slope_min"]).fillna(False)
+        score = score.where(~bad_slope, score * profile["old_duck_head_ma60_slope_decay"])
+
+    if "days_below_ma60_max" in df.columns:
+        below = pd.to_numeric(df["days_below_ma60_max"], errors="coerce")
+        bad_below = (below > profile["old_duck_head_days_below_ma60_max_allowed"]).fillna(False)
+        score = score.where(~bad_below, score * profile["old_duck_head_days_below_ma60_decay"])
+
+    if "coiled_spring_ramp_ratio" in df.columns:
+        ramp = pd.to_numeric(df["coiled_spring_ramp_ratio"], errors="coerce")
+        bad_ramp = (ramp < profile["old_duck_head_ramp_ratio_weak"]).fillna(False)
+        score = score.where(~bad_ramp, score * profile["old_duck_head_ramp_weak_decay"])
+
+    # 11. 形态前提门禁：从未形成鸭颈（MA5 未上穿 MA60）一律 0 分。
+    if "barslast_ma5_cross_ma60" in df.columns:
+        bars = pd.to_numeric(df["barslast_ma5_cross_ma60"], errors="coerce")
+        score = score.where(bars.notna(), 0.0)
+
+    return score.clip(0, 100)
 
 
 def _compute_consolidation_quality_score(df: pd.DataFrame, profile: dict[str, float]) -> pd.Series:

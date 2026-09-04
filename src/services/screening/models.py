@@ -72,6 +72,15 @@ class HardFilterConfig:
     change_120d_max: float | None = None
     change_250d_min: float | None = None
     change_250d_max: float | None = None
+    # 老鸭头（Old Duck Head）形态硬过滤：配合 old_duck_head_quality 因子使用。
+    # barslast_ma5_cross_ma60_min 同时充当形态门禁——从未上穿 MA60 的个股该列为
+    # None/NaN，比较后必然被淘汰，从而保证候选池只含已形成鸭颈的标的。
+    barslast_ma5_cross_ma60_min: int | None = None
+    barslast_ma5_cross_ma60_max: int | None = None
+    duck_beak_volume_contraction_min: float | None = None
+    ma60_slope_20d_pct_min: float | None = None
+    days_below_ma60_max: int | None = None
+    duck_head_ma60_gap_pct_min: float | None = None
 
 
 @dataclass

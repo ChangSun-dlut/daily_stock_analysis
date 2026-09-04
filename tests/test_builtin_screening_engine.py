@@ -73,13 +73,18 @@ def test_bundled_strategies_are_loaded_from_the_internal_package() -> None:
     assert set(strategies) == {
         "balanced_alpha",
         "blue_chip_income",
+        "bottom_accumulation",
         "capital_heat",
+        "consolidation_breakout",
         "dual_low",
+        "golden_pit",
         "low_volatility_quality",
         "momentum_quality",
+        "old_duck_head",
         "oversold_reversal",
         "quality_value",
         "shrink_pullback",
+        "sideways_breakout",
         "volume_breakout",
     }
     assert strategies["dual_low"].screening.factor_weights["value"] < 0.40

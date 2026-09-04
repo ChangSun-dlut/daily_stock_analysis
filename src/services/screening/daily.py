@@ -1401,6 +1401,10 @@ def _compute_shape_features(
         if all(m is not None and pd.notna(m) for m in (last_ma5, last_ma20, last_ma60)):
             ma_bullish = bool(last_ma5 > last_ma20 > last_ma60)
 
+    # 老鸭头形态特征（Old Duck Head）：供 scorer 的 old_duck_head_quality 因子使用。
+    # 未形成鸭颈或数据不足时各字段为 None，因子侧按 0 分处理。
+    duck_features = _compute_old_duck_head_features(df)
+
     return {
         "prev_high_20d": _round_or_none(prev_high_20d),
         "range_20d_pct": _round_or_none(range_20d_pct),
@@ -1433,6 +1437,129 @@ def _compute_shape_features(
         "ma_breakdown_count": ma_breakdown_count,
         "ma_bullish": ma_bullish,
         "price_above_ma20": price_above_ma20,
+        **duck_features,
+    }
+
+
+def _compute_old_duck_head_features(df: pd.DataFrame) -> dict[str, object]:
+    """Compute Old Duck Head (老鸭头) pattern features from daily K-lines.
+
+    形态定义（多源共识：通达信/同花顺公式 + 雪球/东财/百家号实战帖）：
+      鸭颈   = MA5 与 MA10 放量上穿 MA60，且 MA60 走平或向上
+      鸭头   = 上穿 MA60 后回撤洗盘，幅度适中且不有效跌破 MA60
+      鸭鼻孔 = MA5 与 MA10 死叉或高度粘合，空隙越小越强（兼容"死叉派"与"粘合派"）
+      鸭嘴   = MA5 再次上穿 MA10 并放量突破回调高点
+      量芝麻 = 回调期成交量峰值/谷值足够大（缩量洗盘，多源共识为峰/谷 >= 2）
+
+    Returns:
+        barslast_ma5_cross_ma60: 距最近一次 MA5 上穿 MA60 的交易日数（None=从未发生）
+        duck_nose_gap_pct: 鸭颈以来 |MA5-MA10|/MA10 的最小值（%），越小越贴合
+        death_then_golden_5_10: 鸭颈以来是否出现过 MA5 死叉 MA10 后再金叉
+        duck_beak_volume_contraction: 鸭颈以来成交量峰值/谷值（量芝麻点）
+        ma60_slope_20d_pct: MA60 近 20 日斜率（%），用于排除 60 线仍下行的反弹诱多
+        duck_head_ma60_gap_pct: 回调期最高价相对当前 MA60 的乖离（%），鸭头顶应远离 60 线
+        days_below_ma60_max: 鸭颈以来连续收盘低于 MA60 的最大天数（破位检测）
+
+    数据不足或从未形成鸭颈时各字段返回 None，由因子侧按 0 分处理，不影响其他策略。
+    """
+    empty: dict[str, object] = {
+        "barslast_ma5_cross_ma60": None,
+        "duck_nose_gap_pct": None,
+        "death_then_golden_5_10": None,
+        "duck_beak_volume_contraction": None,
+        "ma60_slope_20d_pct": None,
+        "duck_head_ma60_gap_pct": None,
+        "days_below_ma60_max": None,
+    }
+    if "close" not in df.columns or len(df) < 61:
+        return empty
+
+    close = pd.to_numeric(df["close"], errors="coerce")
+    ma5 = close.rolling(5).mean()
+    ma10 = close.rolling(10).mean()
+    ma60 = close.rolling(60).mean()
+    valid = ma60.notna()
+    if not valid.any():
+        return empty
+
+    # 鸭颈起点：最近一次 MA5 上穿 MA60
+    above_ma60 = (ma5 > ma60) & valid
+    cross_up = above_ma60 & ~above_ma60.shift(1, fill_value=False)
+    cross_idx = cross_up[cross_up].index
+    if len(cross_idx) == 0:
+        return empty
+    start_pos = int(close.index.get_loc(cross_idx[-1]))
+    barslast = int(len(close) - 1 - start_pos)
+    if barslast <= 0:
+        return empty
+
+    window = df.iloc[start_pos:]
+    w_close = close.iloc[start_pos:]
+    w_ma5 = ma5.iloc[start_pos:]
+    w_ma10 = ma10.iloc[start_pos:]
+    w_ma60 = ma60.iloc[start_pos:]
+
+    # 鸭鼻孔：窗口内 MA5/MA10 最小间隙（越小越贴合，兼容不死叉的粘合派）
+    gap = ((w_ma5 - w_ma10).abs() / w_ma10.where(w_ma10 > 0) * 100).dropna()
+    duck_nose_gap_pct = float(gap.min()) if not gap.empty else None
+
+    # 鸭嘴：窗口内是否出现 MA5 死叉 MA10 后再金叉
+    above_10 = (w_ma5 > w_ma10) & w_ma10.notna()
+    death = above_10.shift(1, fill_value=False) & ~above_10
+    golden = ~above_10.shift(1, fill_value=False) & above_10
+    death_idx = death[death].index
+    golden_idx = golden[golden].index
+    death_then_golden = None
+    if len(death_idx) > 0 and len(golden_idx) > 0:
+        death_positions = [int(close.index.get_loc(i)) for i in death_idx]
+        golden_positions = [int(close.index.get_loc(i)) for i in golden_idx]
+        death_then_golden = any(g > d for d in death_positions for g in golden_positions)
+
+    # 量芝麻点：窗口内成交量峰值 / 谷值
+    duck_beak_volume_contraction = None
+    if "volume" in df.columns:
+        w_vol = pd.to_numeric(window["volume"], errors="coerce").dropna()
+        w_vol = w_vol[w_vol > 0]
+        if len(w_vol) >= 5:
+            vol_min = float(w_vol.min())
+            vol_max = float(w_vol.max())
+            if vol_min > 0:
+                duck_beak_volume_contraction = vol_max / vol_min
+
+    # MA60 斜率（近 20 日）：排除 60 线仍下行的反弹诱多
+    ma60_slope_20d_pct = None
+    ma60_valid = w_ma60.dropna()
+    if len(ma60_valid) >= 21:
+        base = float(ma60_valid.iloc[-21])
+        latest = float(ma60_valid.iloc[-1])
+        if base > 0:
+            ma60_slope_20d_pct = (latest / base - 1.0) * 100
+
+    # 鸭头顶距 MA60 乖离：鸭头顶应远离 60 日线
+    duck_head_ma60_gap_pct = None
+    if not ma60_valid.empty and "high" in window.columns:
+        last_ma60 = float(ma60_valid.iloc[-1])
+        w_high = pd.to_numeric(window["high"], errors="coerce").dropna()
+        if last_ma60 > 0 and not w_high.empty:
+            duck_head_ma60_gap_pct = (float(w_high.max()) / last_ma60 - 1.0) * 100
+
+    # 破位检测：窗口内连续收盘低于 MA60 的最大天数
+    days_below_ma60_max = None
+    below = (w_close < w_ma60) & w_ma60.notna()
+    if len(below) > 0:
+        streak_id = (~below).cumsum()
+        streaks = below.groupby(streak_id).sum()
+        if len(streaks) > 0:
+            days_below_ma60_max = int(streaks.max())
+
+    return {
+        "barslast_ma5_cross_ma60": barslast,
+        "duck_nose_gap_pct": _round_or_none(duck_nose_gap_pct),
+        "death_then_golden_5_10": death_then_golden,
+        "duck_beak_volume_contraction": _round_or_none(duck_beak_volume_contraction),
+        "ma60_slope_20d_pct": _round_or_none(ma60_slope_20d_pct),
+        "duck_head_ma60_gap_pct": _round_or_none(duck_head_ma60_gap_pct),
+        "days_below_ma60_max": days_below_ma60_max,
     }
 
 

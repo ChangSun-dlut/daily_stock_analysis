@@ -144,6 +144,15 @@ def apply_hard_filters(df: pd.DataFrame, filters: HardFilterConfig) -> pd.DataFr
     mask = _filter_min(result, mask, ["change_250d"], filters.change_250d_min)
     mask = _filter_max(result, mask, ["change_250d"], filters.change_250d_max)
 
+    # 老鸭头形态硬过滤（配合 old_duck_head_quality 因子）：
+    # 鸭颈成熟度 / 量芝麻点 / 60 线上行 / 未有效跌破 60 线 / 鸭头顶远离 60 线
+    mask = _filter_min(result, mask, ["barslast_ma5_cross_ma60"], filters.barslast_ma5_cross_ma60_min)
+    mask = _filter_max(result, mask, ["barslast_ma5_cross_ma60"], filters.barslast_ma5_cross_ma60_max)
+    mask = _filter_min(result, mask, ["duck_beak_volume_contraction"], filters.duck_beak_volume_contraction_min)
+    mask = _filter_min(result, mask, ["ma60_slope_20d_pct"], filters.ma60_slope_20d_pct_min)
+    mask = _filter_max(result, mask, ["days_below_ma60_max"], filters.days_below_ma60_max)
+    mask = _filter_min(result, mask, ["duck_head_ma60_gap_pct"], filters.duck_head_ma60_gap_pct_min)
+
     # 累积破位硬过滤（防"立昂技术"类已放量破位票进候选）
     mask = _filter_min(result, mask, ["change_5d"], filters.change_5d_min)
     # ma_breakdown_count_max 语义：收盘价已下穿均线数 > 该值时淘汰（即 > max）
@@ -206,6 +215,12 @@ def hard_filter_rejection_summary(
     record_max("change_pct_max", ["change_pct", "涨跌幅"], filters.change_pct_max)
     record_min("change_60d_min", ["change_60d"], filters.change_60d_min)
     record_max("change_60d_max", ["change_60d"], filters.change_60d_max)
+    record_min("barslast_ma5_cross_ma60_min", ["barslast_ma5_cross_ma60"], filters.barslast_ma5_cross_ma60_min)
+    record_max("barslast_ma5_cross_ma60_max", ["barslast_ma5_cross_ma60"], filters.barslast_ma5_cross_ma60_max)
+    record_min("duck_beak_volume_contraction_min", ["duck_beak_volume_contraction"], filters.duck_beak_volume_contraction_min)
+    record_min("ma60_slope_20d_pct_min", ["ma60_slope_20d_pct"], filters.ma60_slope_20d_pct_min)
+    record_max("days_below_ma60_max", ["days_below_ma60_max"], filters.days_below_ma60_max)
+    record_min("duck_head_ma60_gap_pct_min", ["duck_head_ma60_gap_pct"], filters.duck_head_ma60_gap_pct_min)
 
     if filters.require_ma_bullish:
         record("require_ma_bullish", _filter_bool_true(df, mask, "ma_bullish", True))
@@ -347,6 +362,12 @@ def hard_filter_waterfall(
     record_max("change_pct_max", ["change_pct", "涨跌幅"], filters.change_pct_max)
     record_min("change_60d_min", ["change_60d"], filters.change_60d_min)
     record_max("change_60d_max", ["change_60d"], filters.change_60d_max)
+    record_min("barslast_ma5_cross_ma60_min", ["barslast_ma5_cross_ma60"], filters.barslast_ma5_cross_ma60_min)
+    record_max("barslast_ma5_cross_ma60_max", ["barslast_ma5_cross_ma60"], filters.barslast_ma5_cross_ma60_max)
+    record_min("duck_beak_volume_contraction_min", ["duck_beak_volume_contraction"], filters.duck_beak_volume_contraction_min)
+    record_min("ma60_slope_20d_pct_min", ["ma60_slope_20d_pct"], filters.ma60_slope_20d_pct_min)
+    record_max("days_below_ma60_max", ["days_below_ma60_max"], filters.days_below_ma60_max)
+    record_min("duck_head_ma60_gap_pct_min", ["duck_head_ma60_gap_pct"], filters.duck_head_ma60_gap_pct_min)
 
     if filters.require_ma_bullish:
         record("require_ma_bullish", _filter_bool_true(df, mask, "ma_bullish", True), ["ma_bullish"])
