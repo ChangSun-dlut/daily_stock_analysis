@@ -1934,6 +1934,7 @@ def _stock_body(data: StockPoster, fallback_html: str) -> str:
 def _market_payload_section_blocks(
     payload: Optional[Mapping[str, Any]],
     language: str,
+    only_titles: Optional[set[str]] = None,
 ) -> str:
     """Render the 7 page-visible market review subcategories from ``payload.sections``.
 
@@ -1942,6 +1943,12 @@ def _market_payload_section_blocks(
     with what the user sees on the page and avoids dropping categories that the
     structured ``MarketPoster`` extraction could not find (e.g. when LLM prose is
     verbose but lacks tables the parser recognises).
+
+    Args:
+        only_titles: If provided, only render sections whose normalized title
+            contains one of the given keywords. Used to place prose-heavy
+            sections (e.g. "盘面总览") before compact metric cards without
+            duplicating catalyst/plan/risk cards that already appear later.
     """
 
     if not isinstance(payload, Mapping):
@@ -1968,6 +1975,10 @@ def _market_payload_section_blocks(
         ):
             # Skip sections that mirror the top-level title to avoid duplicating the hero.
             continue
+        if only_titles is not None:
+            normalized_title = _plain(section_title).strip().lower()
+            if not any(term in normalized_title for term in only_titles):
+                continue
         display_title = section_title or _poster_text(language, "overview")
         section_id = str(section.get("key") or f"section-{index}")
         if section_id in seen_ids:
@@ -2086,14 +2097,39 @@ def _market_body(
     plan = _section_html(_poster_text(language, "strategy"), "✓", _list_html(data.plan), "strategy-strip") if data.plan else ""
     risks = _section_html(_poster_text(language, "risks"), "!", _list_html(data.risks), "risk-strip") if data.risks else ""
     structured = any((signal, indices, breadth, dimensions, sector_dual, detail_dual, catalysts, plan, risks))
-    payload_sections = _market_payload_section_blocks(payload, data.language)
-    has_payload_sections = bool(payload_sections)
+    if structured:
+        # Place prose-heavy narrative sections (overview/index/sector/fund-flow) right
+        # after the hero signal so the analytical interpretation comes first.
+        narrative_sections = _market_payload_section_blocks(
+            payload,
+            data.language,
+            only_titles={
+                "盘面总览", "指数结构", "板块主线", "资金与情绪",
+                "market summary", "index commentary", "sector highlights", "fund flows",
+            },
+        )
+        # Keep the follow-up prose sections (catalysts/strategy/risks) as well;
+        # they often contain detailed LLM commentary that the compact cards can drop.
+        follow_up_sections = _market_payload_section_blocks(
+            payload,
+            data.language,
+            only_titles={
+                "消息催化", "明日交易计划", "风险提示",
+                "news catalysts", "strategy plan", "risk alerts", "catalysts", "strategy", "risk",
+            },
+        )
+    else:
+        # When the structured parser could not extract anything, surface every
+        # payload section so no category is dropped from the share image.
+        narrative_sections = _market_payload_section_blocks(payload, data.language)
+        follow_up_sections = ""
+    has_payload_sections = bool(narrative_sections or follow_up_sections)
     keep_fallback = (
         not structured
         or _should_keep_market_fallback(markdown_text, data)
     ) and not has_payload_sections
     fallback = f'<section class="report-fallback"><article class="report-content">{fallback_html}</article></section>' if keep_fallback else ""
-    return f"{signal}{indices}{breadth}{dimensions}{sector_dual}{detail_dual}{catalysts}{plan}{risks}{payload_sections}{fallback}"
+    return f"{signal}{narrative_sections}{indices}{breadth}{dimensions}{sector_dual}{detail_dual}{follow_up_sections}{catalysts}{plan}{risks}{fallback}"
 
 
 def _generic_body(report_html: str) -> str:
@@ -2280,7 +2316,7 @@ def build_share_image_html(
     .index-grid {{ display:table; width:100%; margin:0 0 24px; border-spacing:10px 0; table-layout:fixed; }} .index-card{{display:table-cell;padding:16px 18px;border:1px solid #d0dced;border-radius:18px;background:linear-gradient(160deg,#fff,#f6f9ff);box-shadow:0 8px 22px rgba(25,78,153,.05)}} .index-card span,.index-card small{{display:block}} .index-card span{{font-weight:750}} .index-card strong{{display:block;margin:8px 0 0;font-size:35px}} .index-card strong.red{{color:#ed3f36}} .index-card strong.green{{color:#0a9c58}} .index-card small{{color:#3d506f;font-size:19px}}
     .breadth-grid .metric{{background:linear-gradient(160deg,#fff,#f7faff)}} .breadth-grid .metric strong{{font-size:29px}} .dimension-grid .metric{{height:94px;background:linear-gradient(145deg,#f7faff,#fff)}} .dimension-grid .metric strong{{font-size:33px}} .market-two-column{{display:table;width:calc(100% - 20px);margin:0 10px 24px;border-spacing:8px 0;table-layout:fixed}} .market-left,.market-right{{display:table-cell;width:50%;vertical-align:top}} .market-two-column .poster-section{{min-height:238px;margin:0;padding:20px 22px;border:1px solid #d3dfef;border-radius:19px;background:linear-gradient(160deg,#fff,#f8fbff)}} .ranking-row{{display:table;width:100%;padding:13px 0;border-bottom:1px solid #e6edf6}} .ranking-row:last-child{{border:0}} .ranking-row>*{{display:table-cell;vertical-align:middle}} .ranking-row b{{width:44px;color:#fff;border-radius:9px;text-align:center;background:linear-gradient(135deg,#1677ff,#6a5cff)}} .ranking-row:nth-child(2) b{{background:linear-gradient(135deg,#ff8a00,#ffb020)}} .ranking-row:nth-child(3) b{{background:linear-gradient(135deg,#12a66a,#37c98a)}} .ranking-row span{{padding-left:13px;font-weight:700}} .ranking-row strong{{text-align:right}} .ranking-row strong.red{{color:#ed3f36}} .ranking-row strong.green{{color:#0a9c58}} .ranking-row.lagging b{{background:linear-gradient(135deg,#64748b,#94a3b8)}} .market-details .poster-section{{min-height:214px}} .focus-row,.fund-row{{display:table;width:100%;padding:10px 0;border-bottom:1px solid #e6edf6}} .focus-row:last-child,.fund-row:last-child{{border:0}} .focus-row b,.focus-row span,.fund-row span,.fund-row strong{{display:table-cell;vertical-align:middle}} .focus-row b{{width:66px;color:#fff;border-radius:8px;text-align:center;background:#1677ff}} .focus-row.avoid b{{background:#ef4444}} .focus-row span{{padding-left:14px;font-weight:700}} .fund-row span{{color:#52647f}} .fund-row strong{{text-align:right;color:#1768e8}} .fund-row.positive strong{{color:#0a9c58}} .fund-row.warning strong{{color:#f59e0b}} .strategy-strip{{padding:16px 22px;border:1px solid #cbdcf4;border-radius:17px;background:linear-gradient(90deg,#f6faff,#fff)}} .strategy-strip ul{{display:table;width:100%;padding-left:25px}} .strategy-strip li{{display:table-cell;width:33.33%;padding-right:20px;font-size:19px;vertical-align:top}}
     .risk-strip{{padding:16px 22px;border:1px solid #ffc5c5;border-radius:17px;background:linear-gradient(90deg,#fff3f3,#fffafa)}} .risk-strip h2{{color:#e7373f}} .risk-strip ul{{display:table;width:100%;padding-left:25px}} .risk-strip li{{display:table-cell;width:50%;padding-right:24px;font-size:19px}}
-    .report-fallback {{ margin:0 10px 26px; padding:24px 28px; border:1px solid #d5e1f0; border-radius:18px; background:#fff; }} .report-content{{overflow-wrap:anywhere}} .report-content h1,.report-content h2,.report-content h3{{color:#153d78;overflow-wrap:anywhere;word-break:break-word}} .report-content h2{{font-size:29px}} .report-content h3{{font-size:25px}} .report-content p,.report-content li,.report-content th,.report-content td,.report-content blockquote,.report-content a{{overflow-wrap:anywhere;word-break:break-word}} .report-content table{{width:100%;border-collapse:collapse;font-size:19px;table-layout:fixed}} .report-content th,.report-content td{{padding:10px;border:1px solid #dbe4f1}} .report-content th{{background:#eef4fc}} .report-content pre{{max-width:100%;margin:16px 0;padding:16px 18px;overflow-x:auto;border-radius:14px;background:#f4f7fc;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}} .report-content code{{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}} .report-content blockquote{{margin:15px 0;padding:12px 18px;border-left:5px solid #4385ef;background:#f3f7fd}}
+    .report-fallback {{ margin:0 10px 26px; padding:24px 28px; border:1px solid #d5e1f0; border-radius:18px; background:#fff; }} .report-content{{overflow-wrap:anywhere}} .report-content h1,.report-content h2,.report-content h3{{color:#153d78;overflow-wrap:anywhere;word-break:break-word}} .report-content h2{{font-size:29px}} .report-content h3{{font-size:25px}} .report-content p,.report-content li,.report-content th,.report-content td,.report-content blockquote,.report-content a{{overflow-wrap:anywhere;word-break:break-word}} .report-content table{{width:100%;border-collapse:collapse;font-size:19px;table-layout:fixed}} .report-content th,.report-content td{{padding:10px;border:1px solid #dbe4f1}} .report-content th:first-child,.report-content td:first-child{{text-align:left}} .report-content th:nth-child(n+2),.report-content td:nth-child(n+2){{text-align:right}} .report-content th{{background:#eef4fc}} .report-content pre{{max-width:100%;margin:16px 0;padding:16px 18px;overflow-x:auto;border-radius:14px;background:#f4f7fc;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}} .report-content code{{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}} .report-content blockquote{{margin:15px 0;padding:12px 18px;border-left:5px solid #4385ef;background:#f3f7fd}}
     .poster-footer {{ display:table; width:100%; margin-top:18px; padding:14px 34px 5px; border-top:1px solid #ccdaec; table-layout:fixed; }} .footer-brand,.qr-card{{display:table-cell;vertical-align:middle}} .footer-brand{{width:74%;padding-left:6px}} .footer-brand.full{{width:100%}} .footer-title{{display:flex;align-items:baseline;gap:15px}} .footer-title strong{{color:#1768e8;font-size:43px;font-style:italic;line-height:1}} .footer-title span{{font-size:24px;font-weight:800}} .footer-brand>small{{display:block;margin-top:4px;color:#536683;font-size:16px}} .repo-line{{display:flex;align-items:center;gap:9px;margin-top:11px;color:#111827}} .repo-line svg{{width:25px;height:25px;flex:none;fill:currentColor}} .repo-line div{{min-width:0}} .repo-line em,.repo-line b{{display:block;font-style:normal}} .repo-line em{{margin-bottom:1px;color:#64748b;font-size:12px;letter-spacing:.6px}} .repo-line b{{font-size:16px;line-height:1.15;white-space:nowrap}} .qr-card{{width:26%;text-align:center;font-size:16px;font-weight:750;line-height:1.2}} .qr-card.text-only{{padding-left:18px}} .qr-card .social-link{{color:inherit;text-decoration:none}} .qr-card span b{{color:#ff2442}} .qr-frame{{width:132px;height:132px;margin:0 auto 5px;padding:4px;border:1px solid #d3deed;border-radius:13px;background:#fff}} .qr-frame img{{display:block;width:122px;height:122px;object-fit:contain}} .disclaimer{{margin:6px -34px -24px;padding:8px 34px;color:#285b9d;font-size:14px;text-align:center;background:#eaf3ff}}
   </style>
 </head>

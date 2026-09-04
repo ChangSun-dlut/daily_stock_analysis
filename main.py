@@ -1059,7 +1059,12 @@ def run_full_analysis(
                 parts.append(f"# 🚀 个股决策仪表盘\n\n{dashboard_content}")
             if parts:
                 combined_content = "\n\n---\n\n".join(parts)
-                if pipeline.notifier.is_available():
+                # 需求2：仅交易日（周一至周五且 A 股开盘）推送决策仪表盘；周末/休市跳过。
+                from src.core.trading_calendar import is_market_open as _is_market_open_today
+                _dash_today = datetime.now().date()
+                if _dash_today.weekday() >= 5 or not _is_market_open_today("cn", _dash_today):
+                    logger.info("今日非交易日（周末/休市），跳过合并推送（个股+大盘复盘）")
+                elif pipeline.notifier.is_available():
                     if pipeline.notifier.send(combined_content, email_send_to_all=True, route_type="report"):
                         logger.info("已合并推送（个股+大盘复盘）")
                     else:
@@ -1653,144 +1658,19 @@ def main() -> int:
                     "name": "agent_event_monitor",
                 })
 
-            # 微信(OpenClaw) 通道健康巡检：bot 授权失效 / CDN 持续故障时主动告警。
-            # 仅在配置了 OPENCLAW_WECHAT_ACCOUNT + OPENCLAW_WECHAT_TARGET 时启用。
-            if (
-                getattr(config, 'openclaw_wechat_account', None)
-                and getattr(config, 'openclaw_wechat_target', None)
-            ):
-                from src.notification_sender.openclaw_wechat_sender import (
-                    OpenclawWechatSender,
-                    OPENCLAW_ERR_AUTH_NEEDED,
-                    OPENCLAW_ERR_CDN,
-                    OPENCLAW_ERR_GATEWAY,
+            # 微信(OpenClaw) 通道健康巡检：gateway 失活自动拉起、contextToken 失效自愈、
+            # 通道被 crash-loop breaker 抑制时用 RPC channels.start 拉起。
+            # 构建逻辑与 Web/API runtime scheduler 共用（src/services/openclaw_health_task.py）：
+            # 原实现内联在此处，而 Web/调度模式下 main.py 会提前 return，巡检注册不到。
+            from src.services.openclaw_health_task import (
+                build_openclaw_wechat_health_background_tasks,
+            )
+
+            background_tasks.extend(
+                build_openclaw_wechat_health_background_tasks(
+                    config, config_provider=_reload_runtime_config
                 )
-
-                # 限频：contextToken 已自动重置、仅等待用户发消息的情形，避免每 30 分钟重复告警。
-                _openclaw_last_user_msg_alert_ts = {"ts": 0.0}
-                # 限频：上下文临近到期时的「请发消息续期」提醒，避免周期内重复打扰。
-                _openclaw_last_keepalive_ts = {"ts": 0.0}
-                _openclaw_last_context_mtime = {"mt": 0.0}
-
-                def openclaw_health_task():
-                    sender = OpenclawWechatSender(_reload_runtime_config())
-                    # auto_heal=True：gateway 失活自动拉起；contextToken 失效自动清 token + 重启。
-                    health = sender.check_bot_health(
-                        restart_gateway_if_down=True, auto_heal=True
-                    )
-                    if not health.get("enabled"):
-                        return
-                    needs_user_message = bool(health.get("needs_user_message"))
-                    err_type = health.get("last_send_error_type")
-                    persistent = err_type in (
-                        OPENCLAW_ERR_AUTH_NEEDED,
-                        OPENCLAW_ERR_CDN,
-                        OPENCLAW_ERR_GATEWAY,
-                    )
-                    if needs_user_message:
-                        # contextToken 已自动重置，只需接收人发一条消息即可恢复；
-                        # 告警降级为 warning 并限频，避免反复打扰。
-                        now = time.time()
-                        if now - _openclaw_last_user_msg_alert_ts["ts"] < 6 * 3600:
-                            logger.debug(
-                                "[OpenClawHealth] 微信通道 contextToken 已重置，等待用户发消息: %s",
-                                health.get("detail"),
-                            )
-                            return
-                        _openclaw_last_user_msg_alert_ts["ts"] = now
-                        cleared = "已自动清token+重启gateway" if health.get(
-                            "context_token_cleared"
-                        ) else "需人工"
-                        logger.warning(
-                            "[OpenClawHealth] 微信通道 contextToken 失效，%s；"
-                            "请给 bot 发一条任意微信消息以重建对话上下文，之后即可自动推送。"
-                            " detail=%s",
-                            cleared,
-                            health.get("detail"),
-                        )
-                    elif health.get("needs_relogin") or persistent:
-                        logger.error(
-                            "[OpenClawHealth] 微信通道异常: %s | "
-                            "需用户介入重新扫码登录（openclaw channels login --channel openclaw-weixin）。"
-                            " last_send_error_type=%s last_send_error_detail=%s",
-                            health.get("detail"),
-                            health.get("last_send_error_type"),
-                            health.get("last_send_error_detail"),
-                        )
-                    elif health.get("crash_loop_recovered"):
-                        # gateway 曾因 crash-loop breaker 暂停通道，本次巡检已强制重启清除。
-                        # 已自动恢复，记录一条 error 级便于追溯，但无需用户介入。
-                        logger.error(
-                            "[OpenClawHealth] 微信通道 gateway 曾因 crash-loop breaker 被抑制，"
-                            "已自动强制重启清除并恢复通道。 detail=%s",
-                            health.get("detail"),
-                        )
-                    elif health.get("crash_loop_suppressed"):
-                        # 处于抑制状态但冷却期内未重启，记录 warning 便于观察。
-                        logger.warning(
-                            "[OpenClawHealth] 微信通道 gateway 处于 crash-loop 抑制状态"
-                            "(冷却期内暂不强制重启): %s",
-                            health.get("detail"),
-                        )
-                    else:
-                        logger.debug(
-                            "[OpenClawHealth] 微信通道健康: %s",
-                            health.get("detail"),
-                        )
-
-                # 上下文临近到期：趁仍能推送，主动提醒接收人发消息续期。
-                # 防止过期后 bot 无法主动推送、只能等用户在微信里发消息。
-                if not needs_user_message and health.get("gateway_reachable"):
-                    now = time.time()
-                    keepalive_ok, keepalive_reason = sender.should_send_context_keepalive()
-                    if keepalive_ok:
-                        mt = sender.context_token_mtime() or 0.0
-                        if mt > _openclaw_last_context_mtime["mt"] + 60:
-                            # 接收人刚发消息重建了上下文 → 重置本周期提醒计时。
-                            _openclaw_last_context_mtime["mt"] = mt
-                            _openclaw_last_keepalive_ts["ts"] = 0.0
-                        keepalive_gap = float(
-                            os.environ.get("OPENCLAW_CONTEXT_TTL_SECONDS", 72 * 3600)
-                        )
-                        if now - _openclaw_last_keepalive_ts["ts"] >= keepalive_gap:
-                            _openclaw_last_keepalive_ts["ts"] = now
-                            remind_text = (
-                                "⏰ 微信推送续期提醒：OpenClaw 对话上下文即将到期，"
-                                "到期后将无法自动推送预警。请给本 bot 发一条任意微信消息"
-                                "以重建对话上下文，保持推送不中断。"
-                            )
-                            sent = sender.send_to_openclaw_wechat(
-                                remind_text, auto_repair=False
-                            )
-                            if not sent:
-                                # 微信已不可用（上下文其实已失效）：转网页弹窗兜底提醒。
-                                try:
-                                    from src.services.web_alert_hub import (
-                                        get_web_alert_hub,
-                                    )
-                                    get_web_alert_hub().push(
-                                        "微信推送即将失效",
-                                        "OpenClaw 对话上下文即将到期，请给 bot 发一条微信消息以续期，"
-                                        "否则预警推送会中断。",
-                                        level="warning",
-                                    )
-                                except Exception:
-                                    pass
-                                logger.warning(
-                                    "[OpenClawHealth] 上下文续期提醒发送失败（微信已不可用），"
-                                    "已转网页弹窗提醒。"
-                                )
-                            else:
-                                logger.info(
-                                    "[OpenClawHealth] 已发送微信续期提醒（上下文临近到期）"
-                                )
-
-                background_tasks.append({
-                    "task": openclaw_health_task,
-                    "interval_seconds": 30 * 60,
-                    "run_immediately": True,
-                    "name": "openclaw_wechat_health",
-                })
+            )
 
             schedule_kwargs = {
                 "task": scheduled_task,

@@ -9,6 +9,8 @@ interface WebAlertPopupsProps {
   onDismiss: (id: number) => void;
   /** Auto-dismiss each popup after this many ms. Default 12s. */
   autoCloseMs?: number;
+  /** When true (e.g. notification center is open), hide toasts to avoid duplicate stacking. */
+  suppressed?: boolean;
 }
 
 const LEVEL_STYLES: Record<
@@ -136,12 +138,18 @@ export const WebAlertPopups: React.FC<WebAlertPopupsProps> = ({
   items,
   onDismiss,
   autoCloseMs = 12000,
+  suppressed = false,
 }) => {
   if (items.length === 0) {
     return null;
   }
   return (
-    <div className="pointer-events-none fixed bottom-5 right-5 z-50 flex max-h-[calc(100vh-40px)] w-[360px] max-w-[calc(100vw-32px)] flex-col gap-3 overflow-y-auto">
+    <div
+      className={cn(
+        'pointer-events-none fixed bottom-5 right-5 z-50 flex max-h-[calc(100vh-40px)] w-[360px] max-w-[calc(100vw-32px)] flex-col gap-3 overflow-y-auto',
+        suppressed && 'hidden',
+      )}
+    >
       {items.map((item) => (
         <PopupCard key={item.id} item={item} onDismiss={onDismiss} autoCloseMs={autoCloseMs} />
       ))}

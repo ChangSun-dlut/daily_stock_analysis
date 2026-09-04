@@ -9,7 +9,21 @@ import pytest
 from src.notification_sender.openclaw_wechat_sender import OpenclawWechatSender
 
 
+def _reset_shared_cooldowns() -> None:
+    """清空 sender 的**类级**冷却状态，保证用例之间互相隔离。
+
+    这些时间戳自 2026-08-31 起提升为类属性（生产上发送链路/巡检每次都新建
+    sender 实例，用实例变量会让冷却永远归零、gateway 被反复重启）。代价是状态
+    会跨用例残留，测试必须在每个用例开始时清零。
+    """
+    OpenclawWechatSender._last_restart_attempt = 0.0
+    OpenclawWechatSender._last_context_clear_ts = 0.0
+    OpenclawWechatSender._last_context_failure_ts = 0.0
+    OpenclawWechatSender._last_crash_loop_restart_ts = 0.0
+
+
 def _make_sender(monkeypatch, run_returncode=0, run_stdout=None, run_stderr=""):
+    _reset_shared_cooldowns()
     cfg = mock.Mock()
     cfg.openclaw_wechat_account = "f4add82e8cf4-im-bot"
     cfg.openclaw_wechat_target = "o9cq803K8OvJ6mTb0qsWMDB9dtfM@im.wechat"
@@ -156,13 +170,36 @@ def test_gateway_reachable_false(monkeypatch):
     assert svc._gateway_reachable() is False
 
 
-def test_restart_gateway_runs_run_force_first(monkeypatch):
+def _fake_run_unmanaged(calls, *, restart_rc=0, start_rc=0):
+    """构造 subprocess.run 桩：launchctl 一律返回「未托管」，走非 launchd 路径。"""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd and cmd[0] == "launchctl":
+            # 无 launchd 服务（非托管场景）
+            return mock.Mock(returncode=1, stdout="", stderr="")
+        if cmd and cmd[-1] == "restart":
+            return mock.Mock(returncode=restart_rc, stdout="", stderr="")
+        if cmd and cmd[-1] == "start":
+            return mock.Mock(returncode=start_rc, stdout="", stderr="")
+        return mock.Mock(returncode=0, stdout="", stderr="")
+
+    return fake_run
+
+
+def test_restart_gateway_prefers_launchctl_when_managed(monkeypatch):
+    """launchd 托管时必须走 kickstart，禁止 run --force。
+
+    2026-08-31 事故回归测试：gateway 由 LaunchAgent（KeepAlive）托管时再用
+    `gateway run --force` 会与已运行实例抢 18789 端口 → EADDRINUSE → unclean boot
+    → 3 次/5 分钟打满 crash-loop breaker → 通道被禁自启，自愈反而把通道搞挂。
+    """
     svc = _make_sender(monkeypatch)
-    service_calls = []
+    calls = []
     popen = mock.Mock()
 
     def fake_run(cmd, **kwargs):
-        service_calls.append(cmd)
+        calls.append(cmd)
         return mock.Mock(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(
@@ -172,25 +209,45 @@ def test_restart_gateway_runs_run_force_first(monkeypatch):
         "src.notification_sender.openclaw_wechat_sender.subprocess.Popen", popen
     )
     assert svc._restart_gateway() is True
-    # 优先后台拉起 run --force
+    # 先探测 launchctl list，再用 kickstart -k 重启
+    assert any(c[:2] == ["launchctl", "list"] for c in calls)
+    assert any(c[:3] == ["launchctl", "kickstart", "-k"] for c in calls)
+    # 关键：绝不能再拉起 run --force
+    assert not popen.called
+
+
+def test_restart_gateway_runs_run_force_first(monkeypatch):
+    """未托管场景：回退到后台拉起 run --force。"""
+    svc = _make_sender(monkeypatch)
+    service_calls = []
+    popen = mock.Mock()
+
+    monkeypatch.setattr(
+        "src.notification_sender.openclaw_wechat_sender.subprocess.run",
+        _fake_run_unmanaged(service_calls),
+    )
+    monkeypatch.setattr(
+        "src.notification_sender.openclaw_wechat_sender.subprocess.Popen", popen
+    )
+    assert svc._restart_gateway() is True
+    # 后台拉起 run --force
     assert popen.called
     args = popen.call_args[0][0]
     assert "run" in args and "--force" in args and "--bind" in args
-    # 未走到 restart/start 服务路径
-    assert service_calls == []
+    # 未走到 openclaw gateway restart/start 服务路径
+    assert not any(
+        c[0] == "openclaw" and c[-1] in ("restart", "start") for c in service_calls
+    )
 
 
 def test_restart_gateway_falls_back_to_service(monkeypatch):
     svc = _make_sender(monkeypatch)
     calls = []
 
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        return mock.Mock(returncode=0, stdout="", stderr="")
-
     popen = mock.Mock(side_effect=OSError("cannot spawn"))
     monkeypatch.setattr(
-        "src.notification_sender.openclaw_wechat_sender.subprocess.run", fake_run
+        "src.notification_sender.openclaw_wechat_sender.subprocess.run",
+        _fake_run_unmanaged(calls),
     )
     monkeypatch.setattr(
         "src.notification_sender.openclaw_wechat_sender.subprocess.Popen", popen
@@ -531,15 +588,24 @@ def test_repair_service_clears_context_token_on_prepare_failed(monkeypatch, tmp_
     token = tmp_path / "tok.context-tokens.json"
     token.write_text("{}")
     monkeypatch.setattr(svc, "_context_tokens_path", lambda: str(token))
-    monkeypatch.setattr(svc, "_restart_gateway", lambda: True)
+    restart_calls = []
+    monkeypatch.setattr(
+        svc, "_restart_gateway", lambda: restart_calls.append(True) or True
+    )
     monkeypatch.setattr(svc, "_bot_healthy", lambda timeout_seconds=10: True)
     svc.last_error_type = OPENCLAW_ERR_AUTH_NEEDED
     svc.last_error_detail = "sendMessage ret=-2 errmsg=prepare failed"
 
     info = svc._repair_service()
     assert info["context_token_cleared"] is True
-    assert info["needs_user_message"] is True
-    assert info["gateway_restarted"] is True
+    # channels.start 成功（(a) 临时掉线）时 _repair_service 不在此标记 needs_user_message，
+    # 交由发送方重试判断；仅当 channels.start 失败（(b) contextToken 彻底 missing）才标记。
+    assert info["needs_user_message"] is False
+    # 2026-08-31 契约变更：prepare failed 时**绝不重启** gateway。
+    # token 只能由接收人发消息重建，重启治不了，反而冲断 iLink 会话、累积
+    # unclean boot（实测 1 小时 47 次重启 → gateway 被推进 crash-loop breaker）。
+    assert restart_calls == []
+    assert info["gateway_restarted"] is False
     assert not token.exists()
 
 
@@ -574,8 +640,8 @@ def test_send_text_prepare_failed_auto_clears_token_and_stops(monkeypatch, tmp_p
     )
 
     assert svc.send_to_openclaw_wechat("hi") is False
-    # 清 token 后不再盲目重试：仅发起一次 message send。
-    assert send_calls["n"] == 1
+    # auto_repair 会清 token 后由发送方重试一次（首次失败 + 修复后重试），故发起两次 message send。
+    assert send_calls["n"] == 2
     assert svc.last_needs_user_message is True
     assert svc.last_error_type == OPENCLAW_ERR_AUTH_NEEDED
     assert not token.exists()
@@ -594,7 +660,9 @@ def test_check_bot_health_auto_heal_context_issue(monkeypatch, tmp_path):
     svc.last_error_detail = "sendMessage ret=-2 errmsg=prepare failed"
 
     health = svc.check_bot_health(auto_heal=True)
-    assert health["needs_user_message"] is True
+    # contextToken 失效已清 token（context_token_cleared）；channels.start 成功时不在此标记
+    # needs_user_message，交由发送方在重试失败时设置（新 auto_repair 语义）。
+    assert health["needs_user_message"] is False
     assert health["context_token_cleared"] is True
     assert health["repaired"] is True
     # contextToken 失效不是授权过期，不应误报需重扫。
@@ -732,3 +800,43 @@ def test_check_bot_health_crash_loop_suppressed_flag_only(monkeypatch):
     # 仅探测（auto_heal=False）也应能暴露 crash_loop_suppressed 标志。
     health = svc.check_bot_health(auto_heal=False)
     assert health["crash_loop_suppressed"] is True
+
+
+def test_split_text_by_bytes_keeps_multibyte_chars():
+    """按字节切片不得切断多字节字符，且每片不超过上限。"""
+    from src.notification_sender.openclaw_wechat_sender import OpenclawWechatSender
+
+    text = "中文abc中文" * 500
+    parts = OpenclawWechatSender._split_text_by_bytes(text, 10)
+    assert "".join(parts) == text  # 不丢字符
+    for part in parts:
+        assert len(part.encode("utf-8")) <= 10
+
+
+def test_send_text_long_content_split_into_multiple_messages(monkeypatch):
+    """超长决策仪表盘按字节上限分多条发送、不截断，每条加 [i/N] 序号且不超过上限。"""
+    from src.notification_sender.openclaw_wechat_sender import OPENCLAW_WECHAT_MAX_BYTES
+
+    svc = _make_sender(monkeypatch)
+    captured = []
+    real_run = svc._run_cli
+
+    def spy(extra_args, timeout_seconds=None):
+        if "--message" in extra_args:
+            captured.append(extra_args[extra_args.index("--message") + 1])
+        return real_run(extra_args, timeout_seconds)
+
+    monkeypatch.setattr(svc, "_run_cli", spy)
+
+    # 约 15000 字节（中文每字 3 字节），远超单条 4000 上限。
+    long_text = "决策仪表盘" * 1000
+    assert svc.send_to_openclaw_wechat(long_text) is True
+    assert len(captured) >= 2  # 已分多条
+
+    n = len(captured)
+    restored = ""
+    for i, msg in enumerate(captured):
+        assert len(msg.encode("utf-8")) <= OPENCLAW_WECHAT_MAX_BYTES
+        assert msg.startswith(f"[{i + 1}/{n}] ")
+        restored += msg.split("] ", 1)[1]
+    assert restored == long_text  # 完整还原，无截断

@@ -3506,6 +3506,14 @@ class StockAnalysisPipeline:
             logger.error("回退写入报告失败: %s", exc)
             return None
 
+    @staticmethod
+    def _is_dashboard_trading_day() -> bool:
+        """决策仪表盘仅在交易日（周一~周五且 A 股开盘）推送；周末与休市跳过。"""
+        today = datetime.now().date()
+        if today.weekday() >= 5:  # 5=周六, 6=周日
+            return False
+        return is_market_open("cn", today)
+
     def _send_notifications(
         self,
         results: List[AnalysisResult],
@@ -3546,7 +3554,17 @@ class StockAnalysisPipeline:
                     notification_run=notification_run,
                 )
                 return
-            
+
+            # 需求2：仅交易日（周一至周五且 A 股开盘）推送决策仪表盘；周末/休市跳过。
+            if not self._is_dashboard_trading_day():
+                logger.info("今日非交易日（周末/休市），跳过决策仪表盘推送")
+                notification_run = self._build_notification_run_snapshot(
+                    channel="report", status="skipped", success=False, attempts=0,
+                )
+                record_notification_run(channel="report", status="skipped", success=False, attempts=0)
+                self._refresh_saved_diagnostic_snapshot(results=results, notification_run=notification_run)
+                return
+
             # 推送通知
             if self.notifier.is_available():
                 channels = self.notifier.get_available_channels()

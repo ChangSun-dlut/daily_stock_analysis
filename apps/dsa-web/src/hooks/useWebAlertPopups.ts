@@ -13,6 +13,7 @@ type UseWebAlertPopupsOptions = {
 
 const DEFAULT_INTERVAL_MS = 5000;
 const DEFAULT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const MAX_HISTORY = 50;
 
 /**
  * Polls the backend `/api/v1/alerts/web-popups` endpoint and surfaces new
@@ -24,9 +25,26 @@ const DEFAULT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
  */
 export function useWebAlertPopups(options: UseWebAlertPopupsOptions = {}) {
   const { intervalMs = DEFAULT_INTERVAL_MS, maxAgeMs = DEFAULT_MAX_AGE_MS, paused = false } = options;
-  const [pendingItems, setPendingItems] = useState<WebPopupItem[]>([]);
+  const [history, setHistory] = useState<WebPopupItem[]>([]);
+  const [activeItems, setActiveItems] = useState<WebPopupItem[]>([]);
+  const [latestId, setLatestId] = useState(0);
   const latestIdRef = useRef(0);
   const timerRef = useRef<number | null>(null);
+
+  const addItems = useCallback((items: WebPopupItem[]) => {
+    if (items.length === 0) return;
+    setHistory((prev) => {
+      const merged = new Map<number, WebPopupItem>();
+      prev.forEach((i) => merged.set(i.id, i));
+      items.forEach((i) => merged.set(i.id, i));
+      return Array.from(merged.values()).slice(-MAX_HISTORY);
+    });
+    setActiveItems((prev) => {
+      const existing = new Set(prev.map((i) => i.id));
+      const added = items.filter((i) => !existing.has(i.id));
+      return [...prev, ...added];
+    });
+  }, []);
 
   const fetchOnce = useCallback(async () => {
     try {
@@ -47,12 +65,13 @@ export function useWebAlertPopups(options: UseWebAlertPopupsOptions = {}) {
         return;
       }
       latestIdRef.current = Math.max(latestIdRef.current, data.latestId);
-      setPendingItems((prev) => [...prev, ...fresh]);
+      setLatestId(latestIdRef.current);
+      addItems(fresh);
     } catch (err) {
       // Network blips are expected; just swallow and try again next tick.
       console.debug('[web-alerts] poll failed', err);
     }
-  }, [maxAgeMs]);
+  }, [maxAgeMs, addItems]);
 
   useEffect(() => {
     if (paused || intervalMs <= 0) {
@@ -75,13 +94,21 @@ export function useWebAlertPopups(options: UseWebAlertPopupsOptions = {}) {
     };
   }, [paused, intervalMs, fetchOnce]);
 
+  /** Dismiss a popup from the active toast stack only (history is preserved). */
   const dismiss = useCallback((id: number) => {
-    setPendingItems((prev) => prev.filter((item) => item.id !== id));
+    setActiveItems((prev) => prev.filter((item) => item.id !== id));
+  }, []);
+
+  /** Remove one item from the notification center history (and active stack if still shown). */
+  const removeHistory = useCallback((id: number) => {
+    setHistory((prev) => prev.filter((item) => item.id !== id));
+    setActiveItems((prev) => prev.filter((item) => item.id !== id));
   }, []);
 
   const clear = useCallback(() => {
-    setPendingItems([]);
+    setHistory([]);
+    setActiveItems([]);
   }, []);
 
-  return { pendingItems, dismiss, clear };
+  return { history, activeItems, dismiss, removeHistory, clear, latestId };
 }

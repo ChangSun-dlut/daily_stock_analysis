@@ -30,6 +30,16 @@ logger = logging.getLogger(__name__)
 _DEFAULT_RANKING_PROMPT_MAX_CHARS = 24_000
 _PROMPT_TRIM_MARKER = "[prompt_trimmed]"
 
+# Batch (map-reduce) ranking defaults. When the candidate pool is larger than
+# the auto threshold, we slice it into batches, rank each batch independently,
+# promote the top-k from each batch, and run a final ranking over the finalists.
+# Auto-batch threshold 20 with default batch size 15: a ~24-candidate pool (the
+# most common failure case) is split into 15+9 so each batch gets enough output
+# budget instead of being truncated to empty_response.
+_AUTO_BATCH_THRESHOLD = 20
+_DEFAULT_BATCH_SIZE = 15
+_DEFAULT_BATCH_TOP_K = 8
+
 
 @dataclass
 class RankingParseResult:
@@ -81,6 +91,8 @@ def rank_candidates(
     timeout_sec: float = 60.0,
     max_prompt_chars: int | None = _DEFAULT_RANKING_PROMPT_MAX_CHARS,
     max_tokens: int | None = 2048,
+    batch_size: int | None = None,
+    batch_top_k: int = 8,
 ) -> list[Pick]:
     """Use LLM to re-rank candidates and add ranking_reason / risk_summary.
 
@@ -105,6 +117,9 @@ def rank_candidates(
         timeout_sec=timeout_sec,
         max_prompt_chars=max_prompt_chars,
         max_tokens=max_tokens,
+        batch_size=batch_size,
+        batch_top_k=batch_top_k,
+        compact=False,
     ).picks
 
 
@@ -129,10 +144,44 @@ def rank_candidates_with_metadata(
     max_prompt_chars: int | None = _DEFAULT_RANKING_PROMPT_MAX_CHARS,
     degradation: list[str] | None = None,
     max_tokens: int | None = 2048,
+    batch_size: int | None = None,
+    batch_top_k: int = 8,
+    compact: bool = False,
 ) -> LLMRankingResult:
     """Use LLM to re-rank candidates and return global research metadata."""
     if not candidates:
         return LLMRankingResult(picks=candidates)
+
+    # Scale output budget with candidate count so long candidate lists don't
+    # get truncated to empty_response. For N candidates, reserve N*150 tokens
+    # on top of the configured default.
+    effective_max_tokens = max((max_tokens or 2048), len(candidates) * 150)
+
+    if _should_use_batch(candidates, batch_size):
+        return _rank_candidates_in_batches(
+            candidates,
+            ranking_hints,
+            llm_api_key,
+            llm_model,
+            llm_base_url,
+            context=context,
+            rank_weight=rank_weight,
+            max_retries=max_retries,
+            min_coverage=min_coverage,
+            fallback_models=fallback_models,
+            temperature=temperature,
+            json_mode=json_mode,
+            silent=silent,
+            channels=channels,
+            config_path=config_path,
+            timeout_sec=timeout_sec,
+            max_prompt_chars=max_prompt_chars,
+            degradation=degradation,
+            max_tokens=max_tokens,
+            batch_size=batch_size,
+            batch_top_k=batch_top_k,
+            compact=compact,
+        )
 
     prompt = _build_ranking_prompt(
         candidates,
@@ -140,6 +189,7 @@ def rank_candidates_with_metadata(
         context,
         max_chars=max_prompt_chars,
         degradation=degradation,
+        compact=compact,
     )
 
     model_chain = _dedupe([llm_model, *(fallback_models or [])])
@@ -174,7 +224,7 @@ def rank_candidates_with_metadata(
                     channels=channels or [],
                     config_path=config_path,
                     timeout_sec=timeout_sec,
-                    max_tokens=max_tokens,
+                    max_tokens=effective_max_tokens,
                 )
             except Exception as exc:
                 failure_reason = "timeout" if _is_timeout_error(exc) else "call_failed"
@@ -233,6 +283,165 @@ def rank_candidates_with_metadata(
     )
 
 
+def _should_use_batch(candidates: list[Pick], batch_size: int | None) -> bool:
+    """Return True when the candidate pool should be ranked in batches."""
+    if batch_size == 0:
+        return False
+    if batch_size is not None and batch_size > 0:
+        return len(candidates) > batch_size
+    return len(candidates) > _AUTO_BATCH_THRESHOLD
+
+
+def _rank_candidates_in_batches(
+    candidates: list[Pick],
+    ranking_hints: str,
+    llm_api_key: str,
+    llm_model: str,
+    llm_base_url: str = "",
+    *,
+    context: str = "",
+    rank_weight: float = 0.40,
+    max_retries: int = 1,
+    min_coverage: float = 0.60,
+    fallback_models: list[str] | None = None,
+    temperature: float = 0.2,
+    json_mode: bool = True,
+    silent: bool = True,
+    channels: list[dict[str, object]] | None = None,
+    config_path: str = "",
+    timeout_sec: float = 60.0,
+    max_prompt_chars: int | None = _DEFAULT_RANKING_PROMPT_MAX_CHARS,
+    degradation: list[str] | None = None,
+    max_tokens: int | None = 2048,
+    batch_size: int | None = None,
+    batch_top_k: int = 8,
+    compact: bool = False,
+) -> LLMRankingResult:
+    """Map-reduce ranking: rank batches independently, then rank finalists.
+
+    Batch stage uses rank_weight=1.0 so LLM score alone decides promotion;
+    the final stage mixes LLM and screen scores with the caller's rank_weight.
+    """
+    effective_batch_size = batch_size if batch_size and batch_size > 0 else _DEFAULT_BATCH_SIZE
+    top_k = max(1, batch_top_k)
+    batch_errors: list[str] = []
+    batch_models: list[str] = []
+    finalists: list[Pick] = []
+
+    # Batch stage: independent ranking of each slice.
+    for start in range(0, len(candidates), effective_batch_size):
+        batch = candidates[start : start + effective_batch_size]
+        # Batch stage uses a compact prompt/schema (code/score/reason/risk only)
+    # to keep output budget per candidate small and avoid empty_response.
+        # to keep output budget per candidate small and avoid empty_response.
+        result = rank_candidates_with_metadata(
+            batch,
+            ranking_hints,
+            llm_api_key,
+            llm_model,
+            llm_base_url,
+            context="",  # omit rich context in batch stage to save input tokens
+            rank_weight=1.0,
+            max_retries=max_retries,
+            min_coverage=min_coverage,
+            fallback_models=fallback_models,
+            temperature=temperature,
+            json_mode=json_mode,
+            silent=silent,
+            channels=channels,
+            config_path=config_path,
+            timeout_sec=timeout_sec,
+            max_prompt_chars=max_prompt_chars,
+            degradation=degradation,
+            max_tokens=max((max_tokens or 2048), effective_batch_size * 120),
+            batch_size=0,  # disable recursive batching
+            compact=True,
+        )
+        batch_models.extend(result.attempted_models or [])
+        batch_errors.extend(result.errors or [])
+
+        ranked_batch = list(result.picks)
+        ranked_batch.sort(
+            key=lambda p: p.final_score if p.final_score is not None else p.screen_score,
+            reverse=True,
+        )
+        finalists.extend(ranked_batch[:top_k])
+
+    # Deduplicate finalists by normalized code.
+    seen: set[str] = set()
+    unique_finalists: list[Pick] = []
+    for pick in finalists:
+        code = _normalize_code(pick.code)
+        if code and code not in seen:
+            seen.add(code)
+            unique_finalists.append(pick)
+
+    if not unique_finalists:
+        logger.warning("Batch ranking produced no finalists; falling back to screen_score")
+        return LLMRankingResult(
+            picks=candidates,
+            coverage=0.0,
+            errors=_dedupe(["all_batches_empty", *batch_errors]),
+            attempted_models=_dedupe(batch_models),
+            failure_reason="all_batches_empty",
+        )
+
+    # Final stage: full ranking over the promoted finalists.
+    final_result = rank_candidates_with_metadata(
+        unique_finalists,
+        ranking_hints,
+        llm_api_key,
+        llm_model,
+        llm_base_url,
+        context=context,
+        rank_weight=rank_weight,
+        max_retries=max_retries,
+        min_coverage=min_coverage,
+        fallback_models=fallback_models,
+        temperature=temperature,
+        json_mode=json_mode,
+        silent=silent,
+        channels=channels,
+        config_path=config_path,
+        timeout_sec=timeout_sec,
+        max_prompt_chars=max_prompt_chars,
+        degradation=degradation,
+        max_tokens=max((max_tokens or 2048), len(unique_finalists) * 150),
+        batch_size=0,
+        compact=False,
+    )
+    batch_models.extend(final_result.attempted_models or [])
+    all_errors = _dedupe(batch_errors + (final_result.errors or []))
+
+    if final_result.ranked:
+        return LLMRankingResult(
+            picks=final_result.picks,
+            ranked=True,
+            market_view=final_result.market_view,
+            selection_logic=final_result.selection_logic,
+            portfolio_risk=final_result.portfolio_risk,
+            coverage=final_result.coverage,
+            errors=all_errors,
+            model_used=final_result.model_used,
+            attempted_models=_dedupe(batch_models),
+        )
+
+    # Final stage failed but we have finalists: return them ordered by batch score.
+    unique_finalists.sort(
+        key=lambda p: p.final_score if p.final_score is not None else p.screen_score,
+        reverse=True,
+    )
+    for index, pick in enumerate(unique_finalists, start=1):
+        pick.rank = index
+    return LLMRankingResult(
+        picks=unique_finalists,
+        coverage=0.0,
+        errors=all_errors,
+        attempted_models=_dedupe(batch_models),
+        failure_reason=final_result.failure_reason or "final_rank_failed",
+    )
+
+
 def _build_ranking_prompt(
     candidates: list[Pick],
     hints: str,
@@ -240,11 +449,13 @@ def _build_ranking_prompt(
     *,
     max_chars: int | None = _DEFAULT_RANKING_PROMPT_MAX_CHARS,
     degradation: list[str] | None = None,
+    compact: bool = False,
 ) -> str:
     hints_text = hints.strip() or "无额外排序提示。"
     context_text = context.strip() or "无额外上下文。只能基于候选池结构化数据和策略偏好判断。"
-    candidates_text = "\n".join(_format_candidate_for_prompt(p) for p in candidates)
-    prompt = _render_ranking_prompt(hints_text, context_text, candidates_text)
+    detail = "identity" if compact else "full"
+    candidates_text = "\n".join(_format_candidate_for_prompt(p, detail=detail) for p in candidates)
+    prompt = _render_ranking_prompt(hints_text, context_text, candidates_text, compact=compact)
     if max_chars is None or len(prompt) <= max_chars:
         return prompt
     return _build_bounded_ranking_prompt(
@@ -253,10 +464,36 @@ def _build_ranking_prompt(
         context_text,
         max_chars=max_chars,
         degradation=degradation,
+        compact=compact,
     )
 
 
-def _render_ranking_prompt(hints: str, context: str, candidates_text: str) -> str:
+def _render_ranking_prompt(hints: str, context: str, candidates_text: str, *, compact: bool = False) -> str:
+    if compact:
+        return f"""你是一个专业的股票研究员，任务是在“已经由代码硬筛过”的候选池内做相对排序。
+只关注候选池内的相对优劣，不修改硬筛条件，不给目标价或承诺收益。
+
+## 排序依据
+{hints}
+
+## 候选列表
+{candidates_text}
+
+## 输出要求
+只返回 JSON，不要 Markdown，不要解释 JSON 以外的文本。
+格式：
+{{
+  "ranked": [
+    {{
+      "code": "股票代码",
+      "llm_score": 0-100,
+      "confidence": 0-1,
+      "reason": "一句话排序理由",
+      "risk": "一句话主要风险"
+    }}
+  ]
+}}
+"""
     return f"""你是一个专业的股票研究员，任务是在“已经由代码硬筛过”的候选池内做相对排序。
 你不能推荐候选池外股票，不能修改硬筛条件，不能给目标价或承诺收益。你的价值在于：
 1. 结合策略偏好，对候选之间做跨股票比较；
@@ -309,6 +546,7 @@ def _build_bounded_ranking_prompt(
     *,
     max_chars: int,
     degradation: list[str] | None,
+    compact: bool = False,
 ) -> str:
     trimmed: list[str] = []
     identity_text = "\n".join(_format_candidate_for_prompt(p, detail="identity") for p in candidates)
@@ -316,6 +554,7 @@ def _build_bounded_ranking_prompt(
         _truncate_prompt_text(hints, 900, "hints", trimmed),
         "",
         identity_text,
+        compact=compact,
     )
     context_budget = max(int(max_chars) - len(base_min) - 80, 0)
     context_text = _truncate_prompt_text(context, context_budget, "context", trimmed)
@@ -324,13 +563,15 @@ def _build_bounded_ranking_prompt(
         _truncate_prompt_text(hints, 900, "hints", trimmed),
         context_text,
         "",
+        compact=compact,
     )
     candidate_budget = max(int(max_chars) - len(prompt_without_candidates), 0)
-    candidates_text = _fit_candidate_prompt_lines(candidates, candidate_budget, trimmed)
+    candidates_text = _fit_candidate_prompt_lines(candidates, candidate_budget, trimmed, compact=compact)
     prompt = _render_ranking_prompt(
         _truncate_prompt_text(hints, 900, "hints", trimmed),
         context_text,
         candidates_text,
+        compact=compact,
     )
 
     if len(prompt) > max_chars:
@@ -407,8 +648,31 @@ def _fit_candidate_prompt_lines(
     candidates: list[Pick],
     budget: int,
     trimmed: list[str],
+    *,
+    compact: bool = False,
 ) -> str:
     marker = f"...{_PROMPT_TRIM_MARKER}:candidate_details"
+    if compact:
+        # Compact batch stage only needs identity-level details.
+        lines = [_format_candidate_for_prompt(p, detail="identity") for p in candidates]
+        text = "\n".join(lines)
+        if len(text) <= budget:
+            return text
+        trimmed.append("candidate_details")
+        available = max(int(budget) - len(marker) - 1, 0)
+        if available <= 0:
+            return marker[:budget]
+        kept: list[str] = []
+        used = 0
+        for line in lines:
+            extra = len(line) + (1 if kept else 0)
+            if used + extra > available:
+                break
+            kept.append(line)
+            used += extra
+        kept.append(f"...{_PROMPT_TRIM_MARKER}:candidate_omitted={len(lines) - len(kept)}")
+        return "\n".join(kept)
+
     full_text = "\n".join(_format_candidate_for_prompt(p) for p in candidates)
     if len(full_text) <= budget:
         return full_text

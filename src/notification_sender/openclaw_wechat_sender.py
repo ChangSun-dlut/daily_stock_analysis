@@ -20,7 +20,9 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,9 @@ OPENCLAW_WECHAT_MAX_BYTES = 4000
 # 子进程调用默认超时（秒）；CLI（尤其 npx 冷启动）可能较慢，实际下限会拉高。
 DEFAULT_SEND_TIMEOUT_SECONDS = 30
 _OPENCLAW_CLI_MIN_TIMEOUT_SECONDS = 120
+
+# 决策仪表盘微信推送失败后的轮询重试间隔（秒）。
+_OPENCLAW_WECHAT_RETRY_INTERVAL_SECONDS = 1800  # 30 分钟
 
 # gateway 探测/重启兜底参数。
 _OPENCLAW_GATEWAY_HOST = "127.0.0.1"
@@ -137,6 +142,17 @@ def classify_openclaw_send_error(
 class OpenclawWechatSender:
     """通过 openclaw 微信频道推送文本/图片消息。"""
 
+    # ---- 类级共享的冷却状态 ------------------------------------------------
+    # 发送链路与巡检**每次都会新建 sender 实例**，若这些时间戳做成实例变量，
+    # 冷却会在每次新建实例时被重置成 0 → 冷却完全失效。
+    # 2026-08-31 事故：contextToken 失效时每 30 秒重启一次 gateway，1 小时触发
+    # 47 次重启（gateway 总 runs 48），把 iLink 会话反复冲断，形成
+    # 「prepare failed → 重启 → 会话断 → prepare failed」的死循环。
+    _last_restart_attempt = 0.0
+    _last_context_clear_ts = 0.0
+    _last_context_failure_ts = 0.0
+    _last_crash_loop_restart_ts = 0.0
+
     def __init__(self, config) -> None:
         self._account = (getattr(config, "openclaw_wechat_account", "") or "").strip()
         self._target = (getattr(config, "openclaw_wechat_target", "") or "").strip()
@@ -148,8 +164,9 @@ class OpenclawWechatSender:
             or getattr(config, "openclaw_gateway_port", _OPENCLAW_GATEWAY_DEFAULT_PORT)
             or _OPENCLAW_GATEWAY_DEFAULT_PORT
         )
-        # 同进程内上次重启尝试时间戳，用于冷却。
-        self._last_restart_attempt = 0.0
+        # 注意：_last_restart_attempt / _last_context_clear_ts / _last_context_failure_ts /
+        # _last_crash_loop_restart_ts 已提升为**类属性**（见类定义处说明），此处不再初始化，
+        # 否则实例属性会遮蔽类属性、导致冷却失效。
         # 解析 CLI（缓存，避免每次发送都走 npx 冷启动）。
         self._cli = self._resolve_cli()
         # 最近一次自动修复的诊断信息（供调用方生成更精确的错误提示）。
@@ -158,14 +175,6 @@ class OpenclawWechatSender:
         self.last_error_type: str = OPENCLAW_ERR_NOT_CONFIGURED if not self._enabled else OPENCLAW_ERR_OK
         # 最近一次失败的原始文本（截断到 ~300 字符），供告警/日志展示。
         self.last_error_detail: str = ""
-        # 最近一次自动清理 context token 的时间戳（用于冷却，避免反复删除）。
-        self._last_context_clear_ts = 0.0
-        # 最近一次确认到 contextToken 失效（prepare failed）的时间戳，用于判断
-        # token 文件是否过期（文件 mtime < 该值 = 旧 token，可安全删除）。
-        self._last_context_failure_ts = 0.0
-        # 最近一次因 crash-loop breaker 强制重启 gateway 的时间戳，用于冷却，避免
-        # 巡检每轮都重启（breaker 自身有 5 分钟观察窗口，过频反而被再次抑制）。
-        self._last_crash_loop_restart_ts = 0.0
         # 最近一次自动修复是否判定为“需用户给 bot 发消息重建 context”。
         self.last_needs_user_message: bool = False
 
@@ -178,6 +187,25 @@ class OpenclawWechatSender:
         if len(data) <= max_bytes:
             return content
         return data[:max_bytes].decode("utf-8", "ignore")
+
+    @staticmethod
+    def _split_text_by_bytes(text: str, limit: int) -> List[str]:
+        """按 UTF-8 字节数安全切片（不切断多字节字符），用于超长消息分条发送。"""
+        parts: List[str] = []
+        cur = ""
+        cur_bytes = 0
+        for ch in text:
+            b = len(ch.encode("utf-8"))
+            if cur_bytes + b > limit and cur:
+                parts.append(cur)
+                cur = ch
+                cur_bytes = b
+            else:
+                cur += ch
+                cur_bytes += b
+        if cur:
+            parts.append(cur)
+        return parts
 
     def _resolve_cli(self) -> list:
         """解析 openclaw CLI 可执行文件，按顺序：显式配置 > PATH > npx 缓存直接 bin > npx。"""
@@ -220,19 +248,71 @@ class OpenclawWechatSender:
         except OSError:
             return False
 
+    def _launchctl_gateway_restart(self) -> bool:
+        """gateway 由 launchd 托管时，用 ``launchctl kickstart -k`` 安全重启。
+
+        2026-08-31 事故后新增的**首选**路径：本机 gateway 装成了 LaunchAgent
+        （``com.openclaw.gateway``，KeepAlive）。此时再用
+        ``gateway run --force`` 会与 KeepAlive 已拉起的实例抢 18789 端口 →
+        ``EADDRINUSE`` → 计为 unclean boot → 3 次/5 分钟打满 crash-loop
+        breaker → 通道被禁自启，自愈反而把通道彻底搞挂。
+
+        返回 False 表示「未托管或重启失败」，调用方应回退到 ``run --force``。
+        """
+        label = os.environ.get(
+            "OPENCLAW_GATEWAY_LAUNCHD_LABEL", "com.openclaw.gateway"
+        )
+        try:
+            probe = subprocess.run(
+                ["launchctl", "list", label],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return False  # 非 macOS / 无 launchctl
+        if probe.returncode != 0:
+            return False  # 未托管：交由调用方回退
+        try:
+            proc = subprocess.run(
+                ["launchctl", "kickstart", "-k", f"gui/{os.geteuid()}/{label}"],
+                capture_output=True,
+                text=True,
+                timeout=_OPENCLAW_GATEWAY_START_TIMEOUT,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:  # noqa: BLE001
+            logger.warning("OPENCLAW_WECHAT: launchctl kickstart 异常: %s", exc)
+            return False
+        if proc.returncode == 0:
+            logger.info(
+                "OPENCLAW_WECHAT: 已通过 launchctl kickstart -k 重启 gateway（%s）",
+                label,
+            )
+            return True
+        logger.warning(
+            "OPENCLAW_WECHAT: launchctl kickstart -k 失败(rc=%s): %s",
+            proc.returncode,
+            (proc.stderr or proc.stdout or "").strip()[:300],
+        )
+        return False
+
     def _restart_gateway(self) -> bool:
         """尝试重启本地 gateway。
 
-        优先用 ``gateway run --force`` 后台拉起一个 gateway（kill 占用端口的残留
-        监听后启动），该方式在「已安装为系统服务」与「未安装」两种场景下都有效，
-        且能立即返回，把全部启动等待预算留给 gateway 真正就绪。
-        仅当 ``run --force`` 无法拉起进程时，才回退到 ``gateway restart`` /
-        ``gateway start``（仅对 installed 服务有意义）。
+        路径优先级（2026-08-31 调整）：
+
+        1. **launchd 托管**：``launchctl kickstart -k`` —— 安全，不会抢端口。
+        2. **未托管**：``gateway run --force`` 后台拉起（kill 占用端口的残留监听
+           后启动），能立即返回，把启动等待预算留给 gateway 真正就绪。
+        3. **兜底**：``gateway restart`` / ``gateway start``（仅对已安装服务有意义）。
         """
         cli = self._cli
         if not cli:
             return False
-        # 1) 通用首选：后台拉起 gateway。
+        # 1) 首选：launchd 托管场景（避免 EADDRINUSE → crash-loop breaker）。
+        if self._launchctl_gateway_restart():
+            return True
+        # 2) 未托管场景：后台拉起 gateway。
         run_cmd = [*cli, "gateway", "run", "--force", "--bind", "loopback"]
         try:
             subprocess.Popen(
@@ -294,7 +374,7 @@ class OpenclawWechatSender:
         if now - self._last_restart_attempt < _OPENCLAW_GATEWAY_RESTART_COOLDOWN:
             logger.warning("OPENCLAW_WECHAT: gateway 未运行且处于重启冷却期，跳过")
             return False
-        self._last_restart_attempt = now
+        type(self)._last_restart_attempt = now
         logger.warning("OPENCLAW_WECHAT: gateway 未运行，尝试重启兜底")
         if not self._restart_gateway():
             return False
@@ -385,7 +465,7 @@ class OpenclawWechatSender:
                 return False
         try:
             os.remove(path)
-            self._last_context_clear_ts = time.time()
+            type(self)._last_context_clear_ts = time.time()
             logger.warning("OPENCLAW_WECHAT: 已删除过期 context-tokens.json: %s", path)
             return True
         except OSError as exc:  # noqa: BLE001
@@ -398,7 +478,7 @@ class OpenclawWechatSender:
             self.last_error_type == OPENCLAW_ERR_AUTH_NEEDED
             and "prepare failed" in (self.last_error_detail or "").lower()
         ):
-            self._last_context_failure_ts = time.time()
+            type(self)._last_context_failure_ts = time.time()
 
     def _run_cli(self, extra_args: list, timeout_seconds) -> bool:
         cmd = [
@@ -577,10 +657,11 @@ class OpenclawWechatSender:
         - gateway 失活：拉起并等待就绪（发送链路可能立即重试）。
         - 端口可达但 iLink 长连接可能已掉（锁屏/休眠）：``restart_gateway=True``
           时强制重启以恢复连接（与历史行为一致）。
-        - ``prepare failed``（contextToken 失效）：删除过期 ``context-tokens.json``
-          并重启 gateway，强制下次接收人发消息时重建对话上下文；此情形 bot 单向
-          推送前必须等用户发消息，**无法自动完成**，故标记 ``needs_user_message``
-          且不阻塞等待 gateway 就绪（发送本就会失败）。
+        - ``prepare failed``（contextToken 失效）：删除过期 ``context-tokens.json``，
+          标记 ``needs_user_message`` 等待接收人发消息重建对话上下文。此情形 bot 单向
+          推送前必须等用户发消息，**无法自动完成**。
+          **不重启 gateway**（2026-08-31 修正）：token 只能由用户发消息重建，重启
+          治不了，反而冲断 iLink 会话并累积 unclean boot → crash-loop breaker。
 
         不会改动 openclaw 配置（避免 ``doctor --repair`` 旋转 token / 启用插件等副作用）。
         ``force_clear_token`` 仅发送链路在刚检测到失败时应为 ``True``；巡检场景用
@@ -618,24 +699,50 @@ class OpenclawWechatSender:
             if self._restart_gateway():
                 info["gateway_restarted"] = True
                 info["crash_loop_recovered"] = True
-                self._last_crash_loop_restart_ts = time.time()
+                type(self)._last_crash_loop_restart_ts = time.time()
                 self._wait_for_gateway_ready()
             else:
                 logger.error("OPENCLAW_WECHAT: crash-loop 重启 gateway 失败")
         elif is_context_issue:
+            # ⚠️ 2026-09-01 实锤修正（推翻 10:36 的误判）：
+            # prepare failed 两种根因：
+            #  (a) iLink 长连临时掉线 → channels.start 能重建，发送方重试即可成功；
+            #  (b) contextToken 彻底 missing（iLink 服务端缓存清除，约 12h 后）→
+            #      channels.start 返回 started:true 但 iLink 真实日志 contextToken missing，
+            #      CLI 还可能假返回 sent（**10:36 那次 sent=True 就是假成功，微信根本没收到**），
+            #      bot 侧任何操作都救不回，只能由用户在微信给 bot 发消息重建对话上下文。
+            # repair 时无法区分 (a)/(b)，故先清废 token + channels.start，交由发送方重试；
+            # 若发送方重试仍失败，由 send 方法标记 needs_user_message 兜底（见下）。
+            # 优化：若上次已确认 needs_user_message（用户尚未发消息重建），跳过 channels.start
+            # 空转，直接提示用户发消息，避免每条报警都重启通道刷日志。
+            if self.last_needs_user_message:
+                info["needs_user_message"] = True
+                return info
             if self._clear_stale_context_tokens(force=force_clear_token):
                 info["context_token_cleared"] = True
-            # 清 token 后重启 gateway；发送本就会失败（需用户发消息），不阻塞等待就绪。
-            if self._restart_gateway():
-                info["gateway_restarted"] = True
-            info["needs_user_message"] = True
+            if self.ensure_channel_started():
+                info["channel_started"] = True
+                # 通道重建后不在此标记 needs_user_message，交由发送方重试判断 (a)/(b)。
+            else:
+                logger.error(
+                    "OPENCLAW_WECHAT: channels.start 重建 iLink 失败，需接收人给 bot 发消息重建"
+                )
+                info["needs_user_message"] = True
         elif not self._gateway_reachable():
-            # 1) gateway 兜底：不在线则拉起并等待就绪。
+            # 1) gateway 兜底：不在线则拉起并等待就绪（`_ensure_gateway` 自带冷却）。
             if self._ensure_gateway():
                 info["gateway_restarted"] = True
         elif restart_gateway:
             # 2) 端口可达但 iLink 长连可能已掉（锁屏/休眠）：强制重启恢复连接。
-            if self._restart_gateway():
+            #    同样受冷却期约束 —— 原本无冷却，任何一次发送失败都会重启 gateway。
+            now = time.time()
+            if now - self._last_restart_attempt < _OPENCLAW_GATEWAY_RESTART_COOLDOWN:
+                logger.info(
+                    "OPENCLAW_WECHAT: gateway 重启处于冷却期(%.0fs)，跳过本轮强制重启",
+                    _OPENCLAW_GATEWAY_RESTART_COOLDOWN,
+                )
+            elif self._restart_gateway():
+                type(self)._last_restart_attempt = now
                 info["gateway_restarted"] = True
                 self._wait_for_gateway_ready()
         # 探测 iLink bot 是否在线（若需重新扫码登录则无法自动修复）。
@@ -750,6 +857,77 @@ class OpenclawWechatSender:
         )
         return info
 
+    def channel_running(self) -> bool | None:
+        """返回微信通道是否 ``running``；无法判定（CLI 失败/未配置）返回 ``None``。
+
+        注意：gateway 端口可达 ≠ 通道在跑。crash-loop breaker 跳闸时端口正常，
+        但通道被禁止自动启动，此时 ``running=false``、推送静默失败。
+        """
+        if not self._cli or not self._enabled:
+            return None
+        try:
+            proc = subprocess.run(
+                [*self._cli, "channels", "status", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if proc.returncode != 0 or not (proc.stdout or "").strip():
+            return None
+        try:
+            data = json.loads(proc.stdout)
+        except ValueError:
+            return None
+        accounts = (data.get("channelAccounts") or {}).get("openclaw-weixin") or []
+        for acc in accounts:
+            if not isinstance(acc, dict):
+                continue
+            if self._account and acc.get("accountId") not in (None, self._account):
+                continue
+            if "running" in acc:
+                return bool(acc["running"])
+        return None
+
+    def ensure_channel_started(self) -> bool:
+        """通道未运行时用 RPC ``channels.start`` 拉起（breaker 抑制时的可靠兜底）。
+
+        CLI **没有** ``channels start`` 子命令，必须走 ``gateway call``。
+        相比重启 gateway，这种方式不会制造 unclean boot，也不会触发 breaker。
+        """
+        if not self._cli or not self._enabled:
+            return False
+        try:
+            proc = subprocess.run(
+                [
+                    *self._cli,
+                    "gateway",
+                    "call",
+                    "channels.start",
+                    "--params",
+                    '{"channel":"openclaw-weixin"}',
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OPENCLAW_WECHAT: channels.start 调用异常: %s", exc)
+            return False
+        if proc.returncode != 0:
+            logger.warning(
+                "OPENCLAW_WECHAT: channels.start 失败(rc=%s): %s",
+                proc.returncode,
+                (proc.stderr or proc.stdout or "").strip()[:300],
+            )
+            return False
+        logger.info("OPENCLAW_WECHAT: 已通过 RPC channels.start 拉起微信通道")
+        # iLink 长连重建需要短暂稳定期，等待几秒再让发送方重试，避免首条必败。
+        time.sleep(3.0)
+        return True
+
     def _try_send_image(self, image_bytes, timeout_seconds) -> bool:
         """单次尝试发送图片（不含自动修复）。"""
         if not self._ensure_gateway():
@@ -785,9 +963,10 @@ class OpenclawWechatSender:
 
         首次发送失败后，若 ``auto_repair`` 为真，会根据失败语义自动修复后重试：
         - gateway 失活：拉起 gateway 后重试。
-        - iLink contextToken 失效（``prepare failed``）：自动清掉过期 token 并重启
-          gateway，但 bot 单向推送前必须等接收人发消息重建 context，无法自动完成，
-          因此不再盲目重试，而是标记 ``needs_user_message`` 并提示用户。
+        - iLink contextToken 失效（``prepare failed``）：iLink 长连掉线所致，自动清掉
+          过期 token 后走 ``channels.start`` 重建 iLink 会话（**无需用户发消息**，
+          2026-09-01 实测验证），随后立即重试推送。仅当 channels.start 也失败时才会
+          标记 ``needs_user_message`` 兜底。
         """
         if not self._enabled:
             logger.warning("OPENCLAW_WECHAT: 未配置账号/接收人，跳过推送")
@@ -797,9 +976,13 @@ class OpenclawWechatSender:
         text = (content or "").strip()
         if not text:
             return False
-        text = self._truncate(text, OPENCLAW_WECHAT_MAX_BYTES)
-        args = ["--message", text]
-        if self._run_cli(args, timeout_seconds):
+        # 超长内容按字节上限切片，分多条发送（不截断）；仅多条时每条加 [i/N] 序号。
+        if len(text.encode("utf-8")) <= OPENCLAW_WECHAT_MAX_BYTES:
+            parts = [text]
+        else:
+            parts = self._split_text_by_bytes(text, OPENCLAW_WECHAT_MAX_BYTES - 24)
+        n = len(parts)
+        if self._send_text_parts(parts, n, timeout_seconds):
             self.last_repair_info = None
             self.last_needs_user_message = False
             return True
@@ -815,11 +998,40 @@ class OpenclawWechatSender:
             # 盲目重试必然失败，直接返回并给出明确提示。
             self.last_needs_user_message = True
             logger.warning(
-                "OPENCLAW_WECHAT: 检测到 iLink contextToken 失效，已自动清掉过期 token 并重启 gateway；"
+                "OPENCLAW_WECHAT: 检测到 iLink contextToken 失效，已自动清掉过期 token；"
                 "请给 bot 发一条任意消息以重建对话上下文，之后即可正常推送。"
             )
+            self._register_retry(content)
             return False
-        return self._run_cli(args, timeout_seconds)
+        # channels.start 已尝试重建 iLink：再重试一次。若仍失败，说明 contextToken 已
+        # 彻底 missing（iLink 服务端缓存清除，实锤 2026-09-01：channels.start 返回
+        # started:true 但 iLink 真实日志 contextToken missing，CLI 还可能假返回 sent），
+        # bot 侧任何操作都救不回，只能由用户在微信给 bot 发消息重建 → 标记 needs_user_message。
+        ok = self._send_text_parts(parts, n, timeout_seconds)
+        if not ok:
+            self.last_needs_user_message = True
+            logger.warning(
+                "OPENCLAW_WECHAT: channels.start 后仍 prepare failed（contextToken 彻底 missing），"
+                "已自动清掉过期 token；请给 bot 发一条任意消息以重建对话上下文。"
+            )
+            self._register_retry(content)
+        return ok
+
+    def _register_retry(self, content) -> None:
+        """决策仪表盘微信推送失败（contextToken 失效/通道未恢复）时，登记已生成内容。
+
+        由后台 daemon 线程每 30 分钟重试一次，直到通道恢复（用户给 bot 发消息重建上下文后）
+        推送成功。直接重推首次生成好的文本，不重新计算选股/分析结果。
+        """
+        _OPENCLAW_WECHAT_RETRY.register(self, content)
+
+    def _send_text_parts(self, parts, n, timeout_seconds) -> bool:
+        """按切片顺序发送多条文本；全部成功返回 True，任一失败返回 False（不回滚已发部分）。"""
+        for i, part in enumerate(parts):
+            prefix = f"[{i + 1}/{n}] " if n > 1 else ""
+            if not self._run_cli(["--message", prefix + part], timeout_seconds):
+                return False
+        return True
 
     def _send_openclaw_wechat_image(
         self, image_bytes, *, timeout_seconds=DEFAULT_SEND_TIMEOUT_SECONDS, auto_repair: bool = True
@@ -849,8 +1061,84 @@ class OpenclawWechatSender:
         if repair and repair.get("needs_user_message"):
             self.last_needs_user_message = True
             logger.warning(
-                "OPENCLAW_WECHAT: 检测到 iLink contextToken 失效，已自动清掉过期 token 并重启 gateway；"
+                "OPENCLAW_WECHAT: 检测到 iLink contextToken 失效，已自动清掉过期 token；"
                 "请给 bot 发一条任意消息以重建对话上下文，之后即可正常推送。"
             )
             return False
-        return self._try_send_image(image_bytes, timeout_seconds)
+        # 同 send_to_openclaw_wechat：重试仍失败 ⇒ contextToken 彻底 missing，需用户发消息。
+        ok = self._try_send_image(image_bytes, timeout_seconds)
+        if not ok:
+            self.last_needs_user_message = True
+            logger.warning(
+                "OPENCLAW_WECHAT: channels.start 后仍 prepare failed（contextToken 彻底 missing），"
+                "请给 bot 发一条任意消息以重建对话上下文。"
+            )
+        return ok
+
+
+# ----------------------------------------------------------------------
+# 决策仪表盘微信推送失败后的轮询重试调度器
+# ----------------------------------------------------------------------
+class _OpenClawWechatRetryScheduler:
+    """微信(OpenClaw)通道推送失败后，周期性重试「已生成」的决策仪表盘内容。
+
+    - 不重新计算：直接重推首次生成好的文本（send_to_openclaw_wechat 内部会按发送上限截断）。
+    - 每 30 分钟轮询一次，直到通道恢复（用户给 bot 发消息重建上下文后）推送成功。
+    - 仅保留当天待重推内容；跨天的旧内容自动丢弃（次日新分析会重新生成并推送）。
+    """
+
+    def __init__(self, interval_seconds: int = _OPENCLAW_WECHAT_RETRY_INTERVAL_SECONDS):
+        self._interval = interval_seconds
+        self._lock = threading.Lock()
+        self._pending: Dict[str, str] = {}
+        self._thread: Optional[threading.Thread] = None
+
+    def register(self, sender, content: str) -> None:
+        content = (content or "").strip()
+        if not content:
+            return
+        today_key = datetime.now().strftime("%Y-%m-%d")
+        with self._lock:
+            self._pending[today_key] = content
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(
+                    target=self._run, args=(sender,), daemon=True,
+                    name="openclaw-wechat-retry",
+                )
+                self._thread.start()
+
+    def _run(self, sender) -> None:
+        while True:
+            # 首轮也等待一个间隔再重试，符合「每半小时轮询一次」语义（不立即重发）。
+            time.sleep(self._interval)
+            with self._lock:
+                today_key = datetime.now().strftime("%Y-%m-%d")
+                # 丢弃非今天的待重推（跨天旧内容不再推送）
+                for old_key in [k for k in self._pending if k != today_key]:
+                    self._pending.pop(old_key, None)
+                if not self._pending:
+                    self._thread = None
+                    return
+                items = dict(self._pending)
+            for key, content in list(items.items()):
+                try:
+                    ok = sender.send_to_openclaw_wechat(content)
+                except Exception as exc:  # 防御：重试过程异常不终止线程
+                    logger.warning("OPENCLAW_WECHAT 重试异常: %s", exc)
+                    ok = False
+                if ok:
+                    with self._lock:
+                        self._pending.pop(key, None)
+                    logger.info("OPENCLAW_WECHAT 通道已恢复，决策仪表盘重推成功 (%s)", key)
+                else:
+                    logger.info(
+                        "OPENCLAW_WECHAT 通道仍未恢复，%d 分钟后重试决策仪表盘推送 (%s)",
+                        self._interval // 60, key,
+                    )
+            with self._lock:
+                if not self._pending:
+                    self._thread = None
+                    return
+
+
+_OPENCLAW_WECHAT_RETRY = _OpenClawWechatRetryScheduler()

@@ -1055,7 +1055,7 @@ class Config:
     agent_context_compression_trigger_tokens: int = 12000
     agent_context_protected_turns: int = 4
     agent_event_monitor_enabled: bool = False  # Enable periodic event-driven alert checks in schedule mode
-    agent_event_monitor_interval_minutes: int = 5  # Polling interval for event monitor background checks
+    agent_event_monitor_interval_minutes: int = 1  # Polling interval for event monitor background checks; 1 min keeps the 1-min kline volume-ratio feed fresh so short slope windows (e.g. 5 min) have enough samples
     agent_event_alert_rules_json: str = ""  # JSON array of serialized EventMonitor rules
 
     # === 通知配置（可同时配置多个，全部推送）===
@@ -2054,7 +2054,7 @@ class Config:
             agent_event_monitor_enabled=os.getenv('AGENT_EVENT_MONITOR_ENABLED', 'false').lower() == 'true',
             agent_event_monitor_interval_minutes=parse_env_int(
                 os.getenv('AGENT_EVENT_MONITOR_INTERVAL_MINUTES'),
-                5,
+                1,
                 field_name='AGENT_EVENT_MONITOR_INTERVAL_MINUTES',
                 minimum=1,
             ),

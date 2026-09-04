@@ -429,6 +429,8 @@ def screen(
             timeout_sec=config.llm_timeout_sec,
             max_tokens=config.llm_max_tokens,
             degradation=llm_prompt_degradation,
+            batch_size=config.llm_batch_size,
+            batch_top_k=config.llm_batch_top_k,
         )
         degradation.extend(llm_prompt_degradation)
         picks = llm_result.picks

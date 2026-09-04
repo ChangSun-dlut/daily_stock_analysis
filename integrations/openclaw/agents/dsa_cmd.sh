@@ -144,8 +144,29 @@ print('\n'.join(lines))
       cat "$LOG_PREFIX.screen_result.txt" 2>/dev/null || echo "（结果文件生成失败）"
     fi
     ;;
+  menu|help|dsa|命令|菜单|帮助|指令|功能)
+    # 直接调用 DSA 命令菜单 API，返回可读菜单文本。
+    DSA_BASE="${DSA_BASE_URL:-http://127.0.0.1:8000}"
+    OUTPUT=$(curl -s --max-time 10 "${DSA_BASE}/api/v1/bot/commands" 2>/dev/null)
+    if [ -z "$OUTPUT" ]; then
+      echo "⚠️ 获取 DSA 命令菜单失败（${DSA_BASE} 无响应），请确认 DSA 服务已启动。"
+      exit 1
+    fi
+    echo "$OUTPUT" | "$PY" -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    md = d.get("markdown", "")
+    if md:
+        print(md)
+    else:
+        print(json.dumps(d, ensure_ascii=False, indent=2))
+except Exception:
+    print(sys.stdin.read())
+'
+    ;;
   *)
-    echo "未知指令: ${1:-空}（支持 market / stock <代码> / screen）";
+    echo "未知指令: ${1:-空}（支持 market / stock <代码> / screen / menu）";
     exit 2
     ;;
 esac

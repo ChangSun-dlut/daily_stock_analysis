@@ -185,6 +185,10 @@ class Config:
     # 默认 4096：为推理模型（如 deepseek-v4-flash）的 reasoning_content 预留空间，
     # 避免 max_tokens 被思考过程占满导致 content 为空、LLM 排名静默降级为因子排序。
     llm_max_tokens: int = 4096
+    # LLM ranking batch (map-reduce) settings.
+    # batch_size=None -> auto batch when candidates > 20; 0 -> disable; positive -> force.
+    llm_batch_size: int | None = None
+    llm_batch_top_k: int = 8
 
     # Snapshot data source priority
     snapshot_source_priority: list[str] = field(
@@ -320,6 +324,8 @@ class Config:
             llm_context_max_chars=max(500, int(os.getenv("LLM_CONTEXT_MAX_CHARS", "4000"))),
             llm_timeout_sec=max(1.0, _parse_float_env("LLM_TIMEOUT_SEC", 60.0)),
             llm_max_tokens=max(1, int(os.getenv("LLM_MAX_TOKENS", "4096"))),
+            llm_batch_size=_parse_optional_int_env("LLM_BATCH_SIZE"),
+            llm_batch_top_k=max(1, int(os.getenv("LLM_BATCH_TOP_K", "8"))),
             snapshot_source_priority=_resolve_snapshot_source_priority(),
             fallback_snapshot_path=fallback_snapshot_path,
             snapshot_cache_ttl_seconds=max(
@@ -411,6 +417,16 @@ def _parse_optional_float_env(name: str) -> float | None:
     if cleaned.lower() in {"", "none", "off", "false"}:
         return None
     return float(cleaned)
+
+
+def _parse_optional_int_env(name: str) -> int | None:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if cleaned.lower() in {"", "none", "off", "false"}:
+        return None
+    return int(cleaned)
 
 
 def _parse_llm_channels_env() -> list[dict[str, object]]:

@@ -9,6 +9,7 @@ import { ThemeToggle } from '../theme/ThemeToggle';
 import { UiLanguageToggle } from '../i18n/UiLanguageToggle';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import { WebAlertPopups } from '../alerts/WebAlertPopups';
+import { WebAlertBell } from '../alerts/WebAlertBell';
 import { useWebAlertPopups } from '../../hooks/useWebAlertPopups';
 
 type ShellProps = {
@@ -19,7 +20,8 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
   const [mobileOpen, setMobileOpen] = useState(false);
   const collapsed = false;
   const { t } = useUiLanguage();
-  const { pendingItems, dismiss } = useWebAlertPopups();
+  const { history, activeItems, dismiss, removeHistory, clear, latestId } = useWebAlertPopups();
+  const [alertCenterOpen, setAlertCenterOpen] = useState(false);
 
   useEffect(() => {
     if (!mobileOpen) {
@@ -50,6 +52,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
           <Menu className="h-5 w-5" />
         </button>
         <div className="pointer-events-auto flex items-center gap-2">
+          <WebAlertBell historyItems={history} dismiss={removeHistory} clear={clear} latestId={latestId} onOpenChange={setAlertCenterOpen} />
           <UiLanguageToggle />
           <ThemeToggle />
         </div>
@@ -83,7 +86,12 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
         <SidebarNav onNavigate={() => setMobileOpen(false)} />
       </Drawer>
 
-      <WebAlertPopups items={pendingItems} onDismiss={dismiss} />
+      <WebAlertPopups items={activeItems} onDismiss={dismiss} suppressed={alertCenterOpen} />
+
+      {/* Desktop: persistent notification bell in top-right corner, visible on all pages. */}
+      <div className="pointer-events-auto fixed right-5 top-5 z-50 hidden lg:block">
+        <WebAlertBell historyItems={history} dismiss={removeHistory} clear={clear} latestId={latestId} onOpenChange={setAlertCenterOpen} />
+      </div>
     </div>
   );
 };

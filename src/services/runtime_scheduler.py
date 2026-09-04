@@ -213,7 +213,13 @@ class RuntimeSchedulerService:
     def _current_background_tasks(self, config: Config) -> List[Dict[str, Any]]:
         if self._background_tasks_provider is not None:
             return self._background_tasks_provider(config)
-        return self._current_agent_event_monitor_background_tasks(config)
+        tasks: List[Dict[str, Any]] = []
+        tasks.extend(self._current_agent_event_monitor_background_tasks(config))
+        # 2026-08-31：补上微信通道巡检。生产以 `--webui --schedule` 运行，定时任务由
+        # 本 runtime scheduler 接管，而 main.py 的 CLI 分支在 Web 模式下会提前 return，
+        # 导致该巡检从未注册 —— 通道挂掉后无人自愈。
+        tasks.extend(self._current_openclaw_health_background_tasks(config))
+        return tasks
 
     def _current_agent_event_monitor_background_tasks(self, config: Config) -> List[Dict[str, Any]]:
         name = "agent_event_monitor"
@@ -239,6 +245,52 @@ class RuntimeSchedulerService:
         else:
             interval_seconds = _agent_event_monitor_interval_seconds(config)
 
+        run_immediately = (
+            bool(cached.get("run_immediately", False))
+            and name not in self._background_task_registered_names
+        )
+        self._background_task_registered_names.add(name)
+        return [{
+            "task": cached["task"],
+            "interval_seconds": interval_seconds,
+            "run_immediately": run_immediately,
+            "name": name,
+        }]
+
+    def _current_openclaw_health_background_tasks(self, config: Config) -> List[Dict[str, Any]]:
+        """微信(OpenClaw) 通道健康巡检（心跳检测 + 自动拉起）。
+
+        仅在配置了 ``OPENCLAW_WECHAT_ACCOUNT`` + ``OPENCLAW_WECHAT_TARGET`` 时启用，
+        构建逻辑与 CLI 定时任务模式共用 ``src/services/openclaw_health_task.py``。
+        """
+        name = "openclaw_wechat_health"
+        if not (
+            getattr(config, "openclaw_wechat_account", None)
+            and getattr(config, "openclaw_wechat_target", None)
+        ):
+            self._background_task_cache.pop(name, None)
+            self._background_task_registered_names.discard(name)
+            return []
+
+        cached = self._background_task_cache.get(name)
+        if cached is None:
+            from src.services.openclaw_health_task import (
+                build_openclaw_wechat_health_background_tasks,
+            )
+
+            entries = build_openclaw_wechat_health_background_tasks(
+                config,
+                config_provider=self._reload_config,
+            )
+            if not entries:
+                self._background_task_cache.pop(name, None)
+                self._background_task_registered_names.discard(name)
+                return []
+            cached = dict(entries[0])
+            cached["name"] = name
+            self._background_task_cache[name] = cached
+
+        interval_seconds = int(cached["interval_seconds"])
         run_immediately = (
             bool(cached.get("run_immediately", False))
             and name not in self._background_task_registered_names

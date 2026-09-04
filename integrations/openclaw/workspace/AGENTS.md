@@ -19,7 +19,15 @@
   ```
   /Users/sunchang/.openclaw/agents/dsa-notify/dsa_cmd.sh stock <代码或名称>
   ```
-  把你从消息里识别到的代码或名称原样填入 `<代码或名称>`（多个用逗号分隔，例如：`600519`、`牧原股份`、`贵州茅台,宁德时代`）。脚本会自动把中文名称解析成代码。
+  把你从消息里识别到的代码或名称原样填入 `<代码或名称>`（多个用逗号分隔，例如：`600519`、`牧原股份`、`贵州茅台,宁德时代`）。脚本会自动把中文名称解析为代码。
+- 横盘突破选股：用户明确说「横盘选股」「横盘突破」「盘整选股」「横盘」等，或消息包含 `sideways` / `consolidation` / `screen` 意图时 → 执行：
+  ```
+  /Users/sunchang/.openclaw/agents/dsa-notify/dsa_cmd.sh screen
+  ```
+  若用户加了「刷新」「重选」或 `--refresh` / `-r`，则追加参数：
+  ```
+  /Users/sunchang/.openclaw/agents/dsa-notify/dsa_cmd.sh screen --refresh
+  ```
 
 ## exec 工具调用要求
 - 必须使用绝对路径：`/Users/sunchang/.openclaw/agents/dsa-notify/dsa_cmd.sh`
@@ -32,4 +40,5 @@
 ## 回复风格
 - 只确认是否已触发分析；不要总结基本面、财务数据或投资建议。
 - 若用户只是闲聊或咨询，正常用中文简洁回答，不必触发分析。
+- 若用户发送 `dsa`、`菜单`、`命令`、`help`、`menu`、`指令`、`功能` 等询问可用功能，用中文简要列出支持的分析入口：大盘/复盘、个股分析、横盘突破选股，并说明触发词。
 - 如果消息同时包含多只股票，把识别到的股票代码或名称用逗号拼接成一个参数传给 stock 命令。

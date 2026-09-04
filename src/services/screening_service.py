@@ -1634,7 +1634,94 @@ class AlphaSiftService:
         except Exception:
             pass  # 缓存写入失败不影响选股结果返回
 
+        # consolidation_breakout：选出的股票默认加入分钟级放量/试盘预警。
+        # 仅在该策略下生效；异常被兜底，不影响选股结果返回。
+        if strategy == "consolidation_breakout":
+            _cb_codes = [
+                c.get("code") or c.get("stock_code")
+                for c in selected
+                if c.get("code") or c.get("stock_code")
+            ]
+            if _cb_codes:
+                try:
+                    screen_result["minute_alert_registration"] = (
+                        _register_consolidation_breakout_minute_alerts(_cb_codes)
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[Screening] consolidation_breakout 分钟预警注册失败(不影响选股): %s",
+                        exc,
+                    )
+
         return screen_result
+
+
+# ---------------------------------------------------------------------------
+# consolidation_breakout 选股结果自动注册分钟级放量/试盘预警
+# ---------------------------------------------------------------------------
+# 横盘突破选出的股票，默认全部加入 ``volume_spike_rt`` 实时量比规则：
+# 盘中放量（主力试盘）即触发提醒。规则按 (source, alert_type, target) 幂等
+# 去重——已存在则启用并更新参数，不存在则新建，避免每天重复堆积。
+_CONSOLIDATION_BREAKOUT_RT_ALERT_SOURCE = "consolidation_breakout"
+_CONSOLIDATION_BREAKOUT_RT_ALERT_PARAMS: Dict[str, Any] = {
+    # 放量即提醒（试盘）：量比 >= 1.2x，或 5 分钟内出现 >= 1.3x 短爆。
+    "window_minutes": 5,
+    "min_ratio": 1.2,
+    "min_slope": 0.0,
+    "min_peak_ratio": 1.3,
+}
+
+
+def _register_consolidation_breakout_minute_alerts(codes: List[str]) -> Dict[str, int]:
+    """为 consolidation_breakout 选出的股票注册/更新分钟级放量预警。
+
+    按 (source, alert_type, target) 幂等去重：已存在则启用并更新参数，
+    不存在则新建，避免每天重复堆积。任何单只异常不中断整体。
+    """
+    from data_provider.base import normalize_stock_code
+    from src.services.alert_service import AlertService
+
+    service = AlertService()
+    stats: Dict[str, int] = {"created": 0, "updated": 0, "skipped": 0, "failed": 0}
+    for raw in codes:
+        norm = normalize_stock_code(str(raw)) if raw else ""
+        if not norm:
+            stats["skipped"] += 1
+            continue
+        params = dict(_CONSOLIDATION_BREAKOUT_RT_ALERT_PARAMS)
+        name = f"横盘突破·分钟放量预警 {norm}"
+        try:
+            existing = service.list_rules(
+                alert_type="volume_spike_rt",
+                target=norm,
+                source=_CONSOLIDATION_BREAKOUT_RT_ALERT_SOURCE,
+            )
+            if existing.get("total"):
+                rule_id = existing["items"][0]["id"]
+                service.update_rule(
+                    rule_id,
+                    {"enabled": True, "parameters": params, "name": name},
+                )
+                stats["updated"] += 1
+            else:
+                fields = service._normalize_rule_payload(
+                    {
+                        "target_scope": "single_symbol",
+                        "target": norm,
+                        "alert_type": "volume_spike_rt",
+                        "parameters": params,
+                        "name": name,
+                        "enabled": True,
+                    },
+                    source=_CONSOLIDATION_BREAKOUT_RT_ALERT_SOURCE,
+                )
+                service.repo.create_rule(fields)
+                stats["created"] += 1
+        except Exception as exc:  # defensive: never break screening flow
+            logger.warning("[Screening] 注册分钟预警失败 %s: %s", norm, exc)
+            stats["failed"] += 1
+    logger.info("[Screening] consolidation_breakout 分钟预警注册: %s", stats)
+    return stats
 
 
 def _normalize_alphasift_hotspot_detail(detail: Any, *, provider: str, requested_topic: str) -> Dict[str, Any]:

@@ -20,7 +20,7 @@ DEST="$HOME/.openclaw"
 AGENT_ID="dsa-notify"
 AGENT_NAME="DSA Notify"
 AGENT_WORKSPACE="$DEST/workspace-dsa-notify"
-AGENT_MODEL_REF="custom-api-newapi-ai/gpt-5.4"  # 模板参考值；仅当现有配置缺失时写入
+AGENT_MODEL_REF="minimax/MiniMax-M2.7"  # OpenClaw providers 里实际存在的 MiniMax 免费模型（tokenplan）；M3 不存在，绑 M3 会导致 fallback 到不存在的 gpt-5.2 而报错。
 SKILL_NAME="daily-stock-analysis"
 DSA_BASE_URL="http://127.0.0.1:8000"
 
@@ -79,6 +79,8 @@ else:
     found.setdefault("name", agent_name)
     found.setdefault("workspace", agent_ws)
     found.setdefault("contextTokens", 128000)
+    # 模型配置必须强制同步真源：错误模型会让短指令(dsa)随机回emoji或触发fallback提示
+    found["model"] = {"primary": model_ref, "fallbacks": []}
     tools = found.setdefault("tools", {})
     tools.setdefault("profile", "coding")
     deny = tools.setdefault("deny", ["web_search", "web_fetch", "browser"])
@@ -87,10 +89,16 @@ else:
             deny.append(denied)
     changed.append("agents.list[dsa-notify](merged)")
 
-# --- agents.defaults.model.primary: 仅当缺失时写入参考值 ---
+# --- agents.defaults.model: 强制同步为真源模型 ---
+# 注意：模型配置应来自 AGENT_MODEL_REF 单一真源；此前错误地把"MiniMax-M3 回 emoji"
+# 当真因并擅自换成 deepseek，实测 emoji 非 LLM 输出（见 2026-08-31 记录）。
+# OpenClaw 里实际存在的 MiniMax 模型是 M2.7，不是 M3；绑不存在的模型会 fallback 到 defaults.models 里的旧模型导致报错。
 defaults = agents.setdefault("defaults", {})
 model = defaults.setdefault("model", {})
-model.setdefault("primary", model_ref)
+model["primary"] = model_ref
+model["fallbacks"] = []
+# 清掉可能残留的旧 defaults.models，避免它覆盖 agent.model 的单一真源选择。
+defaults.pop("models", None)
 
 # --- hooks.mappings: 确保 dsa-notify 映射存在（保留现有 hooks.token）---
 hooks = d.setdefault("hooks", {})

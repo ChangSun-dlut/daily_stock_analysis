@@ -47,6 +47,8 @@ MIN_VOLUME_SPIKE_RT_MIN_RATIO = 0.5
 MAX_VOLUME_SPIKE_RT_MIN_RATIO = 20.0
 MIN_VOLUME_SPIKE_RT_MIN_SLOPE = 0.0
 MAX_VOLUME_SPIKE_RT_MIN_SLOPE = 5.0
+MIN_VOLUME_SPIKE_RT_MIN_PEAK_RATIO = 0.0
+MAX_VOLUME_SPIKE_RT_MIN_PEAK_RATIO = 20.0
 
 ABOVE_BELOW_DIRECTIONS = frozenset({"above", "below"})
 CROSS_DIRECTIONS = frozenset({"bullish_cross", "bearish_cross"})
@@ -149,6 +151,14 @@ def normalize_realtime_indicator_parameters(
                 minimum=MIN_VOLUME_SPIKE_RT_MIN_SLOPE,
                 maximum=MAX_VOLUME_SPIKE_RT_MIN_SLOPE,
             ) if parameters.get("min_slope") is not None else DEFAULT_VOLUME_SPIKE_RT_MIN_SLOPE,
+            # Peak-ratio threshold catches short bursts invisible to slope. Defaults
+            # to 0.0 (disabled) when not provided, mirroring the evaluator default.
+            "min_peak_ratio": _float_in_range(
+                parameters.get("min_peak_ratio"),
+                "min_peak_ratio",
+                minimum=MIN_VOLUME_SPIKE_RT_MIN_PEAK_RATIO,
+                maximum=MAX_VOLUME_SPIKE_RT_MIN_PEAK_RATIO,
+            ) if parameters.get("min_peak_ratio") is not None else 0.0,
         }
     raise ValueError(f"unsupported realtime alert_type: {alert_type}")
 
