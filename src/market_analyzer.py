@@ -1575,24 +1575,52 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         label = str(scores["temperature_label"])
         return score, label
 
+    _STRATEGY_PLAN_HINT_ZH = (
+        "（先用原有带标签格式给出：一行「结论：进攻/均衡/防守」、一行「仓位区间：X-X 成」、"
+        "一行「关注方向：…」、一行「回避方向：…」、一行「触发失效条件：…」；"
+        "然后输出「明日作战地图」Markdown 表格，表头固定为「| 时间/触发 | 观察点 | 应对动作 |」，必含 6 行："
+        "① 竞价（A 股为 09:15—09:25）——隔夜外盘/A50/夜盘关键品种指向、竞价高开或低开的定性与开盘应对；"
+        "② 量能（09:30—10:00 前半小时）——以昨日成交额为基准给出缩量/平量/放量的具体阈值，并分别写明三种情形的应对动作；"
+        "③ 关键点位——上方压力与下方支撑的具体点位，写明突破或跌破后的加减仓动作；"
+        "④ 盘中情绪监控——2~3 个可量化信号（如涨停/跌停家数、炸板率、连板高度、昨日涨停溢价）及对应的仓位调整；"
+        "⑤ 重要事件——明日盘前/盘中/盘后已知事件（数据发布、会议、解禁、海外数据等）及应对；"
+        "⑥ 仓位纪律——结合市场情绪给出总仓位上下限与「不追高、不打板、不接飞刀」式的纪律约束。"
+        "表格每格尽量一句话、动作必须可执行；表格后另起一行，以「核心矛盾一句话：」开头，"
+        "用一句话点明当前多空主要矛盾。保留“建议仅供参考，不构成投资建议”。）"
+    )
+    _STRATEGY_PLAN_HINT_EN = (
+        '(First keep the existing labeled format: one line "Conclusion: offensive/balanced/defensive", '
+        'one line "Position sizing: X%-Y%", one line "Focus sectors: …", one line "Sectors to avoid: …", '
+        'one line "Invalidation trigger: …". '
+        'Then output a "Battle Map" Markdown table with fixed columns "| Time/Trigger | Watch point | Action |", '
+        "including rows for: 1) pre-open auction cues (overnight futures/ADR direction and opening response); "
+        "2) first-30-minute volume — give concrete contraction/flat/expansion thresholds vs the prior session "
+        "and the action for each scenario; 3) key support/resistance levels with add/trim actions on break; "
+        "4) 2-3 quantifiable intraday sentiment triggers (breadth, limit-up statistics) with position adjustments; "
+        "5) known scheduled events (data releases, meetings, lockup expiries) and responses; "
+        "6) position discipline with a total-exposure cap and don't-chase rules. "
+        'Keep each cell to one actionable sentence; after the table start a line with "Core tension in one sentence:" '
+        'summarizing the key bull/bear conflict. End with "For reference only, not investment advice.")'
+    )
+
     def _build_output_template_sections(self, review_language: str) -> str:
         """Build LLM output sections according to market data capabilities."""
         if review_language == "en":
             if self.profile.has_market_stats and self.profile.has_sector_rankings:
-                return """### 3. Fund Flows
-(Interpret what turnover, participation, and flow signals imply.)
+                return f"""### 3. Fund Flows
+            (Interpret what turnover, participation, and flow signals imply.)
 
-### 4. Sector Highlights
-(Distinguish industry-sector moves from concept/theme moves, then analyze drivers and persistence.)
+            ### 4. Sector Highlights
+            (Distinguish industry-sector moves from concept/theme moves, then analyze drivers and persistence.)
 
-### 5. Outlook
-(Provide the near-term outlook based on price action and news.)
+            ### 5. Outlook
+            (Provide the near-term outlook based on price action and news.)
 
-### 6. Risk Alerts
-(List the main risks to monitor.)
+            ### 6. Risk Alerts
+            (List the main risks to monitor.)
 
-### 7. Strategy Plan
-(Provide an offensive/balanced/defensive stance, a position-sizing guideline, one invalidation trigger, and end with "For reference only, not investment advice.")"""
+            ### 7. Strategy Plan
+            {self._STRATEGY_PLAN_HINT_EN}"""
 
             section_number = 3
             sections: List[str] = []
@@ -1612,12 +1640,12 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 f"""### {section_number + 2}. Risk Alerts
 (List the main risks to monitor.)""",
                 f"""### {section_number + 3}. Strategy Plan
-(Provide an offensive/balanced/defensive stance, a position-sizing guideline, one invalidation trigger, and end with "For reference only, not investment advice.")""",
+{self._STRATEGY_PLAN_HINT_EN}""",
             ])
             return "\n\n".join(sections)
 
         if self.profile.has_market_stats and self.profile.has_sector_rankings:
-            return """### 三、板块主线
+            return f"""### 三、板块主线
 （区分行业板块与概念题材，分析领涨/领跌背后的逻辑、持续性和是否形成主线）
 
 ### 四、资金与情绪
@@ -1627,7 +1655,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 （结合近三日新闻，提炼真正影响明日交易的催化或扰动）
 
 ### 六、明日交易计划
-（给出进攻/均衡/防守结论、仓位区间、关注方向、回避方向和一个触发失效条件）
+{self._STRATEGY_PLAN_HINT_ZH}
 
 ### 七、风险提示
 （列出需要关注的风险点；最后补充“建议仅供参考，不构成投资建议”。）"""
@@ -1649,7 +1677,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             "消息催化",
             "（结合近三日新闻和指数表现，提炼真正影响明日交易的催化或扰动；不要推断未提供的资金流、市场宽度或板块榜）",
         )
-        add_section("明日交易计划", "（给出进攻/均衡/防守结论、仓位区间、关注方向、回避方向和一个触发失效条件）")
+        add_section("明日交易计划", self._STRATEGY_PLAN_HINT_ZH)
         add_section("风险提示", "（列出需要关注的风险点；最后补充“建议仅供参考，不构成投资建议”。）")
         return "\n\n".join(sections)
 

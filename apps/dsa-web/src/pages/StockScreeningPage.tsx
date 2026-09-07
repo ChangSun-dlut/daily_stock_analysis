@@ -27,6 +27,7 @@ import {
   Stethoscope,
   Trees,
   Utensils,
+  Waves,
   Wrench,
   BarChart3,
   TrendingUp,
@@ -43,6 +44,7 @@ import {
   type AlphaSiftHotspotsResponse,
   type AlphaSiftScreenResponse,
   type AlphaSiftScreenTaskStatus,
+  type AlphaSiftSectorFlowAnalysisResponse,
   type AlphaSiftSectorMoneyflowItem,
   type AlphaSiftSectorMoneyflowResponse,
   type AlphaSiftSectorRotationResponse,
@@ -764,6 +766,10 @@ const StockScreeningPage: React.FC = () => {
   const [sectorRotation, setSectorRotation] = useState<AlphaSiftSectorRotationResponse | null>(null);
   const [loadingSectorRotation, setLoadingSectorRotation] = useState(false);
   const [sectorRotationError, setSectorRotationError] = useState('');
+  // 板块流动分析（LLM 叙事：全天总结 + 主线小节 + 后市关注）
+  const [sectorFlowAnalysis, setSectorFlowAnalysis] = useState<AlphaSiftSectorFlowAnalysisResponse | null>(null);
+  const [loadingSectorFlowAnalysis, setLoadingSectorFlowAnalysis] = useState(false);
+  const [sectorFlowAnalysisError, setSectorFlowAnalysisError] = useState('');
   const [loadingHotspots, setLoadingHotspots] = useState(false);
   const [hotspotError, setHotspotError] = useState('');
   const [screenMeta, setScreenMeta] = useState<AlphaSiftScreenResponse | null>(null);
@@ -1047,6 +1053,21 @@ const StockScreeningPage: React.FC = () => {
     }
   }, []);
 
+  const loadSectorFlowAnalysis = useCallback(async (forceRefresh = false) => {
+    setLoadingSectorFlowAnalysis(true);
+    setSectorFlowAnalysisError('');
+    try {
+      const result = await alphasiftApi.getSectorFlowAnalysis({ refresh: forceRefresh });
+      setSectorFlowAnalysis(result);
+      setSectorFlowAnalysisError('');
+    } catch (err) {
+      setSectorFlowAnalysis(null);
+      setSectorFlowAnalysisError(toApiErrorMessage(err, '板块流动分析加载失败，请稍后重试。'));
+    } finally {
+      setLoadingSectorFlowAnalysis(false);
+    }
+  }, []);
+
   const toggleHotspotsExpanded = useCallback(() => {
     setHotspotsExpanded((expanded) => {
       const nextExpanded = !expanded;
@@ -1104,6 +1125,7 @@ const StockScreeningPage: React.FC = () => {
           // 让用户立刻看到今日（Tushare 18:00 后才有）盘后快照。
           void loadSectorMoneyflow(isStaleAfterClose(sectorMoneyflowRef.current));
           void loadSectorRotation();
+          void loadSectorFlowAnalysis();
         }
       })
       .catch(() => {
@@ -1115,7 +1137,7 @@ const StockScreeningPage: React.FC = () => {
     return () => {
       active = false;
     };
-  }, [loadHotspots, loadSectorMoneyflow, loadSectorRotation, loadStrategies]);
+  }, [loadHotspots, loadSectorFlowAnalysis, loadSectorMoneyflow, loadSectorRotation, loadStrategies]);
 
   // 板块资金流向自动刷新：
   // - 盘中（9:00~15:00）：每 10 分钟一次
@@ -1154,6 +1176,61 @@ const StockScreeningPage: React.FC = () => {
     }, intervalMs);
     return () => window.clearInterval(timer);
   }, [isScreeningEnabled, loadSectorMoneyflow, sectorMarketState]);
+
+  // 板块流动分析（LLM 复盘）自动刷新：
+  // 交易日 9:00-15:00（Asia/Shanghai）每 30 分钟整点/半点触发；11:30-13:00 午休跳过；
+  // 非交易日（后端 sectorMarketState.isTradingDay === false）整段不刷。
+  // 进入页面时已通过 status 回调首次加载 loadSectorFlowAnalysis()，本 effect 只管
+  // 之后的 30 分钟周期调度。手动"强制刷新"按钮独立于本 effect。
+  useEffect(() => {
+    if (!isScreeningEnabled) return;
+
+    const getShanghaiMinutes = (): number => {
+      const now = new Date();
+      const shanghaiTime = now.toLocaleString('sv-SE', {
+        timeZone: 'Asia/Shanghai',
+        hour12: false,
+      });
+      const [, timePart] = shanghaiTime.split(' ');
+      const [h, m] = (timePart || '00:00').split(':').map(Number);
+      return h * 60 + m;
+    };
+
+    const isInRefreshWindow = (): boolean => {
+      if (sectorMarketState && sectorMarketState.isTradingDay === false) return false;
+      const minutes = getShanghaiMinutes();
+      if (minutes < 9 * 60 || minutes >= 15 * 60) return false; // 9:00-15:00
+      if (minutes >= 11 * 60 + 30 && minutes < 13 * 60) return false; // 午休跳过
+      return true;
+    };
+
+    // 对齐到下一个 :00 或 :30，再每 30 分钟一次
+    const now = new Date();
+    const shanghaiTime = now.toLocaleString('sv-SE', {
+      timeZone: 'Asia/Shanghai',
+      hour12: false,
+    });
+    const [, timePart] = shanghaiTime.split(' ');
+    const [h, m] = (timePart || '00:00').split(':').map(Number);
+    const currentMinutes = h * 60 + m;
+    const targetMinutes = m < 30 ? h * 60 + 30 : (h + 1) * 60;
+    const initialDelayMs = Math.max((targetMinutes - currentMinutes) * 60 * 1000, 1000);
+
+    const doRefresh = () => {
+      if (isInRefreshWindow()) void loadSectorFlowAnalysis();
+    };
+
+    let intervalId: number | null = null;
+    const timeoutId = window.setTimeout(() => {
+      doRefresh();
+      intervalId = window.setInterval(doRefresh, 30 * 60 * 1000);
+    }, initialDelayMs);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+      if (intervalId !== null) window.clearInterval(intervalId);
+    };
+  }, [isScreeningEnabled, loadSectorFlowAnalysis, sectorMarketState]);
 
   // 服务端缓存同步：每切一次策略从服务端拉取最新存盘缓存并覆盖 localStorage，
   // 确保零停机部署后前端能拿到新增字段（如主力资金数据），不被本地旧缓存永久遮蔽。
@@ -2027,6 +2104,137 @@ const StockScreeningPage: React.FC = () => {
               {sectorMoneyflow.summaryText ? (
                 <div className="md:col-span-2 rounded-xl bg-surface/70 p-3 text-xs text-secondary-text">
                   {sectorMoneyflow.summaryText}
+                </div>
+              ) : null}
+            </div>
+          )}
+        </section>
+      )}
+
+      {isScreeningEnabled && (
+        <section className="rounded-2xl border border-cyan/35 bg-card/95 p-4 shadow-soft-card">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Waves className="h-4 w-4 text-cyan" />
+              <div>
+                <h2 className="text-sm font-semibold text-foreground">板块流动分析</h2>
+                <p className="mt-1 text-xs text-secondary-text">
+                  {sectorFlowAnalysis?.date ? `${sectorFlowAnalysis.date} ` : ''}
+                  基于板块资金流向、轮动与涨停时间线的 AI 复盘：全天流动总结 + 板块带头标的涨停时点 + 分阶段时间线 + 后市关注。
+                </p>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {sectorFlowAnalysis?.source ? (
+                <span
+                  className="rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1 text-xs font-semibold text-cyan"
+                  title={sectorFlowAnalysis.source === 'llm' ? 'LLM 生成的板块流动复盘' : 'LLM 暂不可用，展示规则汇总'}
+                >
+                  {sectorFlowAnalysis.source === 'llm' ? 'AI 复盘' : '规则汇总'}
+                </span>
+              ) : null}
+              <button
+                type="button"
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-cyan/40 bg-cyan/10 px-3 text-xs font-semibold text-cyan transition-colors hover:border-cyan hover:bg-cyan/15 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => void loadSectorFlowAnalysis(true)}
+                disabled={loadingSectorFlowAnalysis}
+                title="绕过缓存重新生成板块流动分析"
+              >
+                <RefreshCw className={cn('h-3.5 w-3.5', loadingSectorFlowAnalysis && 'animate-spin')} />
+                强制刷新
+              </button>
+            </div>
+          </div>
+
+          {loadingSectorFlowAnalysis ? (
+            <div className="rounded-xl border border-dashed border-border bg-surface/70 p-4 text-sm text-secondary-text">
+              正在生成板块流动分析…
+            </div>
+          ) : sectorFlowAnalysisError ? (
+            <div className="rounded-xl border border-dashed border-border bg-surface/70 p-4 text-sm text-secondary-text">
+              {sectorFlowAnalysisError}
+            </div>
+          ) : !sectorFlowAnalysis?.available ? (
+            <div className="rounded-xl border border-dashed border-border bg-surface/70 p-4 text-sm text-secondary-text">
+              暂无板块流动分析数据。
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="rounded-xl border border-cyan/20 bg-cyan/5 p-3">
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-cyan">全天流动总结</span>
+                  {typeof sectorFlowAnalysis.limitUpCount === 'number' && sectorFlowAnalysis.limitUpCount > 0 ? (
+                    <span className="text-[10px] text-secondary-text">
+                      全天涨停 {sectorFlowAnalysis.limitUpCount} 只（按首次封板时间记录）
+                    </span>
+                  ) : null}
+                </div>
+                <p className="text-sm leading-relaxed text-foreground">{sectorFlowAnalysis.summary}</p>
+              </div>
+              {(sectorFlowAnalysis.leaders || []).length > 0 ? (
+                <div className="rounded-xl border border-border bg-surface/60 p-3">
+                  <div className="mb-2 text-xs font-semibold text-foreground">板块带头标的 · 涨停时点记录</div>
+                  <div className="space-y-1.5">
+                    {sectorFlowAnalysis.leaders.map((leader, idx) => (
+                      <div key={`${leader.industry}-${leader.name}-${idx}`} className="flex items-center gap-2 text-xs">
+                        <span className="w-10 shrink-0 font-semibold text-amber-500 tabular-nums">{leader.time}</span>
+                        <span className="shrink-0 rounded border border-cyan/30 bg-cyan/10 px-1.5 py-0.5 text-[10px] font-semibold text-cyan">
+                          {leader.industry}
+                        </span>
+                        <span className="shrink-0 font-semibold text-foreground">{leader.name}</span>
+                        <span className="text-red-500">涨停</span>
+                        {leader.boards > 1 ? (
+                          <span className="shrink-0 rounded border border-red-500/40 bg-red-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-red-500">
+                            {leader.boards}连板
+                          </span>
+                        ) : null}
+                        {(leader.breakCount ?? 0) > 0 ? (
+                          <span className="shrink-0 text-[10px] text-secondary-text">炸板{leader.breakCount}次</span>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              {(sectorFlowAnalysis.phases || []).map((phase) => (
+                <div key={phase.key} className="rounded-xl border border-border bg-surface/60 p-3">
+                  <div className="mb-1.5 flex items-center gap-2">
+                    <span className="rounded border border-cyan/30 bg-cyan/10 px-1.5 py-0.5 text-[10px] font-semibold text-cyan">
+                      {phase.title}
+                    </span>
+                    <span className="text-xs font-semibold text-foreground">{phase.timeRange}</span>
+                  </div>
+                  <p className="mb-2 rounded-lg border border-cyan/15 bg-cyan/5 p-2 text-xs leading-relaxed text-foreground">
+                    {phase.text}
+                  </p>
+                  {(phase.events || []).length > 0 ? (
+                    <div className="divide-y divide-border/60">
+                      {phase.events.map((event, idx) => (
+                        <div key={`${phase.key}-${event.time}-${idx}`} className="flex gap-2 py-1.5 text-xs">
+                          <span className="w-10 shrink-0 font-semibold text-amber-500 tabular-nums">{event.time}</span>
+                          <span className="leading-relaxed text-secondary-text">{event.text}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+              {(sectorFlowAnalysis.watchPoints || []).length > 0 ? (
+                <div className="rounded-xl bg-surface/70 p-3">
+                  <div className="mb-1.5 text-xs font-semibold text-foreground">后市关注</div>
+                  <ul className="space-y-1">
+                    {sectorFlowAnalysis.watchPoints.map((point, idx) => (
+                      <li key={idx} className="flex gap-1.5 text-xs text-secondary-text">
+                        <span className="shrink-0 text-cyan">◆</span>
+                        <span>{point}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {sectorFlowAnalysis.generatedAt ? (
+                <div className="text-right text-[10px] text-secondary-text">
+                  生成于 {sectorFlowAnalysis.generatedAt}
                 </div>
               ) : null}
             </div>

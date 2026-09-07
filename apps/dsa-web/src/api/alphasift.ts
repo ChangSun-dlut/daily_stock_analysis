@@ -277,6 +277,42 @@ export type AlphaSiftSectorRotationResponse = {
   signalCounts: Record<string, number>;
 };
 
+export type AlphaSiftSectorFlowPhaseEvent = {
+  time: string;
+  text: string;
+};
+
+export type AlphaSiftSectorFlowPhase = {
+  key: string;
+  title: string;
+  timeRange: string;
+  text: string;
+  events: AlphaSiftSectorFlowPhaseEvent[];
+};
+
+export type AlphaSiftSectorFlowLeader = {
+  industry: string;
+  name: string;
+  time: string;
+  boards: number;
+  changePct?: number | null;
+  breakCount?: number;
+};
+
+export type AlphaSiftSectorFlowAnalysisResponse = {
+  available: boolean;
+  date?: string;
+  generatedAt?: string;
+  source?: string;
+  summary: string;
+  phases: AlphaSiftSectorFlowPhase[];
+  leaders: AlphaSiftSectorFlowLeader[];
+  limitUpCount?: number;
+  watchPoints: string[];
+  inflowNames?: string[];
+  outflowNames?: string[];
+};
+
 export type AlphaSiftScreenResponse = {
   enabled: boolean;
   candidates: AlphaSiftCandidate[];
@@ -584,6 +620,14 @@ export const alphasiftApi = {
       timeout: ALPHASIFT_INSTALL_TIMEOUT_MS,
     });
     return toCamelCase<AlphaSiftSectorRotationResponse>(response.data);
+  },
+
+  async getSectorFlowAnalysis(payload: { refresh?: boolean } = {}): Promise<AlphaSiftSectorFlowAnalysisResponse> {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/screening/sector-flow-analysis', {
+      params: { refresh: payload.refresh ?? false },
+      timeout: ALPHASIFT_INSTALL_TIMEOUT_MS,
+    });
+    return toCamelCase<AlphaSiftSectorFlowAnalysisResponse>(response.data);
   },
 
   async install(): Promise<AlphaSiftInstallResponse> {

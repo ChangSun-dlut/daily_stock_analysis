@@ -27,7 +27,7 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field
 
 from src.auth import COOKIE_NAME, is_auth_enabled, refresh_auth_state, verify_session
-from src.config import Config, DEFAULT_ALPHASIFT_INSTALL_SPEC, get_configured_llm_models, normalize_llm_channel_api_surface
+from src.config import Config, DEFAULT_ALPHASIFT_INSTALL_SPEC, get_config, get_configured_llm_models, normalize_llm_channel_api_surface
 from src.services.screening import REFERENCE_PROJECT, REFERENCE_REVISION, __version__ as SCREENING_VERSION
 from src.services.screening import hotspot as screening_hotspot
 from src.services.screening.config import Config as ScreeningPipelineConfig
@@ -5566,6 +5566,548 @@ def get_sector_rotation(days: int = DSA_ALPHASIFT_SECTOR_ROTATION_DAYS, force_re
     }
     if items:
         _write_sector_rotation_cache(payload)
+    return payload
+
+
+# ---------- 板块流动分析（LLM 叙事：流入/流出主线 + 轮动解读 + 后市关注） ----------
+
+DSA_ALPHASIFT_SECTOR_FLOW_ANALYSIS_CACHE_PATH = DSA_ALPHASIFT_DATA_DIR / "sector_flow_analysis.json"
+DSA_ALPHASIFT_SECTOR_FLOW_ANALYSIS_CACHE_TTL_SECONDS = 30 * 60
+
+# 全天分阶段时间线：与大盘复盘「阶段分时复盘」保持一致的 4 段划分
+_SECTOR_FLOW_PHASE_DEFS = [
+    {"key": "auction", "title": "竞价高开", "time_range": "09:15 ~ 09:30", "start": 0, "end": 93000},
+    {"key": "morning", "title": "上午博弈", "time_range": "09:30 ~ 11:30", "start": 93001, "end": 113100},
+    {"key": "afternoon", "title": "午后风云", "time_range": "13:00 ~ 14:30", "start": 130000, "end": 143000},
+    {"key": "late", "title": "尾盘定调", "time_range": "14:30 ~ 15:00", "start": 143001, "end": 235959},
+]
+
+DSA_ALPHASIFT_SECTOR_FLOW_TIMELINE_MAX_ROWS = 100
+DSA_ALPHASIFT_SECTOR_FLOW_PHASE_MAX_EVENTS = 8
+DSA_ALPHASIFT_SECTOR_FLOW_LEADERS_MAX = 10
+
+
+def _parse_limit_time_hhmmss(value: Any) -> int:
+    """把 AkShare 零填充的 HHMMSS 封板时间解析成可比较的整数，失败返回 0。"""
+    digits = re.sub(r"\D", "", str(value or ""))
+    if not digits:
+        return 0
+    digits = digits.zfill(6)[:6]
+    try:
+        return int(digits)
+    except ValueError:
+        return 0
+
+
+def _format_limit_time_hhmm(value: Any) -> str:
+    """把 HHMMSS 封板时间格式化成 HH:MM，失败返回空串。"""
+    parsed = _parse_limit_time_hhmmss(value)
+    if parsed <= 0:
+        return ""
+    return f"{parsed // 10000:02d}:{parsed // 100 % 100:02d}"
+
+
+def _limit_up_phase_key(time_value: Any) -> str:
+    parsed = _parse_limit_time_hhmmss(time_value)
+    for phase in _SECTOR_FLOW_PHASE_DEFS:
+        if phase["start"] <= parsed <= phase["end"]:
+            return str(phase["key"])
+    return "morning"
+
+
+def _build_sector_flow_timeline(moneyflow: Dict[str, Any]) -> Dict[str, Any]:
+    """全天分阶段时间线：基于涨停池记录各板块带头标的涨停时点。
+
+    数据源：东财涨停池 ``stock_zt_pool_em``（含首次封板时间、连板数、所属行业），
+    按全天 4 个阶段（竞价/上午/午后/尾盘）归类，并聚合出每个板块的
+    「带头标的」（连板数最高、平局取首封最早者）供前端做时点记录展示。
+    """
+    manager = _get_dsa_fetcher_manager()
+    date_text = re.sub(r"\D", "", str(moneyflow.get("date") or ""))[:8] or _sector_moneyflow_today_str()
+    rows: List[Dict[str, Any]] = []
+    try:
+        rows = manager.get_limit_up_pool(date=date_text, n=DSA_ALPHASIFT_SECTOR_FLOW_TIMELINE_MAX_ROWS) or []
+    except Exception as e:
+        logger.warning(f"[板块流动分析] 涨停池获取失败: {e}")
+
+    events_by_phase: Dict[str, List[Dict[str, Any]]] = {p["key"]: [] for p in _SECTOR_FLOW_PHASE_DEFS}
+    leaders_by_industry: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        raw_time = str(row.get("first_limit_time") or "").strip()
+        seal_time = _format_limit_time_hhmm(raw_time)
+        if not seal_time:
+            continue
+        industry = str(row.get("industry") or "").strip()
+        boards = int(row.get("consecutive_boards") or 0)
+        event = {
+            "time": seal_time,
+            "name": name,
+            "industry": industry or "其他",
+            "boards": boards,
+            "change_pct": row.get("change_pct"),
+            "break_count": int(row.get("break_count") or 0),
+        }
+        events_by_phase[_limit_up_phase_key(raw_time)].append(event)
+
+        industry_key = event["industry"]
+        current = leaders_by_industry.get(industry_key)
+        if current is None or (boards, -_parse_limit_time_hhmmss(raw_time)) > (
+            current["boards"],
+            -_parse_limit_time_hhmmss(current.get("_raw_time") or ""),
+        ):
+            leaders_by_industry[industry_key] = {**event, "_raw_time": raw_time}
+
+    phases: List[Dict[str, Any]] = []
+    for phase in _SECTOR_FLOW_PHASE_DEFS:
+        events = sorted(events_by_phase[phase["key"]], key=lambda e: _parse_limit_time_hhmmss(e["time"]))
+        phases.append(
+            {
+                "key": phase["key"],
+                "title": phase["title"],
+                "time_range": phase["time_range"],
+                "events": events[: DSA_ALPHASIFT_SECTOR_FLOW_PHASE_MAX_EVENTS * 2],
+            }
+        )
+
+    leaders = sorted(
+        leaders_by_industry.values(),
+        key=lambda e: (e["boards"], -_parse_limit_time_hhmmss(e.get("_raw_time") or "")),
+        reverse=True,
+    )[:DSA_ALPHASIFT_SECTOR_FLOW_LEADERS_MAX]
+    for leader in leaders:
+        leader.pop("_raw_time", None)
+    for phase in phases:
+        for event in phase["events"]:
+            event.pop("_raw_time", None)
+
+    return {
+        "date": date_text,
+        "limit_up_count": sum(len(p["events"]) for p in phases),
+        "phases": phases,
+        "leaders": leaders,
+    }
+
+
+def _read_sector_flow_analysis_cache() -> Optional[Dict[str, Any]]:
+    path = DSA_ALPHASIFT_SECTOR_FLOW_ANALYSIS_CACHE_PATH
+    if not path.exists():
+        return None
+    try:
+        age = time.time() - path.stat().st_mtime
+        if age > DSA_ALPHASIFT_SECTOR_FLOW_ANALYSIS_CACHE_TTL_SECONDS:
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if isinstance(payload, dict) and payload.get("available"):
+            return payload
+    except Exception as e:
+        logger.warning(f"[板块流动分析] 缓存读取失败: {e}")
+    return None
+
+
+def _write_sector_flow_analysis_cache(payload: Dict[str, Any]) -> None:
+    try:
+        DSA_ALPHASIFT_SECTOR_FLOW_ANALYSIS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(DSA_ALPHASIFT_SECTOR_FLOW_ANALYSIS_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, default=str)
+    except Exception as e:
+        logger.warning(f"[板块流动分析] 缓存写入失败: {e}")
+
+
+def _extract_llm_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """从 LLM 输出中稳健提取第一个完整 JSON 对象（容忍 ```json 围栏与前后杂文字）。"""
+    if not text:
+        return None
+    cleaned = re.sub(r"```(?:json)?", "", text).strip()
+    start = cleaned.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    escape = False
+    for idx in range(start, len(cleaned)):
+        ch = cleaned[idx]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    parsed = json.loads(cleaned[start : idx + 1])
+                except (ValueError, TypeError):
+                    return None
+                return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _sector_flow_money_item_text(item: Dict[str, Any]) -> str:
+    name = str(item.get("name") or "")
+    if not name:
+        return ""
+    net = str(item.get("net_text") or "").strip()
+    lead = str(item.get("top_stock_name") or item.get("lead_stock") or "").strip()
+    detail = "，".join(x for x in (net, f"代表股 {lead}" if lead else "") if x)
+    return f"{name}（{detail}）" if detail else name
+
+
+def _build_sector_flow_analysis_digest(
+    moneyflow: Dict[str, Any],
+    rotation: Dict[str, Any],
+    timeline: Optional[Dict[str, Any]] = None,
+) -> str:
+    """把板块资金流 + 板块轮动 + 涨停时间线数据压缩成紧凑文本，作为 LLM 复盘输入。"""
+
+    def money_line(label: str, items: List[Any]) -> str:
+        texts = [t for t in (_sector_flow_money_item_text(i) if isinstance(i, dict) else "" for i in items[:10]) if t]
+        return f"{label}：" + "；".join(texts) if texts else f"{label}：无"
+
+    lines = [f"日期：{moneyflow.get('date') or '今日'}"]
+    total_in = moneyflow.get("total_inflow")
+    total_out = moneyflow.get("total_outflow")
+    if total_in is not None and total_out is not None:
+        try:
+            lines.append(
+                f"全场主力净流入合计约 {float(total_in) / 1e8:.1f} 亿，净流出合计约 {abs(float(total_out)) / 1e8:.1f} 亿"
+            )
+        except (TypeError, ValueError):
+            pass
+    lines.append(money_line("主力净流入前列", moneyflow.get("top_inflow") or []))
+    lines.append(money_line("主力净流出前列", moneyflow.get("top_outflow") or []))
+    top_buy = [i for i in (rotation.get("top_buy") or [])[:5] if isinstance(i, dict)]
+    top_avoid = [i for i in (rotation.get("top_avoid") or [])[:5] if isinstance(i, dict)]
+    if top_buy:
+        lines.append(
+            "轮动买入信号板块：" + "；".join(
+                f"{i.get('name')}（5日累计{str(i.get('cum_change_5d') or i.get('cumChange5d') or 0)}%，阶段{i.get('phase')}）"
+                for i in top_buy
+            )
+        )
+    if top_avoid:
+        lines.append(
+            "轮动回避信号板块：" + "；".join(
+                f"{i.get('name')}（阶段{i.get('phase')}）" for i in top_avoid
+            )
+        )
+
+    timeline = timeline or {}
+    leaders = [i for i in (timeline.get("leaders") or []) if isinstance(i, dict)]
+    if leaders:
+        lines.append(
+            "板块带头标的（按连板高度排序，格式 板块｜标的｜首次涨停时间｜连板数）："
+            + "；".join(
+                f"{i.get('industry')}｜{i.get('name')}｜{i.get('time')}｜{i.get('boards')}连板"
+                for i in leaders[:8]
+            )
+        )
+    for phase in timeline.get("phases") or []:
+        events = [e for e in (phase.get("events") or []) if isinstance(e, dict)]
+        if not events:
+            continue
+        phase_label = f"{phase.get('title')}（{phase.get('time_range')}）"
+        lines.append(
+            f"涨停时间线-{phase_label}："
+            + "；".join(
+                f"{e.get('time')} {e.get('industry')} {e.get('name')}"
+                + (f" {e.get('boards')}连板" if e.get("boards") else "")
+                for e in events
+            )
+        )
+    if not leaders and not any(p.get("events") for p in (timeline.get("phases") or [])):
+        lines.append("今日暂无涨停时间线数据（非交易日或涨停池为空）。")
+    return "\n".join(lines)
+
+
+def _build_sector_flow_analysis_fallback(
+    moneyflow: Dict[str, Any],
+    rotation: Dict[str, Any],
+    timeline: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """LLM 不可用时，用规则拼接一份可读的板块流动分析（含分阶段时间线），保证功能始终有内容。"""
+    top_in = [i for i in (moneyflow.get("top_inflow") or [])[:3] if isinstance(i, dict)]
+    top_out = [i for i in (moneyflow.get("top_outflow") or [])[:3] if isinstance(i, dict)]
+    timeline = timeline or {}
+
+    def names(items: List[Dict[str, Any]]) -> str:
+        return "、".join(str(i.get("name") or "") for i in items if i.get("name"))
+
+    summary = moneyflow.get("summary_text") or ""
+    if not summary:
+        summary = f"主力资金集中流入 {names(top_in) or '—'}，净流出集中在 {names(top_out) or '—'}。"
+
+    phases: List[Dict[str, Any]] = []
+    for phase_def in _SECTOR_FLOW_PHASE_DEFS:
+        key = str(phase_def["key"])
+        events = [
+            e for e in next((p.get("events") or [] for p in timeline.get("phases") or [] if p.get("key") == key), [])
+            if isinstance(e, dict)
+        ]
+        events = events[: DSA_ALPHASIFT_SECTOR_FLOW_PHASE_MAX_EVENTS]
+        if events:
+            seg = "；".join(
+                f"{e.get('time')} {e.get('industry')}-{e.get('name')}"
+                + (f"（{e.get('boards')}连板）" if e.get("boards") else "")
+                for e in events[:4]
+            )
+            text = f"该时段共记录 {len(events)} 只涨停：{seg}。"
+        else:
+            text = "该时段无明显涨停异动记录。"
+        phases.append(
+            {
+                "key": key,
+                "title": phase_def["title"],
+                "time_range": phase_def["time_range"],
+                "text": text,
+                "events": [
+                    {
+                        "time": e.get("time"),
+                        "text": f"{e.get('industry')} {e.get('name')} 涨停"
+                        + (f"，{e.get('boards')}连板" if e.get("boards") else ""),
+                    }
+                    for e in events
+                ],
+            }
+        )
+
+    top_buy = [i for i in (rotation.get("top_buy") or [])[:3] if isinstance(i, dict)]
+    top_avoid = [i for i in (rotation.get("top_avoid") or [])[:3] if isinstance(i, dict)]
+    if top_buy or top_avoid:
+        rotation_text = ""
+        if top_buy:
+            rotation_text += "轮动买入信号：" + "、".join(str(i.get("name") or "") for i in top_buy if i.get("name"))
+        if top_avoid:
+            if rotation_text:
+                rotation_text += "；"
+            rotation_text += "轮动回避信号：" + "、".join(str(i.get("name") or "") for i in top_avoid if i.get("name"))
+        summary = f"{summary} {rotation_text}。"
+
+    watch_points = [
+        f"关注{name}板块资金流入的持续性与板块内扩散效应"
+        for name in [str(i.get("name") or "") for i in top_in[:2]] if name
+    ]
+    leaders = [i for i in (timeline.get("leaders") or [])[:2] if isinstance(i, dict)]
+    for leader in leaders:
+        watch_points.append(
+            f"关注带头标的 {leader.get('name')}（{leader.get('industry')}，{leader.get('time')} 首封"
+            + (f"，{leader.get('boards')}连板" if leader.get("boards") else "")
+            + "）能否继续带动板块走强"
+        )
+    watch_points.append("留意净流出板块是否出现企稳回流信号，作为高低切换的观察窗口")
+    return {"summary": summary, "phases": phases, "watch_points": watch_points[:4]}
+
+
+def _normalize_sector_flow_phases(
+    parsed_phases: Any, timeline: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """把 LLM 输出的 phases 规范化到固定 4 阶段；缺失/不合格的部分用涨停时间线数据兜底。"""
+    parsed_by_key: Dict[str, Dict[str, Any]] = {}
+    for item in parsed_phases or []:
+        if isinstance(item, dict) and _env_text(item.get("key")):
+            parsed_by_key[str(item.get("key"))] = item
+
+    timeline_by_key: Dict[str, List[Dict[str, Any]]] = {}
+    for phase in timeline.get("phases") or []:
+        if isinstance(phase, dict):
+            timeline_by_key[str(phase.get("key"))] = [
+                e for e in (phase.get("events") or []) if isinstance(e, dict)
+            ]
+
+    phases: List[Dict[str, Any]] = []
+    for phase_def in _SECTOR_FLOW_PHASE_DEFS:
+        key = str(phase_def["key"])
+        parsed = parsed_by_key.get(key)
+        text = _env_text(parsed.get("text")) if parsed else ""
+        events: List[Dict[str, Any]] = []
+        seen_times: set = set()
+        for raw_event in (parsed or {}).get("events") or []:
+            if not isinstance(raw_event, dict):
+                continue
+            time_text = _env_text(raw_event.get("time"))
+            event_text = _env_text(raw_event.get("text"))
+            if not time_text or not event_text or time_text in seen_times:
+                continue
+            seen_times.add(time_text)
+            events.append({"time": time_text, "text": event_text})
+        if not text:
+            raw_events = timeline_by_key.get(key) or []
+            if raw_events:
+                seg = "；".join(
+                    f"{e.get('time')} {e.get('industry')}-{e.get('name')}"
+                    for e in raw_events[:3]
+                )
+                text = f"该时段共记录 {len(raw_events)} 只涨停：{seg}。"
+            else:
+                text = "该时段无明显涨停异动记录。"
+        if not events:
+            for e in timeline_by_key.get(key) or []:
+                time_text = _env_text(e.get("time"))
+                if not time_text:
+                    continue
+                events.append(
+                    {
+                        "time": time_text,
+                        "text": f"{e.get('industry')} {e.get('name')} 涨停"
+                        + (f"，{e.get('boards')}连板" if e.get("boards") else ""),
+                    }
+                )
+        phases.append(
+            {
+                "key": key,
+                "title": _env_text((parsed or {}).get("title")) or str(phase_def["title"]),
+                "time_range": _env_text((parsed or {}).get("time_range")) or str(phase_def["time_range"]),
+                "text": text,
+                "events": events[:DSA_ALPHASIFT_SECTOR_FLOW_PHASE_MAX_EVENTS],
+            }
+        )
+    return phases
+
+
+def _generate_sector_flow_analysis_with_llm(
+    digest: str, timeline: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
+    """调用 LLM 生成板块流动分析叙事（JSON，含分阶段时间线），失败返回 None 由规则兜底。"""
+    timeline = timeline or {}
+    try:
+        config = get_config()
+    except Exception:
+        config = None
+    if config is None or not digest:
+        return None
+    model, _fallback_models = _resolve_alphasift_llm_models(config)
+    if not _env_text(model):
+        return None
+    try:
+        # 走项目统一 LLM 入口（GeminiAnalyzer.generate_text），复用 channel Router
+        # 与 fallback 链，避免裸 litellm.completion 因缺 ANTHROPIC/OPENAI_API_KEY 而失败。
+        from src.analyzer import GeminiAnalyzer
+
+        phase_lines = "；".join(
+            f"{p['key']}（{p['title']}，{p['time_range']}）" for p in _SECTOR_FLOW_PHASE_DEFS
+        )
+        system = "你是 A 股板块资金流复盘分析师，只输出一个 JSON 对象，不要输出任何多余文字或 markdown 代码块。"
+        prompt = (
+            f"{system}\n\n"
+            "下面是今日 A 股板块主力资金流向、板块轮动与全天涨停时间线数据。"
+            "请生成「板块流动分析」复盘内容，风格参考大盘复盘的阶段分时复盘："
+            "先给全天总结，再按全天 4 个阶段展开时间线，最后给后市关注点。\n"
+            "严格要求：\n"
+            "1. 只输出 JSON 对象，字段为：\n"
+            '   {"summary": str, "phases": [{"key": str, "title": str, "time_range": str, '
+            '"text": str, "events": [{"time": str, "text": str}]}], "watch_points": [str]}\n'
+            f"2. phases 固定为这 4 个阶段，key/time_range 必须原样使用：{phase_lines}；\n"
+            "3. 每个阶段 text 为 60~160 个中文字符，概括该阶段的板块轮动、资金方向与带头标的表现；\n"
+            "4. events 只能从「涨停时间线」提供的数据里挑选改写，time 原样使用给定的首次涨停时间，"
+            "text 为 15~60 个中文字符，格式参考「智能驾驶 大众交通 一字涨停，2连板」；"
+            "按时间先后排序，每阶段最多 6 条；没有数据的阶段 events 留空数组；\n"
+            "5. summary：全天板块流动总结，80~160 个中文字符；\n"
+            "6. watch_points：2~4 条后市关注方向，每条一句话；\n"
+            "7. 只依据给定数据，不要编造数据里没有的板块、个股或时间点；不输出免责声明与投资建议。\n\n"
+            f"数据：\n{digest}"
+        )
+        analyzer = GeminiAnalyzer(config=config)
+        raw_text = analyzer.generate_text(prompt, max_tokens=2000, temperature=0.3)
+        if not raw_text:
+            return None
+        parsed = _extract_llm_json_object(raw_text)
+        if not parsed:
+            return None
+        summary = _env_text(parsed.get("summary"))
+        phases = _normalize_sector_flow_phases(parsed.get("phases"), timeline)
+        if not summary or not phases:
+            return None
+        watch_points = [_env_text(w) for w in parsed.get("watch_points") or [] if _env_text(w)]
+        return {"summary": summary, "phases": phases, "watch_points": watch_points[:4]}
+    except Exception as exc:
+        logger.info("AlphaSift sector flow analysis LLM skipped: %s", exc)
+        return None
+
+
+def get_sector_flow_analysis(force_refresh: bool = False) -> Dict[str, Any]:
+    """板块流动分析：基于板块资金流向 + 板块轮动数据生成 LLM 叙事复盘。
+
+    复用 ``get_sector_moneyflow``（含盘中实时兜底）与 ``get_sector_rotation``，
+    LLM 失败时用规则拼接兜底，保证接口始终可用；结果缓存 30 分钟。
+    """
+    if not force_refresh:
+        cached = _read_sector_flow_analysis_cache()
+        if cached is not None:
+            return cached
+
+    try:
+        moneyflow = get_sector_moneyflow(top_n=100)
+    except Exception as e:
+        logger.warning(f"[板块流动分析] 板块资金流获取失败: {e}")
+        moneyflow = {}
+    if not moneyflow.get("available"):
+        return {
+            "available": False,
+            "date": str(moneyflow.get("date") or ""),
+            "source": "unavailable",
+            "summary": "",
+            "phases": [],
+            "leaders": [],
+            "watch_points": [],
+            "inflow_names": [],
+            "outflow_names": [],
+        }
+
+    try:
+        rotation = get_sector_rotation()
+    except Exception as e:
+        logger.warning(f"[板块流动分析] 板块轮动获取失败: {e}")
+        rotation = {}
+
+    try:
+        timeline = _build_sector_flow_timeline(moneyflow)
+    except Exception as e:
+        logger.warning(f"[板块流动分析] 涨停时间线构建失败: {e}")
+        timeline = {"date": "", "limit_up_count": 0, "phases": [], "leaders": []}
+
+    digest = _build_sector_flow_analysis_digest(moneyflow, rotation, timeline)
+    llm_result = _generate_sector_flow_analysis_with_llm(digest, timeline)
+    if llm_result:
+        summary = llm_result["summary"]
+        phases = llm_result["phases"]
+        watch_points = llm_result["watch_points"]
+        source = "llm"
+    else:
+        fallback = _build_sector_flow_analysis_fallback(moneyflow, rotation, timeline)
+        summary = fallback["summary"]
+        phases = fallback["phases"]
+        watch_points = fallback["watch_points"]
+        source = "fallback"
+
+    inflow_names = [str(i.get("name") or "") for i in (moneyflow.get("top_inflow") or [])[:10] if i.get("name")]
+    outflow_names = [str(i.get("name") or "") for i in (moneyflow.get("top_outflow") or [])[:10] if i.get("name")]
+
+    payload: Dict[str, Any] = {
+        "available": True,
+        "date": str(moneyflow.get("date") or ""),
+        "generated_at": datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M"),
+        "source": source,
+        "summary": summary,
+        "phases": phases,
+        "leaders": timeline.get("leaders") or [],
+        "limit_up_count": timeline.get("limit_up_count") or 0,
+        "watch_points": watch_points,
+        "inflow_names": inflow_names,
+        "outflow_names": outflow_names,
+    }
+    _write_sector_flow_analysis_cache(payload)
     return payload
 
 
