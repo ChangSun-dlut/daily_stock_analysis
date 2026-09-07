@@ -56,6 +56,28 @@ except Exception:
         exc_info=True,
     )
 
+# 启动检查：验证 alphasift.ranker 已打「重排 token 预算」补丁。
+# 推理型模型（如 anthropic/MiniMax-M2.7）会把输出预算大量花在 thinking token 上，
+# 未打补丁时表现为 finish_reason=length + 空正文 -> empty_response -> 回退本地评分。
+try:
+    import alphasift.ranker as _alphasift_ranker
+    with open(getattr(_alphasift_ranker, "__file__", ""), encoding="utf-8") as _fh:
+        _ranker_src = _fh.read()
+    if "_DSA_RANKER_TOKEN_BUDGET_PATCH_V2" in _ranker_src:
+        logging.getLogger("server").info(
+            "[check] alphasift.ranker token budget patch present"
+        )
+    else:
+        logging.getLogger("server").warning(
+            "[check] alphasift.ranker MISSING token budget patch — "
+            "run `python scripts/patch_alphasift_ranker.py` to re-apply"
+        )
+except Exception:
+    logging.getLogger("server").warning(
+        "failed to check alphasift.ranker token budget patch, continuing",
+        exc_info=True,
+    )
+
 # 从 api.app 导入应用实例
 from api.app import app  # noqa: E402
 

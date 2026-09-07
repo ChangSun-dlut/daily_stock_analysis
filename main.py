@@ -891,6 +891,10 @@ def run_full_analysis(
                 allow_generate=False,
                 target_date=daily_market_context_target_date,
                 return_full_report=True,
+                # 完整复盘正文（full-merge）必须匹配当前 query，避免静默复用
+                # 不相关的历史报告；prompt 侧摘要可复用历史，故上一次调用
+                # 仍使用默认的 False。
+                require_current_query_match=True,
             )
 
         # 1. 运行个股分析
@@ -921,6 +925,7 @@ def run_full_analysis(
                 allow_generate=False,
                 target_date=daily_market_context_target_date,
                 return_full_report=True,
+                require_current_query_match=True,
             )
             market_context_generated_during_stock = bool(market_context_summary)
 
@@ -1426,6 +1431,37 @@ def main() -> int:
     logger.info("A股自选股智能分析系统 启动")
     logger.info(f"运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("=" * 60)
+
+    # 启动检查：alphasift 安装包的运行时补丁是否仍在（重装包后会丢失）。
+    # - daily.py 单元格序列化补丁：pandas 3.x 写入非标量值会报错
+    # - ranker.py 重排 token 预算补丁：推理型模型 thinking 占满输出预算会导致
+    #   finish_reason=length + 空正文 -> empty_response -> 回退本地因子评分
+    try:
+        import alphasift.daily as _alphasift_daily
+        if hasattr(_alphasift_daily, "_serialize_cell_value"):
+            logger.info("[check] alphasift.daily cell serialization patch present")
+        else:
+            logger.warning(
+                "[check] alphasift.daily MISSING cell serialization patch — "
+                "run `python scripts/patch_alphasift_daily.py` to re-apply"
+            )
+    except Exception:
+        logger.debug("failed to check alphasift.daily patch", exc_info=True)
+
+    try:
+        import alphasift.ranker as _alphasift_ranker
+        _ranker_src = ""
+        with open(getattr(_alphasift_ranker, "__file__", ""), encoding="utf-8") as _fh:
+            _ranker_src = _fh.read()
+        if "_DSA_RANKER_TOKEN_BUDGET_PATCH_V2" in _ranker_src:
+            logger.info("[check] alphasift.ranker token budget patch present")
+        else:
+            logger.warning(
+                "[check] alphasift.ranker MISSING token budget patch — "
+                "run `python scripts/patch_alphasift_ranker.py` to re-apply"
+            )
+    except Exception:
+        logger.debug("failed to check alphasift.ranker patch", exc_info=True)
 
     # 验证配置
     warnings = config.validate()
