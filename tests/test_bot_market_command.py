@@ -3,7 +3,7 @@
 
 import sys
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -66,6 +66,11 @@ class MarketCommandRegionFilterTestCase(unittest.TestCase):
         )
         market_review_module = MagicMock()
         market_review_module.run_market_review.return_value = "report"
+        # 默认没有可复用的当日上下文；需要复用的用例会自行覆盖 return_value。
+        # mock 掉可避免测试真实访问 DailyMarketContextService / 数据库。
+        daily_context_module = MagicMock()
+        daily_context_module.DailyMarketContextService.return_value.get_context.return_value = None
+        self._daily_context_module = daily_context_module
         search_module = MagicMock()
         analyzer_module = MagicMock()
         trading_calendar_module = MagicMock()
@@ -85,6 +90,7 @@ class MarketCommandRegionFilterTestCase(unittest.TestCase):
                     "src.search_service": search_module,
                     "src.analyzer": analyzer_module,
                     "src.core.trading_calendar": trading_calendar_module,
+                    "src.services.daily_market_context": daily_context_module,
                 },
             )
         ]
@@ -238,6 +244,63 @@ class MarketCommandRegionFilterTestCase(unittest.TestCase):
 
         release_market_review_lock.assert_called_once_with(lock_token)
         self.assertEqual(response.text, "❌ 错误：大盘复盘启动失败，已释放运行锁；请稍后重试")
+
+    def test_existing_daily_review_is_reused_without_regeneration(self) -> None:
+        """当天已有大盘复盘时直接复用推送，不再重复调用 LLM 生成。"""
+        message = _make_message()
+        config, notifier, runtime_analyzer, runtime_search, market_review_module, runtime_module, _ = self._patch_dependencies(
+            market_review_region="cn",
+            open_markets={"cn"},
+        )
+        self._daily_context_module.DailyMarketContextService.return_value.get_context.return_value = SimpleNamespace(
+            region="cn",
+            trade_date=date.today(),
+            summary="摘要",
+            full_report="## 完整复盘\n复用内容",
+            source="analysis_history",
+        )
+
+        cmd = MarketCommand()
+        cmd._run_market_review(message, config, None)
+
+        market_review_module.run_market_review.assert_not_called()
+        self.assertTrue(notifier.send.called)
+        self.assertIn("复用内容", notifier.send.call_args.args[0])
+
+    def test_unknown_source_context_is_not_reused(self) -> None:
+        """来源不明的上下文不复用，仍走正常生成（与 main.py 过滤条件一致）。"""
+        message = _make_message()
+        config, notifier, runtime_analyzer, runtime_search, market_review_module, runtime_module, _ = self._patch_dependencies(
+            market_review_region="cn",
+            open_markets={"cn"},
+        )
+        self._daily_context_module.DailyMarketContextService.return_value.get_context.return_value = SimpleNamespace(
+            region="cn",
+            trade_date=date.today(),
+            summary="摘要",
+            full_report="## 完整复盘\n可疑内容",
+            source="unknown",
+        )
+
+        cmd = MarketCommand()
+        cmd._run_market_review(message, config, None)
+
+        market_review_module.run_market_review.assert_called_once()
+        self.assertFalse(notifier.send.called)
+
+    def test_missing_daily_review_falls_back_to_regeneration(self) -> None:
+        """没有可复用上下文时仍正常生成。"""
+        message = _make_message()
+        config, notifier, runtime_analyzer, runtime_search, market_review_module, runtime_module, _ = self._patch_dependencies(
+            market_review_region="cn",
+            open_markets={"cn"},
+        )
+        self._daily_context_module.DailyMarketContextService.return_value.get_context.return_value = None
+
+        cmd = MarketCommand()
+        cmd._run_market_review(message, config, None)
+
+        market_review_module.run_market_review.assert_called_once()
 
 
 

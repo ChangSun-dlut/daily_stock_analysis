@@ -112,6 +112,80 @@ class MarketCommand(BotCommand):
             logger.warning("交易日过滤失败，按配置继续执行大盘复盘: %s", exc)
             return None
 
+    def _send_existing_market_review(
+        self,
+        *,
+        config,
+        notifier,
+        analyzer,
+        search_service,
+        override_region: Optional[str],
+    ) -> bool:
+        """当天已生成过大盘复盘时直接复用并推送，避免重复调用 LLM。
+
+        与 main.py ``run_full_analysis`` 的 ``can_skip_market_review`` 语义一致：
+        只读取已有上下文（``allow_generate=False``），不触发生成。
+
+        Returns:
+            True 表示已复用并推送（调用方应直接返回，不再重新生成）。
+        """
+        try:
+            from src.services.daily_market_context import DailyMarketContextService
+
+            region = (
+                override_region
+                or getattr(config, "market_review_region", "cn")
+                or "cn"
+            )
+            context = DailyMarketContextService().get_context(
+                region=region,
+                config=config,
+                notifier=notifier,
+                analyzer=analyzer,
+                search_service=search_service,
+                allow_generate=False,
+                persist_market_review_history=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[MarketCommand] 读取当日大盘上下文失败，改为重新生成: %s", exc
+            )
+            return False
+
+        if context is None:
+            return False
+
+        # 只复用明确来源（库里已存的历史复盘 / 本轮运行时生成）的内容，
+        # 与 main.py _prime_daily_market_context 的过滤条件保持一致。
+        if getattr(context, "source", None) not in (
+            "analysis_history",
+            "market_review_runtime",
+        ):
+            return False
+
+        report = (
+            (getattr(context, "full_report", "") or "").strip()
+            or (getattr(context, "summary", "") or "").strip()
+        )
+        if not report:
+            return False
+
+        logger.info(
+            "[MarketCommand] 复用当日已有的大盘复盘并推送: source=%s trade_date=%s",
+            getattr(context, "source", "-"),
+            getattr(context, "trade_date", "-"),
+        )
+        if notifier.is_available():
+            if notifier.send(
+                f"# 🎯 大盘复盘\n\n{report}",
+                email_send_to_all=True,
+                route_type="report",
+            ):
+                logger.info("[MarketCommand] 复用大盘复盘推送成功")
+            else:
+                logger.warning("[MarketCommand] 复用大盘复盘推送失败")
+        return True
+
     def _run_market_review(
         self,
         message: BotMessage,
@@ -140,6 +214,16 @@ class MarketCommand(BotCommand):
                 config,
                 source_message=message,
             )
+            # 当天已生成过大盘复盘时直接复用推送，不再重复调用 LLM。
+            if self._send_existing_market_review(
+                config=config,
+                notifier=notifier,
+                analyzer=analyzer,
+                search_service=search_service,
+                override_region=override_region,
+            ):
+                return
+
             review_report = run_market_review(
                 notifier=notifier,
                 analyzer=analyzer,

@@ -1304,13 +1304,17 @@ class MainScheduleModeTestCase(unittest.TestCase):
              patch("main._compute_trading_day_filter", return_value=([], "cn", False)), \
              patch("src.core.pipeline.StockAnalysisPipeline", side_effect=build_pipeline), \
              patch("main._prime_daily_market_context", side_effect=[("", ""), ("缓存摘要", "完整复盘")]) as prime_context, \
+             patch("main._save_reused_market_review_report") as save_reused, \
              patch("main._run_market_review_with_shared_lock", return_value=SimpleNamespace(report="大盘复盘")) as run_with_lock:
             main.run_full_analysis(config, args, [])
 
         self.assertTrue(pipeline_kwargs["daily_market_context_enabled"])
         self.assertTrue(pipeline_kwargs["daily_market_context_allow_generate"])
         self.assertEqual(prime_context.call_count, 2)
-        run_with_lock.assert_called_once()
+        # 命中每日复盘上下文缓存时复用内容并跳过重复的大盘复盘
+        # （见 main.py can_skip_market_review）。
+        run_with_lock.assert_not_called()
+        save_reused.assert_called_once()
         refresh.assert_called_once_with(config)
 
     def test_run_full_analysis_primes_daily_market_context_before_stock_analysis(self) -> None:
@@ -1344,6 +1348,7 @@ class MainScheduleModeTestCase(unittest.TestCase):
              patch("main._resolve_daily_market_context_target_date", side_effect=resolve_target_date), \
              patch("src.core.pipeline.StockAnalysisPipeline", side_effect=build_pipeline), \
              patch("main._prime_daily_market_context", return_value=("大盘退潮，高风险，建议观望，仓位上限30%。", "完整复盘正文")) as prime_context, \
+             patch("main._save_reused_market_review_report") as save_reused, \
              patch("main._run_market_review_with_shared_lock") as run_with_lock, \
              patch("src.core.market_review.run_market_review") as run_market_review:
             main.run_full_analysis(config, args, [])
@@ -1375,9 +1380,10 @@ class MainScheduleModeTestCase(unittest.TestCase):
         self.assertEqual(len(reference_times), 1)
         self.assertIs(pipeline.run.call_args.kwargs["current_time"], reference_times[0])
         self.assertEqual(pipeline.run.call_args.kwargs["current_time"].tzinfo, timezone.utc)
-        run_with_lock.assert_called_once()
-        self.assertFalse(run_with_lock.call_args.kwargs["merge_notification"])
-        self.assertTrue(run_with_lock.call_args.kwargs["send_notification"])
+        # 命中每日复盘上下文缓存：复用内容并跳过重复的大盘复盘，
+        # 因此不再校验 run_with_lock 的调用参数。
+        run_with_lock.assert_not_called()
+        save_reused.assert_called_once()
         run_market_review.assert_not_called()
         refresh.assert_called_once_with(config)
         pipeline.run.assert_called_once()
@@ -1739,7 +1745,7 @@ class MainScheduleModeTestCase(unittest.TestCase):
         refresh.assert_called_once_with(config)
         pipeline.run.assert_called_once()
 
-    def test_run_full_analysis_still_runs_market_review_for_merge_disabled_with_reused_context(self) -> None:
+    def test_run_full_analysis_reuses_market_context_without_rerunning_review_when_merge_disabled(self) -> None:
         args = self._make_args()
         target_date = date(2026, 3, 26)
         config = self._make_config(
@@ -1767,6 +1773,7 @@ class MainScheduleModeTestCase(unittest.TestCase):
                 "main._prime_daily_market_context",
                 return_value=("大盘退潮，高风险，建议观望。", "## 完整大盘复盘\n市场结构偏弱，建议保守。"),
              ) as prime_context, \
+             patch("main._save_reused_market_review_report") as save_reused, \
              patch("main._run_market_review_with_shared_lock") as run_with_lock, \
              patch("src.core.market_review.run_market_review") as run_market_review:
             main.run_full_analysis(config, args, [])
@@ -1795,8 +1802,9 @@ class MainScheduleModeTestCase(unittest.TestCase):
                 ),
             ]
         )
-        run_with_lock.assert_called_once()
-        self.assertFalse(run_with_lock.call_args.kwargs["merge_notification"])
+        # merge 关闭且命中每日复盘上下文缓存：复用内容并跳过重复的大盘复盘
+        run_with_lock.assert_not_called()
+        save_reused.assert_called_once()
         run_market_review.assert_not_called()
         refresh.assert_called_once_with(config)
         pipeline.run.assert_called_once()

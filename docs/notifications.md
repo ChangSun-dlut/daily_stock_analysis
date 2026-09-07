@@ -85,7 +85,7 @@ Discord 长报告发送复用现有分片链路：单条 `content` 运行时不�
 | `CUSTOM_WEBHOOK_URLS` | minimal | custom | Secret | - |
 | `CUSTOM_WEBHOOK_BEARER_TOKEN` | advanced | custom | Secret | - |
 | `CUSTOM_WEBHOOK_BODY_TEMPLATE` | advanced | custom | Variable or Secret | - |
-| `WEBHOOK_VERIFY_SSL` | advanced | ntfy, gotify, custom, astrbot | Variable or Secret | `true` |
+| `WEBHOOK_VERIFY_SSL` | advanced | ntfy, gotify, custom, astrbot, openclaw_wechat | Variable or Secret | `true` |
 | `DISCORD_WEBHOOK_URL` | minimal | discord | Secret | - |
 | `DISCORD_BOT_TOKEN` | minimal | discord | Secret | - |
 | `DISCORD_MAIN_CHANNEL_ID` | minimal | discord | Secret | - |

@@ -9,6 +9,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+
 import src.core.market_review_lock as market_review_lock
 
 
@@ -116,6 +121,59 @@ class MarketReviewNoFcntlLockTestCase(unittest.TestCase):
                 self.assertTrue(token.uses_flock is False)
             finally:
                 market_review_lock.release_market_review_lock(token)
+
+    @unittest.skipIf(fcntl is None, "fcntl unavailable on this platform")
+    def test_stale_flock_lock_is_reclaimed_after_ttl(self) -> None:
+        """flock 分支（macOS/Linux 真实路径）必须也能回收超过 TTL 的锁。
+
+        回归背景：flock 分支原先直接返回 None、完全跳过陈旧锁检测，导致持锁的
+        复盘一旦卡死，后续定时与手动复盘都会被静默跳过。
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = SimpleNamespace(
+                database_path=str(Path(temp_dir) / "stock_analysis.db")
+            )
+            lock_path = market_review_lock.market_review_lock_path(config)
+            # 一个"卡死"的持有者：进程仍活着，但开始时间已远超 TTL
+            self._write_lock_file(
+                lock_path,
+                pid=os.getpid(),
+                started_at=datetime.now() - timedelta(hours=3),
+            )
+            holder = open(lock_path, "a+", encoding="utf-8")
+            fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+            token = None
+            try:
+                token = market_review_lock.try_acquire_market_review_lock(config)
+            finally:
+                fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+                holder.close()
+
+            self.assertIsNotNone(token)
+            if token is not None:
+                market_review_lock.release_market_review_lock(token)
+
+    @unittest.skipIf(fcntl is None, "fcntl unavailable on this platform")
+    def test_fresh_flock_lock_still_blocks_acquisition(self) -> None:
+        """未超 TTL 且持有者存活时，flock 分支仍应正常拒绝（不能误抢）。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = SimpleNamespace(
+                database_path=str(Path(temp_dir) / "stock_analysis.db")
+            )
+            lock_path = market_review_lock.market_review_lock_path(config)
+            self._write_lock_file(
+                lock_path, pid=os.getpid(), started_at=datetime.now()
+            )
+            holder = open(lock_path, "a+", encoding="utf-8")
+            fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+            token = None
+            try:
+                token = market_review_lock.try_acquire_market_review_lock(config)
+            finally:
+                fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+                holder.close()
+
+            self.assertIsNone(token)
 
     def test_windows_liveness_probe_does_not_call_os_kill(self) -> None:
         with patch.object(market_review_lock.os, "name", "nt"), \

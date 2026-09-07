@@ -861,12 +861,16 @@ class AnalysisTaskQueue:
             self._cleanup_old_tasks()
             return result
 
-        except Exception as e:  # pragma: no cover - behavior verified in downstream tests
+        except BaseException as e:
+            # 必须为 BaseException 而非 Exception：asyncio.CancelledError 在
+            # Python 3.8+ 属于 BaseException；若只捕获 Exception 会让任务在
+            # LLM/异步调用被取消时直接冒泡退出，worker 线程回归空闲但任务状态
+            # 永远停在 processing（典型表现为大盘复盘/自定义任务"分析中"假死）。
+            # 与 _execute_task（个股分析）保持一致修复。
             error_msg = str(e)
-            # exc_info=True 保留完整 traceback，便于定位真实出错文件/行号
-            logger.error(
-                f"[TaskQueue] 自定义任务失败: {task_id}, 错误: {error_msg}",
-                exc_info=True,
+            logger.exception(
+                f"[TaskQueue] 自定义任务失败(含未捕获异常): {task_id}, "
+                f"异常类型: {type(e).__name__}, 错误: {error_msg}"
             )
 
             with self._data_lock:

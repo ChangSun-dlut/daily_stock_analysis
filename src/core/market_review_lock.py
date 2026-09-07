@@ -20,7 +20,9 @@ except ImportError:  # pragma: no cover - Windows fallback
 
 _market_review_lock = threading.Lock()
 _market_review_running = False
-_MARKET_REVIEW_LOCK_STALE_TTL_SECONDS = 24 * 60 * 60
+# 锁的陈旧判定 TTL：持锁的复盘若卡死（例如 LLM 返回 401 后长时间重试），超过该
+# 时长即允许后续运行回收锁，避免定时与手动复盘被无限期静默跳过。
+_MARKET_REVIEW_LOCK_STALE_TTL_SECONDS = 2 * 60 * 60
 logger = logging.getLogger(__name__)
 
 
@@ -102,27 +104,57 @@ def _read_lock_metadata(lock_path: Path) -> dict[str, str]:
     return metadata
 
 
-def _is_lock_file_expired(lock_path: Path) -> bool:
+def _resolve_lock_ttl(config: Optional[Any] = None) -> float:
+    """Resolve the stale-lock TTL in seconds.
+
+    Precedence: ``config.market_review_lock_ttl_seconds`` >
+    ``MARKET_REVIEW_LOCK_TTL_SECONDS`` env > module default.
+
+    A wedged market-review run used to hold the lock forever, silently skipping
+    every later scheduled and manual run (observed: a run stuck on LLM 401 kept
+    the lock for ~4 hours).  A finite TTL makes such a lock reclaimable.
+    """
+    candidates: tuple[Any, ...] = (
+        getattr(config, "market_review_lock_ttl_seconds", None),
+        os.getenv("MARKET_REVIEW_LOCK_TTL_SECONDS", "").strip() or None,
+    )
+    for candidate in candidates:
+        try:
+            if candidate is None:
+                continue
+            value = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return float(_MARKET_REVIEW_LOCK_STALE_TTL_SECONDS)
+
+
+def _is_lock_file_expired(
+    lock_path: Path,
+    ttl_seconds: float = _MARKET_REVIEW_LOCK_STALE_TTL_SECONDS,
+) -> bool:
     try:
         modified_at = datetime.fromtimestamp(lock_path.stat().st_mtime)
     except OSError:
         return False
 
-    return datetime.now() - modified_at > timedelta(
-        seconds=_MARKET_REVIEW_LOCK_STALE_TTL_SECONDS
-    )
+    return datetime.now() - modified_at > timedelta(seconds=ttl_seconds)
 
 
-def _is_stale_lock(lock_path: Path) -> bool:
+def _is_stale_lock(
+    lock_path: Path,
+    ttl_seconds: float = _MARKET_REVIEW_LOCK_STALE_TTL_SECONDS,
+) -> bool:
     metadata = _read_lock_metadata(lock_path)
     pid_raw = metadata.get("pid")
     if not pid_raw:
-        return _is_lock_file_expired(lock_path)
+        return _is_lock_file_expired(lock_path, ttl_seconds)
 
     try:
         pid = int(pid_raw)
     except ValueError:
-        return _is_lock_file_expired(lock_path)
+        return _is_lock_file_expired(lock_path, ttl_seconds)
 
     if not _is_process_alive(pid):
         return True
@@ -136,9 +168,7 @@ def _is_stale_lock(lock_path: Path) -> bool:
     except ValueError:
         return True
 
-    return datetime.now() - started_at > timedelta(
-        seconds=_MARKET_REVIEW_LOCK_STALE_TTL_SECONDS
-    )
+    return datetime.now() - started_at > timedelta(seconds=ttl_seconds)
 
 
 def try_acquire_market_review_lock(
@@ -161,17 +191,43 @@ def try_acquire_market_review_lock(
         lock_path.parent.mkdir(parents=True, exist_ok=True)
 
         if fcntl is not None:
+            ttl_seconds = _resolve_lock_ttl(config)
             handle = open(lock_path, "a+", encoding="utf-8")
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except (BlockingIOError, OSError) as exc:
                 handle.close()
-                if isinstance(exc, BlockingIOError) or getattr(exc, "errno", None) in (
-                    errno.EACCES,
-                    errno.EAGAIN,
+                if not (
+                    isinstance(exc, BlockingIOError)
+                    or getattr(exc, "errno", None) in (errno.EACCES, errno.EAGAIN)
                 ):
+                    raise
+
+                # flock 分支原先直接返回 None，等于完全跳过陈旧锁检测：只要持锁
+                # 的复盘卡住，后续定时与手动复盘都会被静默跳过。这里补上检测——
+                # 持有进程已退出或超过 TTL 时，删除锁文件（换一个 inode）后重试。
+                if not _is_stale_lock(lock_path, ttl_seconds):
                     return None
-                raise
+
+                logger.warning(
+                    "检测到失效的 market_review.lock（持有进程已退出或已超过 %s 秒），清理后重试。",
+                    int(ttl_seconds),
+                )
+                try:
+                    lock_path.unlink()
+                except OSError as unlink_exc:
+                    logger.warning("清理失效的 market_review.lock 失败: %s", unlink_exc)
+                    return None
+
+                handle = open(lock_path, "a+", encoding="utf-8")
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except (BlockingIOError, OSError) as retry_exc:
+                    handle.close()
+                    logger.warning(
+                        "清理失效的 market_review.lock 后仍无法获取锁: %s", retry_exc
+                    )
+                    return None
             uses_flock = True
         else:  # pragma: no cover - exercised only on platforms without fcntl
             fd: Optional[int] = None
