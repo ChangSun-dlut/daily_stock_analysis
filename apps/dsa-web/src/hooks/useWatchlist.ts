@@ -14,6 +14,30 @@ export interface UseWatchlistReturn {
   refresh: () => Promise<void>;
 }
 
+type WatchlistErrorPayload = {
+  response?: { data?: { detail?: { message?: string } | string; message?: string } };
+  message?: string;
+};
+
+/**
+ * 把后端返回的真实错误透出给用户。
+ *
+ * 后端错误体形如 `{"error":"internal_error","message":"加入自选失败: ..."}` 或
+ * `{"detail":{"error":"...","message":"..."}}`。只显示占位文案"操作失败"会让人
+ * 完全无法自查（2026-09-08 的 LITELLM_FALLBACK_MODELS 校验失败就是这样被藏住的）。
+ */
+function extractErrorMessage(error: unknown, fallback: string): string {
+  const payload = (error as WatchlistErrorPayload | null)?.response?.data;
+  if (payload) {
+    const detail = payload.detail;
+    const detailMessage = typeof detail === 'string' ? detail : detail?.message;
+    if (detailMessage) return detailMessage;
+    if (payload.message) return payload.message;
+  }
+  const raw = (error as WatchlistErrorPayload | null)?.message;
+  return raw && raw.trim() ? raw : fallback;
+}
+
 export function useWatchlist(): UseWatchlistReturn {
   const [codes, setCodes] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -78,8 +102,8 @@ export function useWatchlist(): UseWatchlistReturn {
         setCodes(result);
         showMessage(`已加入自选 ${stockCode}`);
       }
-    } catch {
-      if (mountedRef.current) showMessage('操作失败');
+    } catch (error: unknown) {
+      if (mountedRef.current) showMessage(extractErrorMessage(error, '加入自选失败'));
     } finally {
       if (mountedRef.current) setIsActioning(false);
     }
@@ -94,8 +118,8 @@ export function useWatchlist(): UseWatchlistReturn {
         setCodes(result);
         showMessage(`已从自选移除 ${stockCode}`);
       }
-    } catch {
-      if (mountedRef.current) showMessage('操作失败');
+    } catch (error: unknown) {
+      if (mountedRef.current) showMessage(extractErrorMessage(error, '移除自选失败'));
     } finally {
       if (mountedRef.current) setIsActioning(false);
     }

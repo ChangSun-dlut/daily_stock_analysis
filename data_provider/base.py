@@ -1931,6 +1931,14 @@ class DataFetcherManager:
                 elapsed_minutes=elapsed_minutes,
                 at=at,
             )
+            # 同一批 1 分钟 K 线顺带喂入价格缓存（供 price_surge_rt 急拉/急跌预警使用），
+            # best-effort：价格缓存失败不能影响量比主流程。
+            try:
+                from src.services.realtime_price_cache import get_default_cache as get_price_cache
+
+                get_price_cache().record_1min_kline(code, bars=bars, at=at)
+            except Exception as price_exc:  # pragma: no cover - defensive
+                logger.debug("[1min 价格] %s 写入失败: %s", code, price_exc)
             if ratio is not None:
                 logger.debug("[1min 量比] %s 分钟级量比=%s", code, round(ratio, 4))
             return ratio

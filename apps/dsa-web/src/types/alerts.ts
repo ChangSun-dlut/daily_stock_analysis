@@ -15,7 +15,11 @@ export type AlertType =
   | 'portfolio_drawdown'
   | 'portfolio_price_stale'
   | 'market_light_status'
-  | 'market_light_score_drop';
+  | 'market_light_score_drop'
+  // 分时实时类（分钟级）：由后台任务自动注册/评估，前端仅展示标签
+  | 'volume_spike_rt'
+  | 'price_surge_rt'
+  | 'volume_yoy_surge_rt';
 export type AlertSeverity = 'info' | 'warning' | 'critical';
 export type AlertTargetScope = 'single_symbol' | 'watchlist' | 'portfolio_holdings' | 'portfolio_account' | 'market';
 export type AlertDirection = 'above' | 'below' | 'up' | 'down' | 'bullish_cross' | 'bearish_cross';

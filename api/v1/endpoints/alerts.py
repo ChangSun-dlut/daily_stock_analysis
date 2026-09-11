@@ -281,3 +281,24 @@ def list_web_popups(
     alerts = hub.get_since(int(since)) if since > 0 else hub.get_all()
     return {"items": [a.to_dict() for a in alerts], "latest_id": hub._seq}
 
+
+@router.post(
+    "/web-popups/push",
+    responses={200: {"description": "已写入首页通知中心"}},
+    summary="主动写入 web 弹窗（推送链路失败时的兜底）",
+)
+def push_web_popup(
+    title: str = Query(..., description="弹窗标题"),
+    body: str = Query("", description="弹窗正文"),
+    level: str = Query("info", description="warning / info / success / error"),
+) -> Dict[str, Any]:
+    """直接调 API 进程内的 web_alert_hub 写入首页通知中心。
+
+    当 openclaw_wechat 长时间不可用、但其他方式（已有报告文件、其它脚本）
+    已经生成了内容时，可走此端点把内容塞进首页，不依赖任何外部通道。
+    """
+    from src.services.web_alert_hub import get_web_alert_hub as _get_hub
+
+    _get_hub().push(title=title, body=body, level=level)
+    return {"ok": True, "title": title}
+

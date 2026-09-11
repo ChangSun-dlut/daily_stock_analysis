@@ -32,6 +32,13 @@ TECHNICAL_ALERT_TYPES = frozenset({
 # future realtime indicator caches) instead of the daily DataFetcher path.
 REALTIME_ALERT_TYPES = frozenset({
     "volume_spike_rt",
+    # Intraday price acceleration (e.g. 49.07 -> 49.54 within two minutes).
+    # Fed by the same 1-minute K-line feed, but read from the price cache.
+    "price_surge_rt",
+    # Minute-level "today vs yesterday same-period" cumulative volume surge.
+    # Compares today's cumulative volume against yesterday's cumulative volume
+    # truncated at the same intraday progress (e.g. 09:45 vs 09:45).
+    "volume_yoy_surge_rt",
 })
 
 # Defaults for ``volume_spike_rt`` rules. Min ratio floor guards against
@@ -50,9 +57,40 @@ MAX_VOLUME_SPIKE_RT_MIN_SLOPE = 5.0
 MIN_VOLUME_SPIKE_RT_MIN_PEAK_RATIO = 0.0
 MAX_VOLUME_SPIKE_RT_MIN_PEAK_RATIO = 20.0
 
+# Defaults for ``price_surge_rt`` rules: catch a short intraday price surge
+# such as 49.07 -> 49.54 within two minutes (+0.96%) even when volume is flat.
+DEFAULT_PRICE_SURGE_WINDOW_MINUTES = 3
+DEFAULT_PRICE_SURGE_MIN_CHANGE_PCT = 0.8
+MIN_PRICE_SURGE_WINDOW_MINUTES = 1
+MAX_PRICE_SURGE_WINDOW_MINUTES = 60
+MIN_PRICE_SURGE_MIN_CHANGE_PCT = 0.0
+MAX_PRICE_SURGE_MIN_CHANGE_PCT = 50.0
+PRICE_SURGE_DIRECTIONS = frozenset({"up", "down"})
+
 ABOVE_BELOW_DIRECTIONS = frozenset({"above", "below"})
 CROSS_DIRECTIONS = frozenset({"bullish_cross", "bearish_cross"})
 MAX_REQUESTED_DAYS = 365
+
+# Defaults for ``volume_yoy_surge_rt``: minute-level year-over-year(ish)
+# comparison of today's cumulative volume against the *same intraday window*
+# of the previous trading day (e.g. today 09:45 vs yesterday 09:45).
+#
+# Multiplier tiers follow the widely used 量比 convention seen in mainstream
+# alerting products (0.8-1.5 normal / 1.5-2.5 温和放量 / 2.5-5 明显放量 /
+# 5-10 巨量 / >10 天量). Because the denominator here is only yesterday's
+# same-period volume (a noisier, single-day baseline), the default trigger is
+# set at 2.0x — "明显放量" — with 3.0x/5.0x escalating the reported signal
+# strength instead of requiring extra rules.
+DEFAULT_VOLUME_YOY_MIN_MULTIPLIER = 2.0
+DEFAULT_VOLUME_YOY_STRONG_MULTIPLIER = 3.0
+DEFAULT_VOLUME_YOY_EXTREME_MULTIPLIER = 5.0
+MIN_VOLUME_YOY_MULTIPLIER = 1.1
+MAX_VOLUME_YOY_MULTIPLIER = 20.0
+# Monitoring window (exchange local time). The requirement is 09:00-10:00;
+# the pre-open 09:00-09:30 leg is inert because there is no volume yet, but the
+# bounds are kept configurable rather than hardcoded in the evaluator.
+DEFAULT_VOLUME_YOY_SESSION_START = "09:00"
+DEFAULT_VOLUME_YOY_SESSION_END = "10:00"
 
 
 @dataclass
@@ -160,7 +198,88 @@ def normalize_realtime_indicator_parameters(
                 maximum=MAX_VOLUME_SPIKE_RT_MIN_PEAK_RATIO,
             ) if parameters.get("min_peak_ratio") is not None else 0.0,
         }
+    if alert_type == "price_surge_rt":
+        return {
+            "window_minutes": _int_in_range(
+                parameters.get("window_minutes"),
+                "window_minutes",
+                default=DEFAULT_PRICE_SURGE_WINDOW_MINUTES,
+                minimum=MIN_PRICE_SURGE_WINDOW_MINUTES,
+                maximum=MAX_PRICE_SURGE_WINDOW_MINUTES,
+            ),
+            "min_change_pct": _float_in_range(
+                parameters.get("min_change_pct"),
+                "min_change_pct",
+                minimum=MIN_PRICE_SURGE_MIN_CHANGE_PCT,
+                maximum=MAX_PRICE_SURGE_MIN_CHANGE_PCT,
+            ) if parameters.get("min_change_pct") is not None else DEFAULT_PRICE_SURGE_MIN_CHANGE_PCT,
+            "direction": _direction(
+                parameters.get("direction"), PRICE_SURGE_DIRECTIONS, default="up"
+            ),
+        }
+    if alert_type == "volume_yoy_surge_rt":
+        def _multiplier(raw: Any, field: str, default: float) -> float:
+            return (
+                _float_in_range(
+                    raw, field,
+                    minimum=MIN_VOLUME_YOY_MULTIPLIER,
+                    maximum=MAX_VOLUME_YOY_MULTIPLIER,
+                )
+                if raw is not None
+                else default
+            )
+
+        min_multiplier = _multiplier(
+            parameters.get("min_multiplier"), "min_multiplier",
+            DEFAULT_VOLUME_YOY_MIN_MULTIPLIER,
+        )
+        strong = _multiplier(
+            parameters.get("strong_multiplier"), "strong_multiplier",
+            DEFAULT_VOLUME_YOY_STRONG_MULTIPLIER,
+        )
+        extreme = _multiplier(
+            parameters.get("extreme_multiplier"), "extreme_multiplier",
+            DEFAULT_VOLUME_YOY_EXTREME_MULTIPLIER,
+        )
+        if min_multiplier > strong or strong > extreme:
+            raise ValueError(
+                "min_multiplier <= strong_multiplier <= extreme_multiplier required"
+            )
+        return {
+            "min_multiplier": min_multiplier,
+            "strong_multiplier": strong,
+            "extreme_multiplier": extreme,
+            "session_start": _hhmm(
+                parameters.get("session_start"), "session_start",
+                DEFAULT_VOLUME_YOY_SESSION_START,
+            ),
+            "session_end": _hhmm(
+                parameters.get("session_end"), "session_end",
+                DEFAULT_VOLUME_YOY_SESSION_END,
+            ),
+        }
     raise ValueError(f"unsupported realtime alert_type: {alert_type}")
+
+
+def _hhmm(value: Any, field: str, default: str) -> str:
+    """Validate a ``HH:MM`` wall-clock string and return it normalized."""
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        return default
+    try:
+        hour_text, minute_text = text.split(":")
+        hour, minute = int(hour_text), int(minute_text)
+    except (ValueError, AttributeError):
+        raise ValueError(f"invalid {field}: {value} (expected HH:MM)")
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError(f"invalid {field}: {value} (expected HH:MM)")
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _hhmm_to_minutes(value: str) -> int:
+    """``"09:30"`` -> ``570`` minutes since midnight."""
+    hour_text, minute_text = str(value).split(":")
+    return int(hour_text) * 60 + int(minute_text)
 
 
 def compute_required_bars(alert_type: str, params: Dict[str, Any]) -> int:
@@ -200,6 +319,10 @@ def threshold_for_realtime_indicator(
     """
     if alert_type == "volume_spike_rt":
         return float(params.get("min_ratio", DEFAULT_VOLUME_SPIKE_RT_MIN_RATIO))
+    if alert_type == "price_surge_rt":
+        return float(params.get("min_change_pct", DEFAULT_PRICE_SURGE_MIN_CHANGE_PCT))
+    if alert_type == "volume_yoy_surge_rt":
+        return float(params.get("min_multiplier", DEFAULT_VOLUME_YOY_MIN_MULTIPLIER))
     return None
 
 
@@ -849,6 +972,148 @@ def evaluate_realtime_indicator_alert(
             latest_value=current,
             slope=slope,
             window_points=cache.size(stock_code),
+            evaluated_at=now_dt,
+            grade=grade,
+            stale_seconds=stale_seconds,
+            data_channel=data_channel,
+            direction=direction,
+        )
+
+    if alert_type == "price_surge_rt":
+        window = int(params["window_minutes"])
+        min_change = float(params["min_change_pct"])
+        direction = str(params.get("direction") or "up")
+        change = cache.change_pct(stock_code, window_minutes=window, now=now_dt)
+        points = cache.size(stock_code)
+        if change is None:
+            return RealtimeIndicatorOutcome(
+                triggered=False,
+                summary="分时价格样本不足",
+                latest_value=None,
+                slope=None,
+                window_points=points,
+                evaluated_at=now_dt,
+            )
+        if direction == "down":
+            triggered = change <= -(min_change - 1e-9)
+        else:
+            triggered = change >= (min_change - 1e-9)
+        label = "急跌" if direction == "down" else "急拉"
+        move = "跌" if direction == "down" else "涨"
+        summary = (
+            f"{label}预警：{stock_code} {window} 分钟{move}幅 {change:+.2f}%"
+            f"（命中：{'价格' if triggered else '未达阈值'}；阈值 {direction} {min_change:.2f}%）"
+        )
+        return RealtimeIndicatorOutcome(
+            triggered=triggered,
+            summary=summary,
+            latest_value=change,
+            slope=None,
+            window_points=points,
+            evaluated_at=now_dt,
+            grade=_grade_label(1) if triggered else None,
+            stale_seconds=getattr(quote, "stale_seconds", None) if quote is not None else None,
+            direction="up" if change > 0 else ("down" if change < 0 else "flat"),
+        )
+
+    if alert_type == "volume_yoy_surge_rt":
+        min_multiplier = float(params["min_multiplier"])
+        strong = float(params.get("strong_multiplier", DEFAULT_VOLUME_YOY_STRONG_MULTIPLIER))
+        extreme = float(params.get("extreme_multiplier", DEFAULT_VOLUME_YOY_EXTREME_MULTIPLIER))
+        session_start = str(params.get("session_start") or DEFAULT_VOLUME_YOY_SESSION_START)
+        session_end = str(params.get("session_end") or DEFAULT_VOLUME_YOY_SESSION_END)
+
+        stale_seconds = getattr(quote, "stale_seconds", None) if quote is not None else None
+        src = getattr(quote, "source", None) if quote is not None else None
+        data_channel = src.value if hasattr(src, "value") else (src if isinstance(src, str) else None)
+        direction = _quote_direction(quote)
+        channel_suffix = _channel_stale_suffix(quote)
+
+        local_now = now_dt
+        try:  # pragma: no cover - tzdata availability varies
+            from zoneinfo import ZoneInfo
+
+            local_now = now_dt.astimezone(ZoneInfo("Asia/Shanghai"))
+        except Exception:
+            pass
+
+        minutes_now = local_now.hour * 60 + local_now.minute
+        if not (
+            _hhmm_to_minutes(session_start) <= minutes_now <= _hhmm_to_minutes(session_end)
+        ):
+            return RealtimeIndicatorOutcome(
+                triggered=False,
+                summary=f"不在监控时段（{session_start}-{session_end}），跳过同比昨日放量检查",
+                latest_value=None,
+                evaluated_at=now_dt,
+                data_channel=data_channel,
+                direction=direction,
+            )
+
+        elapsed: Optional[float] = None
+        baseline: Optional[float] = None
+        try:
+            from data_provider.base import _trading_minutes_elapsed
+            from src.services.intraday_volume_baseline import (
+                previous_session_same_period_volume,
+            )
+
+            elapsed = _trading_minutes_elapsed(now=local_now)
+            baseline = previous_session_same_period_volume(stock_code, elapsed)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("[同比放量] %s 基线计算失败: %s", stock_code, exc)
+
+        raw_volume = getattr(quote, "volume", None) if quote is not None else None
+        try:
+            today_volume = float(raw_volume) if raw_volume is not None else None
+        except (TypeError, ValueError):
+            today_volume = None
+
+        if today_volume is None or today_volume <= 0:
+            return RealtimeIndicatorOutcome(
+                triggered=False,
+                summary="今日累计成交量不可用",
+                latest_value=None,
+                evaluated_at=now_dt,
+                stale_seconds=stale_seconds,
+                data_channel=data_channel,
+                direction=direction,
+            )
+        if not baseline or baseline <= 0:
+            return RealtimeIndicatorOutcome(
+                triggered=False,
+                summary="昨日同期基线不足",
+                latest_value=None,
+                evaluated_at=now_dt,
+                stale_seconds=stale_seconds,
+                data_channel=data_channel,
+                direction=direction,
+            )
+
+        ratio = today_volume / float(baseline)
+        triggered = ratio >= (min_multiplier - 1e-9)
+        if triggered:
+            grade = "极强" if ratio >= (extreme - 1e-9) else ("强" if ratio >= (strong - 1e-9) else "中")
+        else:
+            grade = None
+        progress_minutes = int(elapsed or 0)
+        head = (
+            f"同比昨日放量预警：{stock_code} 开盘 {progress_minutes} 分钟累计成交量 "
+            f"{today_volume:,.0f} 股，为昨日同期 {baseline:,.0f} 股的 {ratio:.2f} 倍"
+            if triggered
+            else f"同比昨日放量：{stock_code} 开盘 {progress_minutes} 分钟 {ratio:.2f}x"
+        )
+        summary = (
+            f"{head}（命中：{'同比' if triggered else '未达阈值'}；"
+            f"阈值 ≥{min_multiplier:.2f}x，分级 强≥{strong:.2f}/极强≥{extreme:.2f}）"
+        )
+        summary = summary + (f"｜信号强度 {grade}" if grade else "") + channel_suffix
+        return RealtimeIndicatorOutcome(
+            triggered=triggered,
+            summary=summary,
+            latest_value=ratio,
+            slope=None,
+            window_points=progress_minutes,
             evaluated_at=now_dt,
             grade=grade,
             stale_seconds=stale_seconds,

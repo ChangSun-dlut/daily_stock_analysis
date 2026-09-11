@@ -62,6 +62,8 @@ interface HomeStockWorkspaceProps {
   onRemoveFromWatchlist: (code: string) => Promise<void>;
   onRefreshWatchlist: () => Promise<void>;
   onAnalyzeWatchlist: (mode: WatchlistAnalyzeMode) => Promise<void>;
+  /** 单只股票分析：点击行内「分析」按钮触发，只跑这一只，不跑全量。 */
+  onAnalyzeStock?: (code: string) => Promise<void>;
   isBatchAnalyzing: boolean;
   batchStatus: BatchStatus | null;
   todayItems: StockBarItem[];
@@ -137,9 +139,10 @@ const WatchlistRowItem: React.FC<{
   row: HomeWatchlistRow;
   onRemove: (code: string) => Promise<void>;
   onOpenDetail: (row: HomeWatchlistRow) => void;
+  onAnalyze?: (code: string) => Promise<void>;
   disabled: boolean;
   selected: boolean;
-}> = ({ row, onRemove, onOpenDetail, disabled, selected }) => {
+}> = ({ row, onRemove, onOpenDetail, onAnalyze, disabled, selected }) => {
   const { t } = useUiLanguage();
   const taskLabel = getTaskStatusLabel(row.activeTask, t);
   const isLatestDetailLoading = Boolean(row.isTodayStatusLoading);
@@ -148,36 +151,39 @@ const WatchlistRowItem: React.FC<{
   const stockName = row.latestItem?.stockName || row.code;
   const canOpenDetail = typeof item?.id === 'number';
 
-  const handleOpenDetail = () => {
-    onOpenDetail(row);
-  };
-
   return (
     <div
-      className={`home-subpanel group grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2 px-3 py-2.5 text-left transition-colors ${
+      role="button"
+      tabIndex={0}
+      aria-label={canOpenDetail
+        ? t('watchlist.openLatestDetailAria', { code: row.code })
+        : isLatestDetailLoading
+          ? t('watchlist.latestDetailLoadingAria', { code: row.code })
+          : isLatestDetailUnavailable
+            ? t('watchlist.latestDetailUnavailableAria', { code: row.code })
+            : t('watchlist.noLatestDetailAria', { code: row.code })}
+      className={`home-subpanel group grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2 px-3 py-2.5 text-left transition-colors border-l-4 cursor-pointer ${
         selected
-          ? 'border-primary/35 bg-primary/10'
-          : 'hover:border-subtle-hover hover:bg-base/65'
+          ? 'border-primary bg-primary/15'
+          : 'border-transparent hover:border-subtle-hover hover:bg-base/65'
       }`}
       data-testid={`watchlist-row-${row.code}`}
+      onClick={() => onOpenDetail(row)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onOpenDetail(row);
+        }
+      }}
     >
-      <button
-        type="button"
+      <div
         aria-pressed={selected}
-        aria-label={canOpenDetail
-          ? t('watchlist.openLatestDetailAria', { code: row.code })
-          : isLatestDetailLoading
-            ? t('watchlist.latestDetailLoadingAria', { code: row.code })
-            : isLatestDetailUnavailable
-              ? t('watchlist.latestDetailUnavailableAria', { code: row.code })
-            : t('watchlist.noLatestDetailAria', { code: row.code })}
-        className="grid min-w-0 cursor-pointer gap-2 rounded-lg text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/30"
-        onClick={handleOpenDetail}
+        className="grid min-w-0 cursor-pointer gap-2 rounded-lg focus-within:outline-none focus-within:ring-2 focus-within:ring-cyan/30"
       >
         <div className="min-w-0">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="truncate text-sm font-semibold text-foreground">
-              {truncateStockName(stockName)}
+          <div className="flex min-w-0 items-start gap-2">
+            <span className="text-sm font-semibold text-foreground break-words" title={stockName}>
+              {stockName}
             </span>
             {row.isTodayStatusLoading ? (
               <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-text" aria-label={t('watchlist.todayStatusLoading')} />
@@ -226,9 +232,24 @@ const WatchlistRowItem: React.FC<{
             </div>
           ) : null}
         </div>
-      </button>
+      </div>
       <div className="flex shrink-0 items-start gap-1.5">
         <ScoreBadge item={item} />
+        {onAnalyze ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="xsm"
+            className="h-7 w-7 px-0"
+            disabled={disabled || Boolean(row.activeTask)}
+            aria-label={t('watchlist.analyzeAria', { code: row.code })}
+            title={t('watchlist.analyzeAria', { code: row.code })}
+            onClick={(e) => { e.stopPropagation(); void onAnalyze(row.code); }}
+            data-testid={`watchlist-analyze-${row.code}`}
+          >
+            <Play className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
+          </Button>
+        ) : null}
         <Button
           type="button"
           variant="ghost"
@@ -236,7 +257,7 @@ const WatchlistRowItem: React.FC<{
           className="h-7 w-7 px-0"
           disabled={disabled}
           aria-label={t('watchlist.removeAria', { code: row.code })}
-          onClick={() => void onRemove(row.code)}
+          onClick={(e) => { e.stopPropagation(); void onRemove(row.code); }}
         >
           <Trash2 className="h-3.5 w-3.5 text-danger" aria-hidden="true" />
         </Button>
@@ -278,6 +299,7 @@ export const HomeStockWorkspace: React.FC<HomeStockWorkspaceProps> = ({
   onRemoveFromWatchlist,
   onRefreshWatchlist,
   onAnalyzeWatchlist,
+  onAnalyzeStock,
   isBatchAnalyzing,
   batchStatus,
   todayItems,
@@ -581,6 +603,7 @@ export const HomeStockWorkspace: React.FC<HomeStockWorkspaceProps> = ({
                     await onRemoveFromWatchlist(code);
                   }}
                   onOpenDetail={handleWatchlistRowOpen}
+                  onAnalyze={onAnalyzeStock}
                   disabled={watchlistActioning}
                   selected={
                     (typeof selectedRecordId === 'number' && selectedRecordId === row.latestItem?.id)

@@ -1676,6 +1676,16 @@ def main() -> int:
 
             background_tasks = []
             if getattr(config, 'agent_event_monitor_enabled', False):
+                # 自选股「早盘同比昨日同期放量」分钟级预警：确保规则存在（幂等，
+                # 失败只告警不阻断启动）。后续新增的自选股会在评估时自动展开。
+                try:
+                    from src.services.volume_yoy_alerts import register_watchlist_volume_yoy_alert
+
+                    _yoy_stats = register_watchlist_volume_yoy_alert()
+                    logger.info("[同比放量] 自选股早盘同比放量规则就绪: %s", _yoy_stats)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("[同比放量] 自选股规则初始化失败: %s", exc)
+
                 from src.services.alert_worker import AlertWorker
 
                 interval_minutes = max(1, getattr(config, 'agent_event_monitor_interval_minutes', 5))

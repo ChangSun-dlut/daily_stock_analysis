@@ -526,6 +526,21 @@ class AlertService:
             data_timestamp=data_timestamp,
         )
 
+    @staticmethod
+    def _realtime_cache_for(alert_type: str) -> Any:
+        """Pick the realtime cache backing a given realtime alert type.
+
+        ``volume_spike_rt`` reads volume-ratio samples; ``price_surge_rt`` reads
+        intraday price samples. Both are fed by the same 1-minute K-line refresh.
+        """
+        if alert_type == "price_surge_rt":
+            from src.services.realtime_price_cache import get_default_cache as _price_cache
+
+            return _price_cache()
+        from src.services.realtime_volume_cache import get_default_cache as _volume_cache
+
+        return _volume_cache()
+
     async def _evaluate_volume_spike_rt(
         self, rule: TechnicalIndicatorAlert
     ) -> Dict[str, Any]:
@@ -559,11 +574,20 @@ class AlertService:
                 quote = DataFetcherManager().get_realtime_quote(rule.stock_code)
             except Exception:
                 quote = None
+            # 用实时报价补一个价格采样点：1 分钟 K 线偶拉取失败时，
+            # 保证 price_surge_rt 每轮评估都至少有一个最新价可用。
+            if quote is not None and rule.alert_type == "price_surge_rt":
+                try:
+                    from src.services.realtime_price_cache import get_default_cache as _price_cache
+
+                    _price_cache().record(rule.stock_code, getattr(quote, "price", None))
+                except Exception:  # pragma: no cover - defensive
+                    pass
             return evaluate_realtime_indicator_alert(
                 rule.alert_type,
                 rule.stock_code,
                 params,
-                get_default_cache(),
+                self._realtime_cache_for(rule.alert_type),
                 quote=quote,
             )
 

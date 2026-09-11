@@ -110,6 +110,11 @@ class AlertWorker:
         self._trigger_fingerprints: Dict[str, float] = {}
         self._trigger_fingerprint_ttls: Dict[str, int] = {}
         self._analysis_visibility_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+        # 同比昨日同期放量：记录当日已推送过的最高档位，用于「档位递进」去重。
+        # key = f"{symbol}|{session_date}"，value = 档位序号（中=1/强=2/极强=3）。
+        self._volume_yoy_peak_grade: Dict[str, int] = {}
+        # 同比昨日同期放量：记录每只票最近一次真实评估的时间戳（节流用）。
+        self._volume_yoy_last_eval: Dict[str, float] = {}
 
     @staticmethod
     def _default_config_provider():
@@ -148,6 +153,9 @@ class AlertWorker:
 
         self._prune_fingerprints()
         runtime_rules = self._load_runtime_rules(config)
+        runtime_rules = self._filter_volume_yoy_rules(
+            runtime_rules, now_epoch=self.now_provider()
+        )
         stats["loaded"] = len(runtime_rules)
         if not runtime_rules:
             logger.info("[AlertWorker] No active alert rules loaded")
@@ -198,6 +206,11 @@ class AlertWorker:
             if record_status == "triggered":
                 stats["triggered"] += 1
                 if runtime_rule.source == "db":
+                    # 同比昨日同期放量：分钟级轮询下按「档位递进」推送，
+                    # 避免同一只票在 30 分钟窗口内被反复提醒同一档位。
+                    if self._suppress_volume_yoy_repeat(runtime_rule, result):
+                        stats["cooldown_suppressed"] += 1
+                        continue
                     cooldown_decision = self._check_db_cooldown(runtime_rule, trigger_id)
                     if cooldown_decision.suppressed:
                         stats["cooldown_suppressed"] += 1
@@ -737,10 +750,158 @@ class AlertWorker:
             self._trigger_fingerprints.pop(key, None)
             self._trigger_fingerprint_ttls.pop(key, None)
 
+    @staticmethod
+    def _realtime_push_enabled() -> bool:
+        """Whether alert cooling/dedup is bypassed so every trigger is pushed.
+
+        Controlled by ``ALERT_REALTIME_PUSH=true``. When enabled the worker
+        skips both the process-local fingerprint dedup and the persisted DB
+        cooldown, so the same rule can notify on every polling cycle.
+        """
+        try:
+            from src.config import get_config
+
+            return bool(getattr(get_config(), "alert_realtime_push", False))
+        except Exception:  # pragma: no cover - defensive
+            return False
+
     def _fingerprint_ttl(self, rule_key: str, *, ttl_seconds: Optional[int] = None) -> int:
+        if AlertWorker._realtime_push_enabled():
+            return 0
         if ttl_seconds is not None:
             return max(1, int(ttl_seconds))
         return self._trigger_fingerprint_ttls.get(rule_key, self.fingerprint_ttl_seconds)
+
+    # 同比昨日同期放量的档位顺序（与 alert_indicators 的分级文案保持一致）。
+    _VOLUME_YOY_GRADE_LEVELS = {"中": 1, "强": 2, "极强": 3}
+
+    @staticmethod
+    def _volume_yoy_grade_dedup_enabled() -> bool:
+        try:
+            from src.config import get_config
+
+            return bool(getattr(get_config(), "alert_volume_yoy_grade_dedup", True))
+        except Exception:  # pragma: no cover - defensive
+            return True
+
+    @staticmethod
+    def _local_session_date() -> str:
+        try:
+            from zoneinfo import ZoneInfo
+
+            return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+        except Exception:  # pragma: no cover - defensive
+            return datetime.now().strftime("%Y-%m-%d")
+
+    def _suppress_volume_yoy_repeat(
+        self, runtime_rule: "RuntimeAlertRule", result: Dict[str, Any]
+    ) -> bool:
+        """``volume_yoy_surge_rt`` 专用：按「当日档位递进」去重。
+
+        同一交易日同一只票，只在放量档位**提升**时再提醒一次（中 → 强 → 极强），
+        因此 30 分钟的分钟级轮询最多产生 3 条，而不是每轮一条。首次达到触发
+        阈值时必然放行，不会延迟首次提醒。
+
+        返回 ``True`` 表示本轮静默。
+        """
+        if not self._volume_yoy_grade_dedup_enabled():
+            return False
+        rule = getattr(runtime_rule, "rule", None)
+        if getattr(rule, "alert_type", None) != "volume_yoy_surge_rt":
+            return False
+
+        grade = str(result.get("grade") or "").strip()
+        level = self._VOLUME_YOY_GRADE_LEVELS.get(grade, 1)
+        symbol = str(
+            getattr(rule, "stock_code", None)
+            or getattr(runtime_rule, "effective_target", None)
+            or ""
+        )
+        key = f"{symbol}|{self._local_session_date()}"
+        # 跨交易日自然过期；顺带清理陈旧 key，避免长期运行内存无界增长。
+        if len(self._volume_yoy_peak_grade) > 4096:
+            today = self._local_session_date()
+            self._volume_yoy_peak_grade = {
+                k: v for k, v in self._volume_yoy_peak_grade.items() if k.endswith(today)
+            }
+        if level <= self._volume_yoy_peak_grade.get(key, 0):
+            return True
+        self._volume_yoy_peak_grade[key] = level
+        return False
+
+    # 同比昨日同期放量：同一只票的最小评估间隔（秒）。与既有实时量比缓存的
+    # 刷新节奏一致，避免 30 多只自选股在每分钟轮询里各拉一次实时行情、
+    # 把行情接口和 Web API 一起拖慢（实测单只 ~10s、整轮数分钟导致 API 超时）。
+    VOLUME_YOY_EVAL_INTERVAL_SECONDS = 300
+
+    def _filter_volume_yoy_rules(
+        self, runtime_rules: List["RuntimeAlertRule"], *, now_epoch: float
+    ) -> List["RuntimeAlertRule"]:
+        """按监控时段 + 节流间隔裁剪 ``volume_yoy_surge_rt`` 规则。
+
+        - 不在规则的 session 窗口（默认 09:00-10:00）内：直接不评估，零行情开销；
+        - 窗口内：同一只票默认每 300s 才真实评估一次，其余轮次跳过。
+
+        其它告警类型不受影响，原样返回。
+        """
+        candidates = [
+            item
+            for item in runtime_rules
+            if getattr(getattr(item, "rule", None), "alert_type", None)
+            == "volume_yoy_surge_rt"
+        ]
+        if not candidates:
+            return runtime_rules
+
+        try:
+            from src.services.alert_indicators import (
+                DEFAULT_VOLUME_YOY_SESSION_END,
+                DEFAULT_VOLUME_YOY_SESSION_START,
+                _hhmm_to_minutes,
+            )
+        except Exception:  # pragma: no cover - defensive
+            return runtime_rules
+
+        try:
+            from zoneinfo import ZoneInfo
+
+            local = datetime.fromtimestamp(now_epoch, ZoneInfo("Asia/Shanghai"))
+        except Exception:  # pragma: no cover - defensive
+            local = datetime.fromtimestamp(now_epoch)
+        minutes_of_day = local.hour * 60 + local.minute
+
+        allowed: set = set()
+        for item in candidates:
+            params = dict(getattr(item.rule, "indicator_params", {}) or {})
+            try:
+                start = _hhmm_to_minutes(
+                    str(params.get("session_start") or DEFAULT_VOLUME_YOY_SESSION_START)
+                )
+                end = _hhmm_to_minutes(
+                    str(params.get("session_end") or DEFAULT_VOLUME_YOY_SESSION_END)
+                )
+            except Exception:  # pragma: no cover - defensive
+                continue
+            if not (start <= minutes_of_day <= end):
+                continue
+            symbol = str(
+                getattr(item.rule, "stock_code", None)
+                or getattr(item, "effective_target", None)
+                or ""
+            )
+            last = self._volume_yoy_last_eval.get(symbol, 0.0)
+            if last and (now_epoch - last) < self.VOLUME_YOY_EVAL_INTERVAL_SECONDS:
+                continue
+            self._volume_yoy_last_eval[symbol] = now_epoch
+            allowed.add(id(item))
+
+        return [
+            item
+            for item in runtime_rules
+            if id(item) in allowed
+            or getattr(getattr(item, "rule", None), "alert_type", None)
+            != "volume_yoy_surge_rt"
+        ]
 
     @staticmethod
     def _db_cooldown_fallback_key(rule_key: str) -> str:
@@ -786,8 +947,13 @@ class AlertWorker:
         source_tag = ""
         rule = getattr(runtime_rule, "rule", None)
         if getattr(rule, "alert_type", None) in REALTIME_ALERT_TYPES:
-            rule_source = getattr(rule, "source", None)
-            source_tag = "横盘突破" if rule_source == "consolidation_breakout" else "自选股"
+            if getattr(rule, "alert_type", None) == "volume_yoy_surge_rt":
+                # 同比昨日同期放量（09:00-10:00 分钟级）单独打标签，便于与
+                # 现有的「量比急增」区分。
+                source_tag = "同比放量"
+            else:
+                rule_source = getattr(rule, "source", None)
+                source_tag = "横盘突破" if rule_source == "consolidation_breakout" else "自选股"
         title = f"{title_prefix} | {self._display_target(runtime_rule)}"
         if source_tag:
             title = f"{title_prefix} | {source_tag}｜{self._display_target(runtime_rule)}"
@@ -1078,6 +1244,8 @@ class AlertWorker:
 
     @staticmethod
     def _cooldown_seconds(runtime_rule: RuntimeAlertRule) -> int:
+        if AlertWorker._realtime_push_enabled():
+            return 0
         from src.services.alert_indicators import REALTIME_ALERT_TYPES
 
         policy = runtime_rule.cooldown_policy if isinstance(runtime_rule.cooldown_policy, dict) else None

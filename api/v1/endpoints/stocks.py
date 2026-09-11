@@ -368,7 +368,7 @@ def add_to_watchlist(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"加入自选失败: {e}", exc_info=True)
+        logger.error("加入自选失败: %s | issues=%s", e, getattr(e, "issues", None), exc_info=True)
         raise HTTPException(
             status_code=500,
             detail={"error": "internal_error", "message": f"加入自选失败: {str(e)}"},

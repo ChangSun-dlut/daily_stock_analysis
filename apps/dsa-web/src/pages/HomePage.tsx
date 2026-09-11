@@ -1639,6 +1639,48 @@ const HomePage: React.FC = () => {
     submitAnalysis,
   ]);
 
+  /** 单只股票分析：只提交这一只，避免为了看一只票而跑全量自选（省时省 token）。 */
+  const handleAnalyzeStock = useCallback(
+    async (code: string) => {
+      const normalized = normalizeStockCode(code);
+      if (!normalized) {
+        setBatchAnalyzeStatus({
+          variant: 'warning',
+          message: t('watchlist.noStocksAnalyze'),
+        });
+        return;
+      }
+
+      setIsBatchAnalyzingWatchlist(true);
+      setBatchAnalyzeStatus(null);
+      try {
+        const result = await analysisApi.analyzeAsync({
+          stockCodes: [normalized],
+          reportType: 'detailed',
+          notify,
+          skills: selectedAnalysisSkills,
+        });
+        const counts = countBatchAccepted(result);
+        setBatchAnalyzeStatus({
+          variant: counts.accepted > 0 ? 'success' : 'warning',
+          message:
+            counts.accepted > 0
+              ? t('watchlist.singleAnalyzeSubmitted', { code: normalized })
+              : t('watchlist.singleAnalyzeDuplicate', { code: normalized }),
+        });
+      } catch (error: unknown) {
+        setBatchAnalyzeStatus({
+          variant: 'danger',
+          message: getParsedApiError(error).message
+            || t('watchlist.singleAnalyzeFailed', { code: normalized }),
+        });
+      } finally {
+        setIsBatchAnalyzingWatchlist(false);
+      }
+    },
+    [notify, selectedAnalysisSkills, t],
+  );
+
   const sidebarContent = useMemo(
     () => (
       <div className="flex h-full min-h-0 flex-col gap-2 overflow-hidden">
@@ -1659,6 +1701,7 @@ const HomePage: React.FC = () => {
           onRemoveFromWatchlist={watchlistState.removeFromWatchlist}
           onRefreshWatchlist={handleRefreshWatchlist}
           onAnalyzeWatchlist={handleAnalyzeWatchlist}
+          onAnalyzeStock={handleAnalyzeStock}
           isBatchAnalyzing={isBatchAnalyzingWatchlist}
           batchStatus={batchAnalyzeStatus}
           todayItems={todayAnalysisItems}

@@ -1652,6 +1652,20 @@ class AlphaSiftService:
                         "[Screening] consolidation_breakout 分钟预警注册失败(不影响选股): %s",
                         exc,
                     )
+                # 选出的票同步纳入「早盘同比昨日同期放量」监控（09:00-10:00 分钟级）。
+                try:
+                    from src.services.volume_yoy_alerts import (
+                        register_volume_yoy_alerts_for_codes,
+                    )
+
+                    screen_result["volume_yoy_alert_registration"] = (
+                        register_volume_yoy_alerts_for_codes(_cb_codes)
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[Screening] 同比昨日放量预警注册失败(不影响选股): %s",
+                        exc,
+                    )
 
         return screen_result
 
