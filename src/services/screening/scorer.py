@@ -160,6 +160,24 @@ _DEFAULT_SCORING_PROFILE = {
     "consolidation_quality_long_bonus_250d": 22.0,
     "consolidation_quality_ma_bullish_bonus": 5.0,
     "consolidation_quality_price_above_ma20_bonus": 3.0,
+    # 换手率加分：横盘末期换手率抬升说明资金开始关注（区别于 activity 因子的"高换手惩罚"，
+    # 这里只在横盘突破语境下奖励 5% 以上的换手）。
+    "consolidation_quality_turnover_bonus_threshold": 5.0,
+    "consolidation_quality_turnover_bonus": 6.0,
+    # 连续缩量后突然倍量：缩量洗盘越充分，随后的倍量突破越可信。
+    "consolidation_quality_shrink_then_surge_min_days": 3.0,
+    "consolidation_quality_shrink_then_surge_ratio": 2.0,
+    "consolidation_quality_shrink_then_surge_bonus": 12.0,
+    # 极致缩量（地量）：当日量 <= 近5日均量的 0.6，且含当日已连续缩量 >= 2 天
+    #   → 洗盘末期 / 变盘前夜（例：瑞尔特 002790 2026-09-07 ramp=0.504、缩量 2 天，
+    #     次日倍量启动 +217%）
+    "consolidation_quality_dry_up_ratio_max": 0.6,
+    "consolidation_quality_dry_up_min_shrink_days": 2.0,
+    "consolidation_quality_dry_up_bonus": 10.0,
+    # 洗盘后启动：截至前一日连续缩量 >= 2 天，当日量能回到近5日均量 1.3 倍以上
+    "consolidation_quality_shrink_breakout_min_days": 2.0,
+    "consolidation_quality_shrink_breakout_ratio": 1.3,
+    "consolidation_quality_shrink_breakout_bonus": 8.0,
     # 破位惩罚（横盘蓄势相关）：大阴线 + 倍量柱 + 下穿多条均线
     "consolidation_quality_bear_candle_pct": -5.0,
     "consolidation_quality_bear_volume_ratio": 2.0,
@@ -236,6 +254,38 @@ _DEFAULT_SCORING_PROFILE = {
     "sector_limitup_ladder_active_capital_bonus": 6.0, # 板块涨幅 >1%（资金活跃）叠加
     "sector_limitup_ladder_active_capital_pct": 1.0,
 }
+
+
+def _merge_local_profile_into_alphasift() -> None:
+    """把本地默认 profile **整份并入** alphasift 的默认 profile（一次性）。
+
+    背景：``alphasift.scorer._scoring_profile(config)`` 先
+    ``profile = dict(_DEFAULT_SCORING_PROFILE)``，随后**只覆盖其中已存在的 key**。
+    本地 :func:`_compute_consolidation_quality_score` 消费的参数有两类来源：
+
+    1. 本地新增的（老鸭头、``consolidation_quality_long_bonus_250d``、
+       ``turnover_bonus``、``dry_up_*``、``shrink_breakout_*`` 等）；
+    2. 用户在 yaml ``scoring_profile`` 里配置的。
+
+    只要 alphasift 默认 profile 里没有该 key，它就会被**静默丢弃**，下游
+    ``profile["..."]`` 随即抛 KeyError —— 2026-09-10 选股整体 422 就是这么来的
+    （yaml 已配、本地已读，中间被 alphasift 吞掉）。
+
+    整份并入后，本地消费的 key 一定有兜底值，且不影响 yaml 同名配置的覆盖
+    （覆盖发生在本函数之后的 ``_scoring_profile`` 调用里）。
+    """
+    try:
+        import alphasift.scorer as _alphasift_scorer
+
+        external = getattr(_alphasift_scorer, "_DEFAULT_SCORING_PROFILE", None)
+        if isinstance(external, dict):
+            for key, value in _DEFAULT_SCORING_PROFILE.items():
+                external.setdefault(key, value)
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+
+_merge_local_profile_into_alphasift()
 
 
 def compute_screen_scores(df: pd.DataFrame, config: ScreeningConfig) -> pd.DataFrame:
@@ -817,6 +867,56 @@ def _compute_consolidation_quality_score(df: pd.DataFrame, profile: dict[str, fl
             & (ramp <= profile["consolidation_quality_coiled_spring_ramp_max"])
         )
         score += is_spring.astype(float) * profile["consolidation_quality_coiled_spring_bonus"]
+
+    # 8b. Turnover pick-up: a rising turnover rate near the end of a base means
+    # capital is starting to pay attention (reward, unlike the activity factor
+    # which penalizes excessively high turnover).
+    if "turnover_rate" in df.columns:
+        turnover = pd.to_numeric(df["turnover_rate"], errors="coerce").fillna(0)
+        hot = turnover >= profile["consolidation_quality_turnover_bonus_threshold"]
+        score += hot.astype(float) * profile["consolidation_quality_turnover_bonus"]
+
+    # 8c. Shrink-then-surge: consecutive shrinking volume (洗盘) followed by a
+    # sudden volume surge (倍量) is a higher-quality breakout signal.
+    if "coiled_spring_ramp_ratio" in df.columns:
+        ramp = pd.to_numeric(df["coiled_spring_ramp_ratio"], errors="coerce").fillna(1.0)
+        # 含当日的连续缩量天数：放量当日会归零，故只用于判断「缩量状态」本身。
+        shrink_days = (
+            pd.to_numeric(df["consecutive_volume_shrink_days"], errors="coerce").fillna(0)
+            if "consecutive_volume_shrink_days" in df.columns
+            else pd.Series(0.0, index=df.index)
+        )
+        # 截至前一日的连续缩量天数：放量启动日仍能拿到此前的洗盘天数。
+        prior_shrink = (
+            pd.to_numeric(df["prior_consecutive_shrink_days"], errors="coerce").fillna(0)
+            if "prior_consecutive_shrink_days" in df.columns
+            else shrink_days
+        )
+
+        # 8c. Shrink-then-surge: 连续缩量洗盘后突然倍量（沿用原语义，改用 prior 天数）。
+        is_surge = (
+            (prior_shrink >= profile["consolidation_quality_shrink_then_surge_min_days"])
+            & (ramp >= profile["consolidation_quality_shrink_then_surge_ratio"])
+        )
+        score += is_surge.astype(float) * profile["consolidation_quality_shrink_then_surge_bonus"]
+
+        # 8d. 极致缩量（地量）：量能萎缩到极致，往往是洗盘末期 / 变盘前夜。
+        #     典型：瑞尔特 002790 于 2026-09-07 当日量仅为近 5 日均量的 0.504，
+        #     且已连续 2 日缩量，次日即倍量启动（+217%）——此前无指标能识别。
+        is_dry_up = (
+            (ramp <= profile["consolidation_quality_dry_up_ratio_max"])
+            & (shrink_days >= profile["consolidation_quality_dry_up_min_shrink_days"])
+        )
+        score += is_dry_up.astype(float) * profile["consolidation_quality_dry_up_bonus"]
+
+        # 8e. 洗盘后启动：此前连续缩量，当日量能回到均量之上（倍量启动的前奏）。
+        #     8c 要求 ramp>=2.0 偏严（瑞尔特 09-08 仅 1.429），这里用更低的
+        #     1.3 阈值捕捉「刚启动」的第一根。
+        is_breakout = (
+            (prior_shrink >= profile["consolidation_quality_shrink_breakout_min_days"])
+            & (ramp >= profile["consolidation_quality_shrink_breakout_ratio"])
+        )
+        score += is_breakout.astype(float) * profile["consolidation_quality_shrink_breakout_bonus"]
 
     # 9. Longer-base bonus: stocks that have consolidated across 60/120 days.
     if "consolidation_days_60d" in df.columns:

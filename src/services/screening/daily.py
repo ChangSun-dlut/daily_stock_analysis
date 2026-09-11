@@ -1351,6 +1351,56 @@ def _coiled_spring_metrics(df: pd.DataFrame) -> tuple[float | None, float | None
     return contraction_pct, ramp_ratio
 
 
+def _consecutive_volume_shrink_days(df: pd.DataFrame, max_days: int = 10) -> int:
+    """统计截至最近一日，成交量连续低于前一日的天数（缩量洗盘天数）。
+
+    从最近一日往回数：当日量 < 前一日量即累加，一旦出现放量就停止。
+    配合 coiled_spring_ramp_ratio 使用，可识别"连续缩量洗盘后突然倍量"的突破。
+    """
+    if "volume" not in df.columns or len(df) < 3:
+        return 0
+    volume = pd.to_numeric(df["volume"], errors="coerce").dropna()
+    if len(volume) < 3:
+        return 0
+    count = 0
+    # 相邻对数量 = len(volume) - 1，所以上界要取 min(max_days + 1, len(volume))，
+    # 否则会少统计一天（off-by-one）。
+    for i in range(1, min(max_days + 1, len(volume))):
+        today_vol = float(volume.iloc[-i])
+        prev_vol = float(volume.iloc[-i - 1])
+        if prev_vol <= 0 or today_vol >= prev_vol:
+            break
+        count += 1
+    return count
+
+
+def _prior_consecutive_shrink_days(df: pd.DataFrame, max_days: int = 10) -> int:
+    """统计截至**前一交易日**（不含当日）的连续缩量天数（洗盘天数）。
+
+    为什么需要它：:func:`_consecutive_volume_shrink_days` 从当日开始往回数，
+    一旦当日是放量日就立刻归零 —— 于是「连续缩量洗盘后倍量启动」这种形态，
+    **恰恰在启动当天算出来是 0**，洗盘天数全部丢失（实测瑞尔特 002790
+    2026-09-08 倍量启动日算得 0，而此前 09-04/09-07 实际已连续缩量 2 天）。
+
+    本函数从倒数第二根 K 线（前一日）开始往回比较，因此在放量启动日仍能
+    正确拿到此前的洗盘天数。
+    """
+    if "volume" not in df.columns or len(df) < 4:
+        return 0
+    volume = pd.to_numeric(df["volume"], errors="coerce").dropna()
+    if len(volume) < 4:
+        return 0
+    count = 0
+    # 从 volume[-2]（前一日）起与前一根比较，故上界为 min(max_days + 2, len)。
+    for i in range(2, min(max_days + 2, len(volume))):
+        day_vol = float(volume.iloc[-i])
+        prev_vol = float(volume.iloc[-i - 1])
+        if prev_vol <= 0 or day_vol >= prev_vol:
+            break
+        count += 1
+    return count
+
+
 def _compute_shape_features(
     df: pd.DataFrame,
     *,
@@ -1428,6 +1478,8 @@ def _compute_shape_features(
         "consecutive_volume_spike_3d": _consecutive_volume_spike(df, 3),
         "coiled_spring_contraction_pct": _round_or_none(contraction_pct),
         "coiled_spring_ramp_ratio": _round_or_none(ramp_ratio),
+        "consecutive_volume_shrink_days": _consecutive_volume_shrink_days(df),
+        "prior_consecutive_shrink_days": _prior_consecutive_shrink_days(df),
         "max_drawdown_60d_pct": _round_or_none(_max_drawdown_pct(pd.to_numeric(df["close"], errors="coerce").dropna().tail(60))),
         "max_drawdown_120d_pct": _round_or_none(_max_drawdown_pct(pd.to_numeric(df["close"], errors="coerce").dropna().tail(120))),
         "max_drawdown_250d_pct": _round_or_none(_max_drawdown_pct(pd.to_numeric(df["close"], errors="coerce").dropna().tail(250))),

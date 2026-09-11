@@ -137,6 +137,21 @@ screening:
     consolidation_quality_coiled_spring_ramp_min: 1.15
     consolidation_quality_coiled_spring_ramp_max: 3.5
     consolidation_quality_coiled_spring_bonus: 20.0
+    consolidation_quality_turnover_bonus_threshold: 5.0
+    consolidation_quality_turnover_bonus: 6.0
+    consolidation_quality_shrink_then_surge_min_days: 3.0
+    consolidation_quality_shrink_then_surge_ratio: 2.0
+    consolidation_quality_shrink_then_surge_bonus: 12.0
+    # 极致缩量（地量）识别：当日量 <= 近5日均量的 0.6 且含当日已连续缩量 >= 2 天
+    #   → 洗盘末期 / 变盘前夜（例：瑞尔特 002790 2026-09-07 ramp=0.504、缩量2天，
+    #     次日倍量启动 +217%）
+    consolidation_quality_dry_up_ratio_max: 0.6
+    consolidation_quality_dry_up_min_shrink_days: 2.0
+    consolidation_quality_dry_up_bonus: 10.0
+    # 洗盘后启动：截至前一日连续缩量 >= 2 天，当日量能回到近5日均量 1.3 倍以上
+    consolidation_quality_shrink_breakout_min_days: 2.0
+    consolidation_quality_shrink_breakout_ratio: 1.3
+    consolidation_quality_shrink_breakout_bonus: 8.0
     consolidation_quality_surge_pullback_penalty_slope: 1.0
     consolidation_quality_long_bonus_60d: 11.0
     consolidation_quality_long_bonus_120d: 19.0
