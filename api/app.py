@@ -166,6 +166,7 @@ def _warn_if_open_cors_without_auth() -> None:
 from api.v1 import api_v1_router
 from api.middlewares.auth import add_auth_middleware
 from api.middlewares.error_handler import add_error_handlers
+from api.middlewares.ip_allowlist import add_ip_allowlist_middleware
 from api.v1.schemas.common import HealthResponse
 from src.auth import is_auth_enabled
 from src.data.stock_index_loader import find_existing_stock_index_path
@@ -389,6 +390,9 @@ def create_app(static_dir: Optional[Path] = None) -> FastAPI:
     )
 
     add_auth_middleware(app)
+    # IP 白名单（WEBUI_ALLOWED_IPS）：注册在 auth 之后 → 执行时更外层，
+    # 非白名单来源在做任何认证工作之前就被 403 拦掉。
+    add_ip_allowlist_middleware(app)
     
     # ============================================================
     # 注册路由
