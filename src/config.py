@@ -1057,6 +1057,13 @@ class Config:
     agent_event_monitor_enabled: bool = False  # Enable periodic event-driven alert checks in schedule mode
     agent_event_monitor_interval_minutes: int = 1  # Polling interval for event monitor background checks; 1 min keeps the 1-min kline volume-ratio feed fresh so short slope windows (e.g. 5 min) have enough samples
     agent_event_alert_rules_json: str = ""  # JSON array of serialized EventMonitor rules
+    # 实时推送：开启后跳过告警冷却与去重（进程内指纹、DB 冷却），每次触发都立即推送。
+    # 代价是盘中同一只票会被高频重复提醒（如 5 分钟一次）。
+    alert_realtime_push: bool = False
+    # 「同比昨日同期放量」(volume_yoy_surge_rt) 专用：即使上面的实时推送开启，也只在
+    # 同一交易日放**大档位提升**（中→强→极强）时再提醒，避免分钟级轮询把同一只票
+    # 在 09:00-10:00 窗口内刷屏。关闭后回到与其它告警一致的实时推送语义。
+    alert_volume_yoy_grade_dedup: bool = True
 
     # === 通知配置（可同时配置多个，全部推送）===
     
@@ -1148,6 +1155,10 @@ class Config:
 
     # 报告类型：simple(精简) 或 full(完整)
     report_type: str = "simple"
+    # 精简版决策仪表盘：只输出「顶部摘要 + 一张 6 列汇总表」，不展开个股详情。
+    # 解决详细版 md2img 渲染成几十页长图的问题（26 只股实测 37 页）。
+    # 用独立开关而非扩展 ReportType 枚举，避免 pipeline 传枚举时被降级。
+    report_concise_dashboard: bool = False
     report_language: str = "zh"
 
     # 仅分析结果摘要：true 时只推送汇总，不含个股详情（Issue #262）
@@ -2059,6 +2070,14 @@ class Config:
                 minimum=1,
             ),
             agent_event_alert_rules_json=os.getenv('AGENT_EVENT_ALERT_RULES_JSON', ''),
+            alert_realtime_push=parse_env_bool(
+                os.getenv('ALERT_REALTIME_PUSH'),
+                default=False,
+            ),
+            alert_volume_yoy_grade_dedup=parse_env_bool(
+                os.getenv('ALERT_VOLUME_YOY_GRADE_DEDUP'),
+                default=True,
+            ),
             wechat_webhook_url=os.getenv('WECHAT_WEBHOOK_URL'),
             feishu_webhook_url=os.getenv('FEISHU_WEBHOOK_URL'),
             feishu_webhook_secret=os.getenv('FEISHU_WEBHOOK_SECRET'),
@@ -2145,6 +2164,10 @@ class Config:
             ),
             single_stock_notify=os.getenv('SINGLE_STOCK_NOTIFY', 'false').lower() == 'true',
             report_type=cls._parse_report_type(os.getenv('REPORT_TYPE', 'simple')),
+            report_concise_dashboard=parse_env_bool(
+                os.getenv('REPORT_CONCISE_DASHBOARD'),
+                default=False,
+            ),
             report_language=cls._parse_report_language(report_language_raw),
             report_summary_only=os.getenv('REPORT_SUMMARY_ONLY', 'false').lower() == 'true',
             report_show_llm_model=report_show_llm_model,
@@ -2829,11 +2852,11 @@ class Config:
     def _parse_report_type(cls, value: str) -> str:
         """Parse REPORT_TYPE, fallback to simple for invalid values (supports brief)."""
         v = (value or 'simple').strip().lower()
-        if v in ('simple', 'full', 'brief'):
+        if v in ('simple', 'full', 'brief', 'concise'):
             return v
         import logging
         logging.getLogger(__name__).warning(
-            f"REPORT_TYPE '{value}' invalid, fallback to 'simple' (valid: simple/full/brief)"
+            f"REPORT_TYPE '{value}' invalid, fallback to 'simple' (valid: simple/full/brief/concise)"
         )
         return 'simple'
 
