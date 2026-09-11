@@ -65,7 +65,11 @@ export const historyApi = {
    * @param recordId 分析历史记录主键 ID（使用 ID 而非 query_id，因为 query_id 在批量分析时可能重复）
    */
   getDetail: async (recordId: number): Promise<AnalysisReport> => {
-    const response = await apiClient.get<Record<string, unknown>>(`/api/v1/history/${recordId}`);
+    // 大盘复盘报告 context_snapshot 较大（含 market_light_snapshots + payload），
+    // 后端组装耗时 30s+，给到 90s 避免默认 30s 超时（2026-09-08 实测 34.5s）。
+    const response = await apiClient.get<Record<string, unknown>>(`/api/v1/history/${recordId}`, {
+      timeout: 90000,
+    });
     return toCamelCase<AnalysisReport>(response.data);
   },
 

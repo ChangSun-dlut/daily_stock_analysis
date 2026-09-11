@@ -423,6 +423,102 @@ class NotificationService(
         self._history_compare_cache[cache_key] = history_by_code
         return {"history_by_code": history_by_code}
 
+    def generate_concise_dashboard(
+        self,
+        results: List[AnalysisResult],
+        report_date: Optional[str] = None,
+    ) -> str:
+        """精简版决策仪表盘：顶部摘要 + 一张 6 列汇总表，不展开个股详情。
+
+        与 :meth:`generate_dashboard_report` 的区别：详细版会把每只股票展开成
+        「舆情/核心结论/数据透视/作战计划」等多个小节，md2img 渲染时容易变成
+        几十页长图（实测 26 只股票 → 37 页）。精简版只保留：
+
+        1. 顶部摘要（分析只数、买卖分布、市场状态）
+        2. 汇总表格：股票 | 状态 | 评分 | 建议 | 利好催化 | 风险警报
+
+        利好/风险取自 ``result.dashboard['intelligence']`` 的
+        ``positive_catalysts`` / ``risk_alerts``（与详细版同源）。
+        """
+        if report_date is None:
+            report_date = datetime.now().strftime('%Y-%m-%d')
+
+        report_language = self._get_report_language(results)
+        labels = get_report_labels(report_language)
+
+        def _nlabel(en: str, zh: str, ko: str) -> str:
+            if report_language == "en":
+                return en
+            if report_language == "ko":
+                return ko
+            return zh
+
+        stock_label = _nlabel("Stock", "股票", "종목")
+        suggestion_label = _nlabel("Suggestion", "建议", "제안")
+        # 第二列是每只股的操作状态（买入/持有/观望/卖出），不是固定的"观望"。
+        action_label = _nlabel("Action", "操作", "조치")
+
+        if not results:
+            return f"# 🎯 {report_date} {labels['dashboard_title']}\n\n{labels['no_results']}"
+
+        sorted_results = sorted(results, key=lambda x: x.sentiment_score, reverse=True)
+        buy_count, sell_count, hold_count = self._count_display_decisions(results, report_language)
+
+        lines = [
+            f"# 🎯 {report_date} {labels['dashboard_title']}",
+            "",
+            f"> {labels['analyzed_prefix']} **{len(results)}** {labels['stock_unit']} | "
+            f"🟢{labels['buy_label']}:{buy_count} 🟡{labels['watch_label']}:{hold_count} "
+            f"🔴{labels['sell_label']}:{sell_count}",
+        ]
+        self._append_market_status_line(lines, results, report_language)
+
+        def _cell(value: Any, limit: int = 46) -> str:
+            """把列表/字符串压成表格单元格：去竖线、去换行、超长截断。"""
+            if isinstance(value, (list, tuple)):
+                items = [str(v).strip() for v in value if str(v).strip()]
+                text = "；".join(items)
+            else:
+                text = str(value or "").strip()
+            if not text:
+                return "-"
+            text = text.replace("|", "/").replace("\n", " ")
+            return text[:limit] + "…" if len(text) > limit else text
+
+        lines.extend([
+            "",
+            f"## 📊 {labels['summary_heading']}",
+            "",
+            f"| {stock_label} | {action_label} | {labels['score_label']} | "
+            f"{suggestion_label} | {labels['positive_catalysts_label']} | {labels['risk_alerts_label']} |",
+            "|---|---|---|---|---|---|",
+        ])
+
+        for r in sorted_results:
+            signal_text, signal_emoji, _ = self._get_signal_level(r)
+            display_name = self._get_display_name(r, report_language)
+            dashboard = getattr(r, "dashboard", None) or {}
+            intel = dashboard.get("intelligence", {}) or {}
+            trend = localize_trend_prediction(
+                getattr(r, "trend_prediction", None), report_language
+            )
+            lines.append(
+                f"| {display_name}({r.code}) | {signal_text} | {r.sentiment_score} | "
+                f"{signal_emoji} {trend} | {_cell(intel.get('positive_catalysts'))} | "
+                f"{_cell(intel.get('risk_alerts'))} |"
+            )
+
+        models = self._collect_models_used(results)
+        if models:
+            lines.append("")
+            lines.append(f"*{labels['analysis_model_label']}: {', '.join(models)}*")
+        lines.extend([
+            "",
+            "---",
+            f"*{labels['not_investment_advice']}*",
+        ])
+        return "\n".join(lines)
+
     def generate_aggregate_report(
         self,
         results: List[AnalysisResult],
@@ -430,6 +526,13 @@ class NotificationService(
         report_date: Optional[str] = None,
     ) -> str:
         """Generate the aggregate report content used by merge/save/push paths."""
+        # 精简版开关优先。注意：pipeline 传进来的是 ReportType 枚举，枚举里没有
+        # concise，靠 report_type 字符串判断会被降级，所以这里读独立开关。
+        if getattr(self._config, "report_concise_dashboard", False):
+            return self.generate_concise_dashboard(results, report_date=report_date)
+        raw_type = str(report_type or "").strip().lower()
+        if raw_type in {"concise", "concise_dashboard", "精简", "极简"}:
+            return self.generate_concise_dashboard(results, report_date=report_date)
         normalized_type = self._normalize_report_type(report_type)
         if normalized_type == ReportType.BRIEF:
             return self.generate_brief_report(results, report_date=report_date)
@@ -2714,6 +2817,10 @@ class NotificationService(
             )
 
         target_channels = self.get_channels_for_route(route_type)
+        # 把进程内 WEB 渠道排到最前：毫秒级且不受外部渠道（OpenClaw 120s 超时等）
+        # 阻塞拖累，保证首页通知中心不被同批其他渠道拖到全部超时。
+        if NotificationChannel.WEB in target_channels:
+            target_channels = [NotificationChannel.WEB] + [c for c in target_channels if c != NotificationChannel.WEB]
         if not target_channels:
             if context_success:
                 logger.info("已通过消息上下文渠道完成推送（路由后无其他通知渠道）")
