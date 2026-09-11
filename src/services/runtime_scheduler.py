@@ -74,6 +74,16 @@ def build_agent_event_monitor_background_tasks(
     if not getattr(config, "agent_event_monitor_enabled", False):
         return []
 
+    # 自选股「早盘同比昨日同期放量」分钟级预警：确保规则存在（幂等）。
+    # 放在这里（而非 main.py）是因为 WebUI/Scheduler 进程实际由本模块启动 worker。
+    try:
+        from src.services.volume_yoy_alerts import register_watchlist_volume_yoy_alert
+
+        yoy_stats = register_watchlist_volume_yoy_alert()
+        logger.info("[同比放量] 自选股早盘同比放量规则就绪: %s", yoy_stats)
+    except Exception as exc:  # pragma: no cover - never block scheduler startup
+        logger.warning("[同比放量] 自选股规则初始化失败: %s", exc)
+
     from src.services.alert_worker import AlertWorker
 
     interval_seconds = _agent_event_monitor_interval_seconds(config)
